@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SIPAG_VERSION="0.1.0"
+
+# Resolve the real location of this script (follow symlinks)
+_sipag_resolve() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd "$(dirname "$src")" && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  echo "$(cd "$(dirname "$src")" && pwd)"
+}
+SIPAG_BIN="$(_sipag_resolve)"
+SIPAG_ROOT="$(dirname "$SIPAG_BIN")"
+
+# Load libraries
+source "${SIPAG_ROOT}/lib/core/log.sh"
+source "${SIPAG_ROOT}/lib/core/config.sh"
+source "${SIPAG_ROOT}/lib/core/worker.sh"
+source "${SIPAG_ROOT}/lib/core/pool.sh"
+
+# Load source plugin (after config is loaded)
+_load_source_plugin() {
+  local plugin="${SIPAG_ROOT}/lib/sources/${SIPAG_SOURCE}.sh"
+  if [[ ! -f "$plugin" ]]; then
+    die "Unknown source plugin: ${SIPAG_SOURCE} (expected ${plugin})"
+  fi
+  source "$plugin"
+}
+
+# --- Commands ---
+
+cmd_init() {
+  local target_dir="${1:-.}"
+
+  if [[ -f "${target_dir}/.sipag" ]]; then
+    echo ".sipag already exists in ${target_dir}"
+    read -rp "Overwrite? [y/N] " answer
+    [[ "$answer" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
+  fi
+
+  echo "Setting up sipag config..."
+  echo ""
+
+  local repo="" base_branch="main" concurrency="2"
+  local label_ready="sipag" label_wip="sipag-wip" label_done="sipag-done"
+  local timeout="600" poll_interval="60" allowed_tools="" prompt_prefix=""
+
+  # Try to detect repo from git remote
+  local detected_repo
+  detected_repo=$(git -C "$target_dir" remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||;s|\.git$||' || true)
+
+  if [[ -n "$detected_repo" ]]; then
+    read -rp "GitHub repo [${detected_repo}]: " repo
+    repo="${repo:-$detected_repo}"
+  else
+    read -rp "GitHub repo (owner/repo): " repo
+  fi
+
+  if [[ -z "$repo" ]]; then
+    echo "Error: repo is required"
+    exit 1
+  fi
+
+  read -rp "Base branch [${base_branch}]: " input
+  base_branch="${input:-$base_branch}"
+
+  read -rp "Concurrency [${concurrency}]: " input
+  concurrency="${input:-$concurrency}"
+
+  read -rp "Ready label [${label_ready}]: " input
+  label_ready="${input:-$label_ready}"
+
+  read -rp "WIP label [${label_wip}]: " input
+  label_wip="${input:-$label_wip}"
+
+  read -rp "Done label [${label_done}]: " input
+  label_done="${input:-$label_done}"
+
+  read -rp "Timeout in seconds [${timeout}]: " input
+  timeout="${input:-$timeout}"
+
+  read -rp "Poll interval in seconds [${poll_interval}]: " input
+  poll_interval="${input:-$poll_interval}"
+
+  read -rp "Allowed tools (comma-separated, blank for all): " allowed_tools
+
+  read -rp "Prompt prefix (blank for none): " prompt_prefix
+
+  cat > "${target_dir}/.sipag" << CONF
+SIPAG_SOURCE=github
+SIPAG_REPO=${repo}
+SIPAG_BASE_BRANCH=${base_branch}
+SIPAG_CONCURRENCY=${concurrency}
+SIPAG_LABEL_READY=${label_ready}
+SIPAG_LABEL_WIP=${label_wip}
+SIPAG_LABEL_DONE=${label_done}
+SIPAG_TIMEOUT=${timeout}
+SIPAG_POLL_INTERVAL=${poll_interval}
+SIPAG_ALLOWED_TOOLS="${allowed_tools}"
+SIPAG_PROMPT_PREFIX="${prompt_prefix}"
+CONF
+
+  echo ""
+  echo "Config written to ${target_dir}/.sipag"
+  echo "Add .sipag.d/ to your .gitignore"
+}
+
+cmd_start() {
+  local project_dir="."
+  local foreground="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--foreground) foreground="true"; shift ;;
+      -d|--dir) project_dir="$2"; shift 2 ;;
+      *) die "Unknown option: $1" ;;
+    esac
+  done
+
+  project_dir="$(cd "$project_dir" && pwd)"
+
+  config_load "$project_dir"
+  _load_source_plugin
+
+  local run_dir
+  run_dir=$(config_ensure_run_dir "$project_dir")
+
+  pool_start "$project_dir" "$run_dir" "$foreground"
+}
+
+cmd_status() {
+  local project_dir="${1:-.}"
+  project_dir="$(cd "$project_dir" && pwd)"
+
+  config_load "$project_dir"
+
+  local run_dir
+  run_dir=$(config_get_run_dir "$project_dir")
+
+  if [[ ! -d "$run_dir" ]]; then
+    echo "sipag has not been started in this directory"
+    return 1
+  fi
+
+  # Launch TUI if stdout is a terminal and sipag-tui is available
+  if [[ -t 1 ]] && command -v sipag-tui &>/dev/null; then
+    exec sipag-tui "$project_dir"
+  fi
+
+  pool_status "$run_dir"
+}
+
+cmd_stop() {
+  local project_dir="${1:-.}"
+  project_dir="$(cd "$project_dir" && pwd)"
+
+  config_load "$project_dir"
+
+  local run_dir
+  run_dir=$(config_get_run_dir "$project_dir")
+
+  if [[ ! -d "$run_dir" ]]; then
+    echo "sipag has not been started in this directory"
+    return 1
+  fi
+
+  _load_source_plugin
+  pool_stop "$run_dir"
+}
+
+cmd_version() {
+  echo "sipag v${SIPAG_VERSION}"
+}
+
+cmd_help() {
+  cat << 'HELP'
+sipag — sleep while Claude writes your PRs
+
+Usage:
+  sipag init              Generate a .sipag config interactively
+  sipag start [-f]        Start polling for issues and spawning workers
+                          -f, --foreground   Run in foreground (don't daemonize)
+                          -d, --dir DIR      Project directory (default: .)
+  sipag status            Show which workers are active
+  sipag stop              Graceful shutdown
+  sipag version           Print version
+  sipag help              Show this help
+
+How it works:
+  1. Create GitHub issues with the 'sipag' label
+  2. Run 'sipag start' in your project directory
+  3. sipag picks up issues, runs Claude Code on each, and opens PRs
+  4. Wake up to PRs
+
+Config:
+  Place a .sipag file in your project root. Run 'sipag init' to generate one.
+HELP
+}
+
+# --- Main ---
+
+case "${1:-help}" in
+  init)    shift; cmd_init "$@" ;;
+  start)   shift; cmd_start "$@" ;;
+  status)  shift; cmd_status "$@" ;;
+  stop)    shift; cmd_stop "$@" ;;
+  version) cmd_version ;;
+  help|--help|-h) cmd_help ;;
+  *) echo "Unknown command: $1"; echo ""; cmd_help; exit 1 ;;
+esac

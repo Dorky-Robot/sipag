@@ -1,0 +1,20 @@
+# Runtime state and user config
+.sipag.d/
+.sipag
+
+# Rust build artifacts
+tui/target/
+
+# OS
+.DS_Store
+
+# Editors
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.*
