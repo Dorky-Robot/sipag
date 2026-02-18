@@ -107,7 +107,9 @@ EOF
     local key="${override%%=*}"
     local val="${override#*=}"
     if grep -q "^${key}=" "$config_file" 2>/dev/null; then
-      sed -i '' "s|^${key}=.*|${key}=${val}|" "$config_file"
+      local tmp
+      tmp=$(mktemp)
+      sed "s|^${key}=.*|${key}=${val}|" "$config_file" > "$tmp" && mv "$tmp" "$config_file"
     else
       echo "${key}=${val}" >>"$config_file"
     fi

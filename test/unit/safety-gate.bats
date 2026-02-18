@@ -163,6 +163,11 @@ get_reason() {
   [[ "$(get_decision)" == "allow" ]]
 }
 
+@test "allow: git push --force-with-lease" {
+  run_hook '{"tool_name":"Bash","tool_input":{"command":"git push --force-with-lease origin feature"}}'
+  [[ "$(get_decision)" == "allow" ]]
+}
+
 # --- Full tool routing ---
 
 @test "Read tool → allow" {

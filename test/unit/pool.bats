@@ -4,6 +4,14 @@
 load ../helpers/test-helpers
 load ../helpers/mock-commands
 
+# Helper: get a guaranteed-dead PID
+_dead_pid() {
+  bash -c 'exit 0' &
+  local pid=$!
+  wait "$pid" 2>/dev/null
+  echo "$pid"
+}
+
 setup() {
   setup_common
   source "${SIPAG_ROOT}/lib/core/log.sh"
@@ -16,6 +24,7 @@ setup() {
 }
 
 teardown() {
+  [[ -d "${RUN_DIR:-}" ]] || { teardown_common; return 0; }
   # Kill any background processes we spawned
   for pid_file in "${RUN_DIR}/workers/"*.pid; do
     [[ -f "$pid_file" ]] || continue
@@ -49,8 +58,9 @@ teardown() {
 }
 
 @test "_pool_active_count: dead workers not counted" {
-  # Use a PID that doesn't exist
-  echo "99999" > "${RUN_DIR}/workers/42.pid"
+  local dead
+  dead=$(_dead_pid)
+  echo "$dead" > "${RUN_DIR}/workers/42.pid"
 
   local count
   count=$(_pool_active_count "$RUN_DIR")
@@ -61,7 +71,10 @@ teardown() {
   sleep 300 &
   local live_pid=$!
   echo "$live_pid" > "${RUN_DIR}/workers/42.pid"
-  echo "99999" > "${RUN_DIR}/workers/43.pid"
+
+  local dead
+  dead=$(_dead_pid)
+  echo "$dead" > "${RUN_DIR}/workers/43.pid"
 
   local count
   count=$(_pool_active_count "$RUN_DIR")
@@ -86,13 +99,15 @@ teardown() {
 # --- _pool_reap_workers ---
 
 @test "_pool_reap_workers: cleans dead PIDs" {
-  echo "99999" > "${RUN_DIR}/workers/42.pid"
-  echo "42" > "${RUN_DIR}/workers/99999.task"
+  local dead
+  dead=$(_dead_pid)
+  echo "$dead" > "${RUN_DIR}/workers/42.pid"
+  echo "42" > "${RUN_DIR}/workers/${dead}.task"
 
   _pool_reap_workers "$RUN_DIR"
 
   [[ ! -f "${RUN_DIR}/workers/42.pid" ]]
-  [[ ! -f "${RUN_DIR}/workers/99999.task" ]]
+  [[ ! -f "${RUN_DIR}/workers/${dead}.task" ]]
 }
 
 @test "_pool_reap_workers: preserves live PIDs" {
@@ -117,8 +132,12 @@ teardown() {
 
   _pool_spawn_worker "42" "$PROJECT_DIR" "$RUN_DIR"
 
-  # Give subprocess a moment to start
-  sleep 0.2
+  # Poll for PID file (up to 2s) instead of fixed sleep
+  local tries=0
+  while [[ ! -f "${RUN_DIR}/workers/42.pid" ]] && [[ "$tries" -lt 20 ]]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
 
   [[ -f "${RUN_DIR}/workers/42.pid" ]]
   local worker_pid
@@ -147,9 +166,10 @@ teardown() {
 }
 
 @test "pool_start: handles stale PID file" {
-  echo "99999" > "${RUN_DIR}/sipag.pid"
+  local dead
+  dead=$(_dead_pid)
+  echo "$dead" > "${RUN_DIR}/sipag.pid"
 
-  # We need to make pool_start exit before entering the loop
   # Override _pool_loop to just exit
   _pool_loop() { return 0; }
 

@@ -17,7 +17,7 @@ create_mock() {
 
   {
     echo '#!/usr/bin/env bash'
-    echo "echo \"\$0 \$*\" >> \"${mock_log}\""
+    echo "echo \"${cmd} \$*\" >> \"${mock_log}\""
     if [[ -n "$mock_output" ]]; then
       echo "printf '%s\\n' \"${mock_output}\""
     fi
@@ -44,7 +44,7 @@ create_gh_mock() {
 MOCK_DIR="__MOCK_DIR__"
 MOCK_LOG="__MOCK_LOG__"
 
-echo "$0 $*" >> "$MOCK_LOG"
+echo "gh $*" >> "$MOCK_LOG"
 
 # Build a key from the first two args (e.g., "issue-list", "pr-create")
 KEY="${1:-unknown}-${2:-unknown}"
@@ -62,8 +62,11 @@ fi
 exit "$EXIT_CODE"
 GHMOCK
 
-  sed -i '' "s|__MOCK_DIR__|${mock_dir}|g" "$mock_bin"
-  sed -i '' "s|__MOCK_LOG__|${mock_log}|g" "$mock_bin"
+  local tmp
+  tmp=$(mktemp)
+  sed "s|__MOCK_DIR__|${mock_dir}|g" "$mock_bin" > "$tmp" && mv "$tmp" "$mock_bin"
+  sed "s|__MOCK_LOG__|${mock_log}|g" "$mock_bin" > "$tmp" && mv "$tmp" "$mock_bin"
+  rm -f "$tmp"
   chmod +x "$mock_bin"
 }
 
