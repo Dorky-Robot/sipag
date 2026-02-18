@@ -155,12 +155,18 @@ worker_run() {
   if [[ "$SIPAG_SAFETY_MODE" == "yolo" ]]; then
     # Yolo mode: skip all permissions (existing behavior)
     claude_args+=(--dangerously-skip-permissions)
-  elif [[ -n "$SIPAG_ALLOWED_TOOLS" ]]; then
-    # Hooks handle permissions; allowedTools is an additional constraint
-    IFS=',' read -ra tool_list <<<"$SIPAG_ALLOWED_TOOLS"
-    for tool in "${tool_list[@]}"; do
-      claude_args+=(--allowedTools "$tool")
-    done
+  else
+    # Hooks handle permissions; --dangerously-skip-permissions is required to
+    # prevent Claude Code from prompting interactively (which would hang an
+    # unattended worker). The PreToolUse hook provides the actual safety gate.
+    claude_args+=(--dangerously-skip-permissions)
+    if [[ -n "$SIPAG_ALLOWED_TOOLS" ]]; then
+      # allowedTools is an additional constraint on top of hooks
+      IFS=',' read -ra tool_list <<<"$SIPAG_ALLOWED_TOOLS"
+      for tool in "${tool_list[@]}"; do
+        claude_args+=(--allowedTools "$tool")
+      done
+    fi
   fi
 
   # Run Claude Code

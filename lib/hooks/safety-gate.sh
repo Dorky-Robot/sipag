@@ -57,8 +57,12 @@ is_within_project() {
   if [[ "$path" != /* ]]; then
     path="${PROJECT_DIR}/${path}"
   fi
+  # Normalize by resolving the parent directory to handle .. traversal.
+  # If the parent doesn't exist, deny conservatively.
+  local parent
+  parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd) || return 1
   local resolved
-  resolved=$(cd "$(dirname "$path")" 2>/dev/null && pwd)/$(basename "$path") 2>/dev/null || resolved="$path"
+  resolved="${parent}/$(basename "$path")"
   [[ "$resolved" == "${PROJECT_DIR}"* ]]
 }
 
@@ -90,7 +94,7 @@ BASH_ALLOW_PATTERNS=(
   '^(npm|yarn|pnpm) install'
   '^pip install'
   '^chmod [0-7]{3} '
-  '^node |^python |^ruby |^bash '
+  '^node |^python |^ruby '
 )
 
 check_bash_deny() {
