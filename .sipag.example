@@ -7,5 +7,6 @@ SIPAG_LABEL_WIP=sipag-wip
 SIPAG_LABEL_DONE=sipag-done
 SIPAG_TIMEOUT=600
 SIPAG_POLL_INTERVAL=60
+SIPAG_SAFETY_MODE=strict
 SIPAG_ALLOWED_TOOLS="Read,Glob,Grep,Edit,Write,Bash(git status),Bash(npm test)"
 SIPAG_PROMPT_PREFIX=""

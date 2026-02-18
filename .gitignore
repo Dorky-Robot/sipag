@@ -15,6 +15,9 @@ tui/target/
 .idea/
 .vscode/
 
+# Claude Code (user-specific permissions)
+.claude/settings.local.json
+
 # Environment
 .env
 .env.*

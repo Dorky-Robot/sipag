@@ -6,10 +6,10 @@ SIPAG_LOG_LEVEL="${SIPAG_LOG_LEVEL:-info}"
 _log_levels() {
   case "$1" in
     debug) echo 0 ;;
-    info)  echo 1 ;;
-    warn)  echo 2 ;;
+    info) echo 1 ;;
+    warn) echo 2 ;;
     error) echo 3 ;;
-    *)     echo 1 ;;
+    *) echo 1 ;;
   esac
 }
 
@@ -34,8 +34,8 @@ _log() {
 }
 
 log_debug() { _log debug "$@"; }
-log_info()  { _log info  "$@"; }
-log_warn()  { _log warn  "$@"; }
+log_info() { _log info "$@"; }
+log_warn() { _log warn "$@"; }
 log_error() { _log error "$@"; }
 
 die() {

@@ -21,7 +21,7 @@ pool_start() {
   fi
 
   if [[ "$foreground" == "true" ]]; then
-    echo $$ > "$pid_file"
+    echo $$ >"$pid_file"
     trap 'pool_cleanup "$run_dir"; exit 0' INT TERM
     log_info "sipag started in foreground (PID $$)"
     log_info "Polling ${SIPAG_REPO} for issues labeled '${SIPAG_LABEL_READY}' every ${SIPAG_POLL_INTERVAL}s"
@@ -39,7 +39,7 @@ _pool_daemonize() {
   local log_file="${run_dir}/logs/sipag.log"
 
   (
-    echo $$ > "$pid_file"
+    echo $$ >"$pid_file"
     trap 'pool_cleanup "$run_dir"; exit 0' INT TERM
 
     log_info "sipag started as daemon (PID $$)"
@@ -47,7 +47,7 @@ _pool_daemonize() {
     log_info "Concurrency: ${SIPAG_CONCURRENCY}"
 
     _pool_loop "$project_dir" "$run_dir"
-  ) >> "$log_file" 2>&1 &
+  ) >>"$log_file" 2>&1 &
 
   local daemon_pid=$!
   disown "$daemon_pid" 2>/dev/null
@@ -75,7 +75,7 @@ _pool_loop() {
     active_count=$(_pool_active_count "$run_dir")
 
     if [[ "$active_count" -lt "$SIPAG_CONCURRENCY" ]]; then
-      local slots=$(( SIPAG_CONCURRENCY - active_count ))
+      local slots=$((SIPAG_CONCURRENCY - active_count))
 
       # Fetch ready tasks
       local tasks
@@ -89,8 +89,8 @@ _pool_loop() {
           fi
 
           _pool_spawn_worker "$task_id" "$project_dir" "$run_dir"
-          slots=$(( slots - 1 ))
-        done <<< "$tasks"
+          slots=$((slots - 1))
+        done <<<"$tasks"
       fi
     fi
 
@@ -108,8 +108,8 @@ _pool_spawn_worker() {
   ) &
 
   local worker_pid=$!
-  echo "$worker_pid" > "${run_dir}/workers/${task_id}.pid"
-  echo "$task_id" > "${run_dir}/workers/${worker_pid}.task"
+  echo "$worker_pid" >"${run_dir}/workers/${task_id}.pid"
+  echo "$task_id" >"${run_dir}/workers/${worker_pid}.task"
 
   log_info "Spawned worker for task #${task_id} (PID ${worker_pid})"
 }
@@ -151,7 +151,7 @@ _pool_active_count() {
     worker_pid=$(cat "$pid_file")
 
     if kill -0 "$worker_pid" 2>/dev/null; then
-      count=$(( count + 1 ))
+      count=$((count + 1))
     fi
   done
 
@@ -191,7 +191,7 @@ pool_status() {
 
     if kill -0 "$worker_pid" 2>/dev/null; then
       echo "  Worker PID ${worker_pid} → task #${task_id} (running)"
-      active=$(( active + 1 ))
+      active=$((active + 1))
     else
       echo "  Worker PID ${worker_pid} → task #${task_id} (finished)"
     fi

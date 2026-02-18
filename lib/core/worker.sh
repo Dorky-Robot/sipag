@@ -30,9 +30,42 @@ _worker_write_state() {
   [[ -n "$error" ]] && err_json="$(printf '%s' "$error" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')"
   [[ "$err_json" != "null" ]] && err_json="\"$err_json\""
 
-  cat > "$state_file" << JSONEOF
+  cat >"$state_file" <<JSONEOF
 {"task_id":${task_id},"title":"${title}","url":"${url}","branch":"${branch}","status":"${status}","started_at":"${started_at}","finished_at":${finished_at},"pr_url":${pr_json},"error":${err_json}}
 JSONEOF
+}
+
+_worker_setup_hooks() {
+  local work_dir="$1"
+
+  if [[ "$SIPAG_SAFETY_MODE" == "yolo" ]]; then
+    return 0
+  fi
+
+  local claude_dir="${work_dir}/.claude"
+  mkdir -p "$claude_dir"
+
+  local hook_path="${SIPAG_ROOT}/lib/hooks/safety-gate.sh"
+
+  cat >"${claude_dir}/settings.local.json" <<HOOKJSON
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${hook_path}"
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOKJSON
+
+  log_debug "Safety hooks configured (mode: ${SIPAG_SAFETY_MODE})"
 }
 
 worker_run() {
@@ -89,7 +122,8 @@ worker_run() {
   fi
 
   # Create branch
-  local branch_name="sipag/${task_number}-$(echo "$task_title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | head -c 50)"
+  local branch_name
+  branch_name="sipag/${task_number}-$(echo "$task_title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//' | head -c 50)"
 
   git checkout -b "$branch_name" "origin/${SIPAG_BASE_BRANCH}" 2>/dev/null || {
     git checkout -b "$branch_name" "${SIPAG_BASE_BRANCH}" 2>/dev/null || {
@@ -103,6 +137,11 @@ worker_run() {
   log_info "Created branch: ${branch_name}"
   _worker_write_state "$run_dir" "$task_id" "running" "$task_title" "$task_url" "$branch_name"
 
+  # Set up safety hooks
+  export SIPAG_SAFETY_MODE
+  export SIPAG_ROOT
+  _worker_setup_hooks "$work_dir"
+
   # Build the prompt for Claude
   local prompt="${SIPAG_PROMPT_PREFIX:+${SIPAG_PROMPT_PREFIX}\n\n}"
   prompt+="GitHub Issue #${task_number}: ${task_title}"
@@ -113,13 +152,15 @@ worker_run() {
 
   # Build claude args
   local claude_args=(--print)
-  if [[ -n "$SIPAG_ALLOWED_TOOLS" ]]; then
-    IFS=',' read -ra tool_list <<< "$SIPAG_ALLOWED_TOOLS"
+  if [[ "$SIPAG_SAFETY_MODE" == "yolo" ]]; then
+    # Yolo mode: skip all permissions (existing behavior)
+    claude_args+=(--dangerously-skip-permissions)
+  elif [[ -n "$SIPAG_ALLOWED_TOOLS" ]]; then
+    # Hooks handle permissions; allowedTools is an additional constraint
+    IFS=',' read -ra tool_list <<<"$SIPAG_ALLOWED_TOOLS"
     for tool in "${tool_list[@]}"; do
       claude_args+=(--allowedTools "$tool")
     done
-  else
-    claude_args+=(--dangerously-skip-permissions)
   fi
 
   # Run Claude Code
@@ -132,7 +173,7 @@ worker_run() {
   timeout "${SIPAG_TIMEOUT}" claude \
     "${claude_args[@]}" \
     -p "$prompt" \
-    > "$log_file" 2>&1 || claude_exit=$?
+    >"$log_file" 2>&1 || claude_exit=$?
 
   if [[ "$claude_exit" -ne 0 ]]; then
     log_error "Claude Code exited with status ${claude_exit}"

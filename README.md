@@ -71,10 +71,29 @@ Place a `.sipag` file in your project root. Run `sipag init` to generate one int
 | `SIPAG_LABEL_DONE` | `sipag-done` | Label for completed issues |
 | `SIPAG_TIMEOUT` | `600` | Claude Code timeout (seconds) |
 | `SIPAG_POLL_INTERVAL` | `60` | Polling interval (seconds) |
+| `SIPAG_SAFETY_MODE` | `strict` | Safety mode: `strict`, `balanced`, or `yolo` |
 | `SIPAG_ALLOWED_TOOLS` | — | Comma-separated allowed tools for Claude |
 | `SIPAG_PROMPT_PREFIX` | — | Prepended to every Claude prompt |
 
 Add `.sipag.d/` to your `.gitignore` — that's where sipag stores runtime state.
+
+## Safety modes
+
+Workers run Claude Code unattended, so sipag uses a **PreToolUse hook** to auto-approve safe actions and auto-deny dangerous ones — no human prompts needed.
+
+Set `SIPAG_SAFETY_MODE` in your `.sipag` config:
+
+| Mode | Behavior |
+|---|---|
+| `strict` (default) | Rule-based only. Read-only tools are allowed. File writes must target the project directory. Bash commands are checked against allow/deny regex patterns. Anything ambiguous is denied. |
+| `balanced` | Same rules as strict, but ambiguous commands that don't match any pattern are sent to Claude Haiku for a quick safety evaluation. Requires `ANTHROPIC_API_KEY`. |
+| `yolo` | Uses `--dangerously-skip-permissions` — no restrictions at all. Use at your own risk. |
+
+**How it works:** sipag writes a `.claude/settings.local.json` in each worker's clone directory, configuring a PreToolUse hook that points to `lib/hooks/safety-gate.sh`. Every tool call Claude makes is intercepted and evaluated before execution.
+
+**Bash allow list** (partial): `git` (standard operations), `npm/yarn/pnpm test|run|install`, `cargo/go/python/pytest test|build`, read-only shell commands (`ls`, `cat`, `wc`, etc.), `mkdir`, `cp`, `mv`.
+
+**Bash deny list** (partial): `sudo`, `rm -rf /`, `git push --force`, `git reset --hard`, writing to `/etc/` or `~/`, `chmod 777`, network writes (`curl -X POST`, `wget`), `ssh`, `eval`, global installs.
 
 ## CLI
 

@@ -40,7 +40,10 @@ cmd_init() {
   if [[ -f "${target_dir}/.sipag" ]]; then
     echo ".sipag already exists in ${target_dir}"
     read -rp "Overwrite? [y/N] " answer
-    [[ "$answer" =~ ^[Yy] ]] || { echo "Aborted."; exit 0; }
+    [[ "$answer" =~ ^[Yy] ]] || {
+      echo "Aborted."
+      exit 0
+    }
   fi
 
   echo "Setting up sipag config..."
@@ -48,7 +51,7 @@ cmd_init() {
 
   local repo="" base_branch="main" concurrency="2"
   local label_ready="sipag" label_wip="sipag-wip" label_done="sipag-done"
-  local timeout="600" poll_interval="60" allowed_tools="" prompt_prefix=""
+  local timeout="600" poll_interval="60" safety_mode="strict" allowed_tools="" prompt_prefix=""
 
   # Try to detect repo from git remote
   local detected_repo
@@ -87,11 +90,19 @@ cmd_init() {
   read -rp "Poll interval in seconds [${poll_interval}]: " input
   poll_interval="${input:-$poll_interval}"
 
-  read -rp "Allowed tools (comma-separated, blank for all): " allowed_tools
+  echo ""
+  echo "Safety mode:"
+  echo "  strict   — rule-based only; deny anything ambiguous (safest)"
+  echo "  balanced — rules first, then LLM evaluates ambiguous commands"
+  echo "  yolo     — skip all permission checks (use with caution)"
+  read -rp "Safety mode [${safety_mode}]: " input
+  safety_mode="${input:-$safety_mode}"
+
+  read -rp "Allowed tools (comma-separated, blank for none): " allowed_tools
 
   read -rp "Prompt prefix (blank for none): " prompt_prefix
 
-  cat > "${target_dir}/.sipag" << CONF
+  cat >"${target_dir}/.sipag" <<CONF
 SIPAG_SOURCE=github
 SIPAG_REPO=${repo}
 SIPAG_BASE_BRANCH=${base_branch}
@@ -101,6 +112,7 @@ SIPAG_LABEL_WIP=${label_wip}
 SIPAG_LABEL_DONE=${label_done}
 SIPAG_TIMEOUT=${timeout}
 SIPAG_POLL_INTERVAL=${poll_interval}
+SIPAG_SAFETY_MODE=${safety_mode}
 SIPAG_ALLOWED_TOOLS="${allowed_tools}"
 SIPAG_PROMPT_PREFIX="${prompt_prefix}"
 CONF
@@ -116,8 +128,14 @@ cmd_start() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -f|--foreground) foreground="true"; shift ;;
-      -d|--dir) project_dir="$2"; shift 2 ;;
+      -f | --foreground)
+        foreground="true"
+        shift
+        ;;
+      -d | --dir)
+        project_dir="$2"
+        shift 2
+        ;;
       *) die "Unknown option: $1" ;;
     esac
   done
@@ -178,7 +196,7 @@ cmd_version() {
 }
 
 cmd_help() {
-  cat << 'HELP'
+  cat <<'HELP'
 sipag — sleep while Claude writes your PRs
 
 Usage:
@@ -197,6 +215,11 @@ How it works:
   3. sipag picks up issues, runs Claude Code on each, and opens PRs
   4. Wake up to PRs
 
+Safety modes (SIPAG_SAFETY_MODE):
+  strict     Rule-based allow/deny; ambiguous commands are denied (default)
+  balanced   Rules first, then Haiku LLM evaluates ambiguous commands
+  yolo       Skip all permission checks (--dangerously-skip-permissions)
+
 Config:
   Place a .sipag file in your project root. Run 'sipag init' to generate one.
 HELP
@@ -205,11 +228,28 @@ HELP
 # --- Main ---
 
 case "${1:-help}" in
-  init)    shift; cmd_init "$@" ;;
-  start)   shift; cmd_start "$@" ;;
-  status)  shift; cmd_status "$@" ;;
-  stop)    shift; cmd_stop "$@" ;;
+  init)
+    shift
+    cmd_init "$@"
+    ;;
+  start)
+    shift
+    cmd_start "$@"
+    ;;
+  status)
+    shift
+    cmd_status "$@"
+    ;;
+  stop)
+    shift
+    cmd_stop "$@"
+    ;;
   version) cmd_version ;;
-  help|--help|-h) cmd_help ;;
-  *) echo "Unknown command: $1"; echo ""; cmd_help; exit 1 ;;
+  help | --help | -h) cmd_help ;;
+  *)
+    echo "Unknown command: $1"
+    echo ""
+    cmd_help
+    exit 1
+    ;;
 esac
