@@ -63,7 +63,7 @@ is_within_project() {
   parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd) || return 1
   local resolved
   resolved="${parent}/$(basename "$path")"
-  [[ "$resolved" == "${PROJECT_DIR}"* ]]
+  [[ "$resolved" == "${PROJECT_DIR}/"* || "$resolved" == "${PROJECT_DIR}" ]]
 }
 
 # --- Bash command evaluation ---
@@ -71,7 +71,7 @@ is_within_project() {
 BASH_DENY_PATTERNS=(
   'sudo|doas'
   'rm -rf [/~]|rm -rf \*'
-  'git push.*--force|git push.*-f[ $]'
+  'git push.* --force( |$)|git push.* -f( |$)'
   'git reset --hard|git clean -f'
   '>(>)?\s*/etc/|>(>)?\s*/usr/|>(>)?\s*~/'
   'chmod 777|chown '
