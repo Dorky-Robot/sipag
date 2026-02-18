@@ -59,15 +59,31 @@ fmt-check:
 typos:
 	typos --format brief
 
-test:
-	@echo "Running safety gate hook tests..."
-	@echo '{"tool_name":"Read","tool_input":{"file_path":"/tmp/test.txt"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "allow"' > /dev/null
-	@echo '{"tool_name":"Bash","tool_input":{"command":"sudo rm -rf /"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "deny"' > /dev/null
-	@echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "allow"' > /dev/null
-	@echo '{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "deny"' > /dev/null
-	@echo '{"tool_name":"Bash","tool_input":{"command":"npm install lodash"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "allow"' > /dev/null
-	@echo '{"tool_name":"Bash","tool_input":{"command":"git push --force"}}' | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh | jq -e '.hookSpecificOutput.permissionDecision == "deny"' > /dev/null
-	@echo "All hook tests passed"
+check-bats:
+	@command -v bats >/dev/null 2>&1 || { echo "bats not found. Install: brew install bats-core"; exit 1; }
+
+test: check-bats
+	bats test/unit/ test/integration/
+
+test-unit: check-bats
+	bats test/unit/
+
+test-integ: check-bats
+	bats test/integration/
+
+test-parallel: check-bats
+	@NCPUS=$$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4); \
+	HALF=$$(( NCPUS / 2 )); [ "$$HALF" -lt 1 ] && HALF=1; \
+	echo "Running tests on $$NCPUS cores ($$HALF per suite)..."; \
+	ULOG=$$(mktemp); ILOG=$$(mktemp); \
+	bats --jobs "$$HALF" test/unit/ > "$$ULOG" 2>&1 & UPID=$$!; \
+	bats --jobs "$$HALF" test/integration/ > "$$ILOG" 2>&1 & IPID=$$!; \
+	URC=0; IRC=0; wait "$$UPID" || URC=$$?; wait "$$IPID" || IRC=$$?; \
+	[ "$$URC" -ne 0 ] && echo "Unit FAILED:" && cat "$$ULOG"; \
+	[ "$$IRC" -ne 0 ] && echo "Integration FAILED:" && cat "$$ILOG"; \
+	[ "$$URC" -eq 0 ] && echo "Unit tests passed"; \
+	[ "$$IRC" -eq 0 ] && echo "Integration tests passed"; \
+	rm -f "$$ULOG" "$$ILOG"; [ "$$URC" -eq 0 ] && [ "$$IRC" -eq 0 ]
 
 check: typos lint fmt-check
 
@@ -87,4 +103,4 @@ hooks:
 	@git config core.hooksPath .husky
 	@echo "Git hooks installed (using .husky/)"
 
-.PHONY: build-tui install install-bash uninstall lint fmt fmt-check typos test check dev review hooks
+.PHONY: build-tui install install-bash uninstall lint fmt fmt-check typos check-bats test test-unit test-integ test-parallel check dev review hooks

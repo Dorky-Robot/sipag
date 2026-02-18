@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
+# --- Inline smoke tests (fallback if bats not installed) ---
+
 echo "pre-push: validating safety gate hook..."
-# Run basic hook tests as a smoke test
 HOOK_TESTS_PASSED=1
 
 _test_hook() {
@@ -27,7 +28,7 @@ if [[ "$HOOK_TESTS_PASSED" -ne 1 ]]; then
   echo "pre-push: BLOCKED — safety gate hook tests failed."
   exit 1
 fi
-echo "pre-push: safety gate tests passed"
+echo "pre-push: safety gate smoke tests passed"
 
 # --- Determine what commits are being pushed ---
 
@@ -67,14 +68,88 @@ SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
 source "$SCRIPT_DIR/secrets-scan.sh"
 scan_secrets "pre-push" || exit 1
 
-# --- Parallel multi-agent review ---
+# --- Parallel BATS tests + review agents ---
 
 TMPDIR_REVIEW=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_REVIEW"' EXIT
 printf '%s\n' "$PUSH_DIFF" >"$TMPDIR_REVIEW/diff.txt"
 printf '%s\n' "$CHANGED_FILES" >"$TMPDIR_REVIEW/files.txt"
 
-"$SCRIPT_DIR/review.sh" --hook pre-push \
-  --diff-file "$TMPDIR_REVIEW/diff.txt" \
-  --files-file "$TMPDIR_REVIEW/files.txt"
-exit $?
+FINAL_RC=0
+
+if command -v bats &>/dev/null; then
+  NCPUS=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+  HALF=$(( NCPUS / 2 ))
+  [[ "$HALF" -lt 1 ]] && HALF=1
+
+  ULOG=$(mktemp)
+  ILOG=$(mktemp)
+
+  echo "pre-push: launching tests on ${NCPUS} cores (${HALF} per suite)..."
+
+  # Launch unit + integration tests in parallel
+  bats --jobs "$HALF" test/unit/ > "$ULOG" 2>&1 &
+  UPID=$!
+  bats --jobs "$HALF" test/integration/ > "$ILOG" 2>&1 &
+  IPID=$!
+
+  # Launch review agents in parallel
+  RLOG=$(mktemp)
+  "$SCRIPT_DIR/review.sh" --hook pre-push \
+    --diff-file "$TMPDIR_REVIEW/diff.txt" \
+    --files-file "$TMPDIR_REVIEW/files.txt" > "$RLOG" 2>&1 &
+  RPID=$!
+
+  # Wait for tests first (they're faster)
+  URC=0; IRC=0
+  wait "$UPID" || URC=$?
+  wait "$IPID" || IRC=$?
+
+  if [[ "$URC" -ne 0 ]]; then
+    echo "pre-push: Unit tests FAILED:"
+    cat "$ULOG"
+    FINAL_RC=1
+  else
+    echo "pre-push: unit tests passed"
+  fi
+
+  if [[ "$IRC" -ne 0 ]]; then
+    echo "pre-push: Integration tests FAILED:"
+    cat "$ILOG"
+    FINAL_RC=1
+  else
+    echo "pre-push: integration tests passed"
+  fi
+
+  rm -f "$ULOG" "$ILOG"
+
+  # If tests failed, kill review agents and bail
+  if [[ "$FINAL_RC" -ne 0 ]]; then
+    echo "pre-push: BLOCKED — tests failed. Killing review agents."
+    kill "$RPID" 2>/dev/null || true
+    wait "$RPID" 2>/dev/null || true
+    rm -f "$RLOG"
+    exit 1
+  fi
+
+  # Wait for review agents
+  RRC=0
+  wait "$RPID" || RRC=$?
+  cat "$RLOG"
+  rm -f "$RLOG"
+
+  if [[ "$RRC" -ne 0 ]]; then
+    echo "pre-push: BLOCKED — review agents found issues."
+    exit 1
+  fi
+else
+  echo "pre-push: bats not installed, skipping test suite (install: brew install bats-core)"
+
+  # Run review agents only
+  "$SCRIPT_DIR/review.sh" --hook pre-push \
+    --diff-file "$TMPDIR_REVIEW/diff.txt" \
+    --files-file "$TMPDIR_REVIEW/files.txt"
+  FINAL_RC=$?
+fi
+
+exit $FINAL_RC

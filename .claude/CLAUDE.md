@@ -72,14 +72,14 @@ lib/hooks/safety-gate.sh    PreToolUse hook (rule-based + optional LLM safety ga
 
 Hooks are the sole quality gate. Fast checks on commit, heavy checks on push.
 
-**Pre-commit** (~10s): gitleaks, typos, shellcheck, shfmt --diff
+**Pre-commit** (~10s): gitleaks, typos, shellcheck, shfmt --diff, smart-mapped BATS tests
 
-**Pre-push** (~2-3min): tests (hook script validation), gitleaks, 3-agent AI review (5min timeout per agent)
+**Pre-push** (~2-3min): smoke tests, gitleaks, parallel BATS tests (unit + integration), 3-agent AI review
 
 ### Tools required
 
 ```
-brew install gitleaks typos-cli shellcheck shfmt
+brew install gitleaks typos-cli shellcheck shfmt bats-core
 ```
 
 ### Security review
@@ -96,6 +96,70 @@ Shell-specific attack surfaces:
 - **Privilege escalation** — sudo, setuid, writing to system paths.
 - **Information disclosure** — API keys, tokens, or secrets in logs, error messages, or git history.
 - **Unsafe patterns** — Unquoted `$()`, `eval`, piping to `sh`, `rm -rf` with variable paths.
+
+## Testing
+
+Tests use [BATS](https://github.com/bats-core/bats-core) (Bash Automated Testing System). Install with `brew install bats-core`.
+
+### Test structure
+
+```
+test/
+  helpers/
+    test-helpers.bash    Shared setup/teardown, assertions, config helpers
+    mock-commands.bash   Mock creation for gh, git, claude, curl
+  unit/
+    safety-gate.bats     Security boundary (deny/allow patterns, path validation)
+    config.bats          Config loading, validation, fallbacks
+    log.bats             Log levels, filtering, output format
+    pool.bats            Worker pool counting, reaping, spawning
+    worker-state.bats    JSON state file writes, transitions
+  integration/
+    worker.bats          Full worker_run lifecycle with mocked externals
+    github-source.bats   GitHub source plugin with mocked gh
+    cli.bats             CLI entry point (help, version, error cases)
+    hooks.bats           End-to-end safety gate scenarios
+```
+
+### Running tests
+
+```bash
+make test              # all tests (unit + integration)
+make test-unit         # unit tests only
+make test-integ        # integration tests only
+make test-parallel     # parallel execution on multiple cores
+```
+
+### Writing new tests
+
+1. Every `.bats` file loads the shared helpers:
+   ```bash
+   load ../helpers/test-helpers
+   load ../helpers/mock-commands   # if mocking external commands
+   ```
+2. Use `setup_common` / `teardown_common` for temp dirs, PATH isolation, and config defaults.
+3. Use `create_mock "cmd" [exit_code] [output]` for simple mocks.
+4. Use `create_gh_mock` + `set_gh_response` for `gh` subcommand dispatch.
+5. Use `assert_json_field "$json" ".path" "expected"` for JSON assertions.
+
+### Smart test mapping (pre-commit)
+
+The pre-commit hook maps staged files to their corresponding test files:
+
+| Source file | Test file(s) |
+|---|---|
+| `lib/hooks/safety-gate.sh` | `test/unit/safety-gate.bats` |
+| `lib/core/config.sh` | `test/unit/config.bats` |
+| `lib/core/log.sh` | `test/unit/log.bats` |
+| `lib/core/pool.sh` | `test/unit/pool.bats` |
+| `lib/core/worker.sh` | `test/unit/worker-state.bats` + `test/integration/worker.bats` |
+| `lib/sources/github.sh` | `test/integration/github-source.bats` |
+| `bin/sipag` | `test/integration/cli.bats` |
+| `test/helpers/*.bash` | all tests |
+
+### Pre-push parallel execution
+
+Pre-push runs unit and integration tests in parallel on half-CPU each, alongside review agents. If tests fail, review agents are killed and push is blocked.
 
 ## Code review checklist
 

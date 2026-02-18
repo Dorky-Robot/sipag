@@ -60,5 +60,62 @@ if command -v shfmt &>/dev/null; then
   fi
 fi
 
+# --- Smart test mapping: run only tests affected by staged files ---
+
+if command -v bats &>/dev/null; then
+  map_to_test() {
+    case "$1" in
+      lib/hooks/safety-gate.sh)  echo "test/unit/safety-gate.bats" ;;
+      lib/core/config.sh)        echo "test/unit/config.bats" ;;
+      lib/core/log.sh)           echo "test/unit/log.bats" ;;
+      lib/core/pool.sh)          echo "test/unit/pool.bats" ;;
+      lib/core/worker.sh)        echo "test/unit/worker-state.bats test/integration/worker.bats" ;;
+      lib/sources/github.sh)     echo "test/integration/github-source.bats" ;;
+      bin/sipag)                 echo "test/integration/cli.bats" ;;
+      test/*.bats)               echo "$1" ;;
+      test/helpers/*.bash)       echo "test/unit/ test/integration/" ;;
+    esac
+  }
+
+  TO_RUN=""
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    mapped=$(map_to_test "$f")
+    if [[ -n "$mapped" ]]; then
+      TO_RUN="${TO_RUN} ${mapped}"
+    fi
+  done <<< "$STAGED_FILES"
+
+  # Deduplicate and collapse: if a directory is listed, drop individual files from it
+  if [[ -n "$TO_RUN" ]]; then
+    TO_RUN=$(echo "$TO_RUN" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    HAS_UNIT_DIR=false
+    HAS_INTEG_DIR=false
+    [[ "$TO_RUN" == *"test/unit/"* ]] && HAS_UNIT_DIR=true
+    [[ "$TO_RUN" == *"test/integration/"* ]] && HAS_INTEG_DIR=true
+
+    VALID=""
+    for item in $TO_RUN; do
+      [[ -e "$item" ]] || continue
+      # Skip individual files when their directory is already included
+      if $HAS_UNIT_DIR && [[ "$item" == test/unit/*.bats ]]; then
+        continue
+      fi
+      if $HAS_INTEG_DIR && [[ "$item" == test/integration/*.bats ]]; then
+        continue
+      fi
+      VALID="${VALID} ${item}"
+    done
+    if [[ -n "$VALID" ]]; then
+      echo "pre-commit: running mapped tests:${VALID}"
+      if ! bats --jobs 1 $VALID; then
+        echo ""
+        echo "pre-commit: BLOCKED — tests failed."
+        exit 1
+      fi
+    fi
+  fi
+fi
+
 echo "pre-commit: all checks passed"
 exit 0
