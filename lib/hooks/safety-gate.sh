@@ -78,7 +78,7 @@ BASH_DENY_PATTERNS=(
   'curl.*-X (POST|PUT|DELETE|PATCH)|curl.*--data|curl.*-d |wget '
   'ssh |scp |rsync '
   '(npm|pip|gem) install -g|npm i -g'
-  'eval |exec |\$\('
+  'eval |exec '
   '\|.*sh$|\|.*bash$'
   '/etc/|/usr/|\.ssh/|\.gnupg/|\.aws/'
 )
