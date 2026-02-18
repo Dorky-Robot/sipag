@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$HOOK" ] || [ -z "$DIFF_FILE" ] || [ -z "$FILES_FILE" ]; then
+if [[ -z "$HOOK" ]] || [[ -z "$DIFF_FILE" ]] || [[ -z "$FILES_FILE" ]]; then
   echo "review.sh: usage: --hook <name> --diff-file <path> --files-file <path>" >&2
   exit 2
 fi
@@ -62,7 +62,7 @@ fi
 DIFF=$(cat "$DIFF_FILE")
 CHANGED_FILES=$(cat "$FILES_FILE")
 
-if [ -z "$DIFF" ]; then
+if [[ -z "$DIFF" ]]; then
   echo "review.sh: empty diff, nothing to review"
   exit 0
 fi
@@ -132,8 +132,8 @@ PIDS=()
 for agent in "${AGENTS[@]}"; do
   outfile="$TMPDIR_AGENTS/$agent.out"
   errfile="$TMPDIR_AGENTS/$agent.err"
-  if [ -n "$TIMEOUT_CMD" ]; then
-    env "${ENV_UNSET[@]}" $TIMEOUT_CMD "${AGENT_TIMEOUT}s" claude -p --agent "$agent" --no-session-persistence <"$CONTEXT_FILE" >"$outfile" 2>"$errfile" &
+  if [[ -n "$TIMEOUT_CMD" ]]; then
+    env "${ENV_UNSET[@]}" "$TIMEOUT_CMD" "${AGENT_TIMEOUT}s" claude -p --agent "$agent" --no-session-persistence <"$CONTEXT_FILE" >"$outfile" 2>"$errfile" &
   else
     env "${ENV_UNSET[@]}" claude -p --agent "$agent" --no-session-persistence <"$CONTEXT_FILE" >"$outfile" 2>"$errfile" &
   fi
@@ -150,10 +150,10 @@ for i in "${!AGENTS[@]}"; do
   wait "$pid"
   rc=$?
   set -e
-  if [ "$rc" -eq 124 ]; then
+  if [[ "$rc" -eq 124 ]]; then
     echo "$HOOK: [$agent] timed out after ${AGENT_TIMEOUT}s — fail-closed"
     FAILED=1
-  elif [ "$rc" -ne 0 ]; then
+  elif [[ "$rc" -ne 0 ]]; then
     echo "$HOOK: [$agent] agent process failed (exit $rc)"
     echo "$HOOK: [$agent] stderr:"
     cat "$TMPDIR_AGENTS/$agent.err" 2>/dev/null || echo "(no stderr file)"
@@ -167,13 +167,13 @@ done
 
 for agent in "${AGENTS[@]}"; do
   outfile="$TMPDIR_AGENTS/$agent.out"
-  if [ ! -s "$outfile" ]; then
+  if [[ ! -s "$outfile" ]]; then
     echo "$HOOK: [$agent] produced no output — fail-closed"
     FAILED=1
   fi
 done
 
-if [ "$FAILED" -eq 1 ]; then
+if [[ "$FAILED" -eq 1 ]]; then
   echo ""
   echo "============================================"
   echo "  $HOOK: REVIEW FAILED (agent error)"
@@ -208,7 +208,7 @@ for agent in "${AGENTS[@]}"; do
   fi
 done
 
-if [ "$BLOCKED" -eq 1 ]; then
+if [[ "$BLOCKED" -eq 1 ]]; then
   echo ""
   echo "============================================"
   echo "  $HOOK: BLOCKED — review issues found"

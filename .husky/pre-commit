@@ -3,7 +3,7 @@
 # Get the staged diff (only what's being committed)
 DIFF=$(git diff --cached --diff-filter=ACMR)
 
-if [ -z "$DIFF" ]; then
+if [[ -z "$DIFF" ]]; then
   exit 0
 fi
 
@@ -12,6 +12,7 @@ STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACMR)
 # --- Security scan: block secrets before they reach any reviewer ---
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+# shellcheck source=../scripts/secrets-scan.sh
 source "$SCRIPT_DIR/secrets-scan.sh"
 scan_secrets "pre-commit" || exit 1
 
@@ -27,16 +28,17 @@ fi
 echo "pre-commit: running shellcheck..."
 # Find all staged .sh files
 SH_FILES=$(echo "$STAGED_FILES" | grep '\.sh$' || true)
-if [ -n "$SH_FILES" ]; then
+if [[ -n "$SH_FILES" ]]; then
   SHELLCHECK_FAILED=0
-  for f in $SH_FILES; do
-    if [ -f "$f" ]; then
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    if [[ -f "$f" ]]; then
       if ! shellcheck -x --severity=warning "$f"; then
         SHELLCHECK_FAILED=1
       fi
     fi
-  done
-  if [ "$SHELLCHECK_FAILED" -ne 0 ]; then
+  done <<<"$SH_FILES"
+  if [[ "$SHELLCHECK_FAILED" -ne 0 ]]; then
     echo ""
     echo "pre-commit: BLOCKED — shellcheck found issues. Fix them and try again."
     exit 1
@@ -44,12 +46,17 @@ if [ -n "$SH_FILES" ]; then
 fi
 
 echo "pre-commit: checking formatting..."
-SH_ALL=$(find bin/ lib/ scripts/ -name '*.sh' -o -name 'sipag' 2>/dev/null | head -50)
-if [ -n "$SH_ALL" ] && command -v shfmt &>/dev/null; then
-  if ! shfmt -d -i 2 -ci $SH_ALL 2>/dev/null; then
-    echo ""
-    echo "pre-commit: BLOCKED — formatting issues found. Run 'shfmt -w -i 2 -ci' to fix."
-    exit 1
+if command -v shfmt &>/dev/null; then
+  SH_ALL=()
+  while IFS= read -r f; do
+    [[ -n "$f" ]] && SH_ALL+=("$f")
+  done < <(find bin/ lib/ scripts/ -name '*.sh' -o -name 'sipag' 2>/dev/null | head -50)
+  if [[ "${#SH_ALL[@]}" -gt 0 ]]; then
+    if ! shfmt -d -i 2 -ci "${SH_ALL[@]}" 2>/dev/null; then
+      echo ""
+      echo "pre-commit: BLOCKED — formatting issues found. Run 'shfmt -w -i 2 -ci' to fix."
+      exit 1
+    fi
   fi
 fi
 

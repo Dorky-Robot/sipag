@@ -8,7 +8,7 @@ _test_hook() {
   local desc="$1" input="$2" expected="$3"
   local result
   result=$(echo "$input" | SIPAG_SAFETY_MODE=strict CLAUDE_PROJECT_DIR=/tmp/project bash lib/hooks/safety-gate.sh 2>/dev/null | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null)
-  if [ "$result" != "$expected" ]; then
+  if [[ "$result" != "$expected" ]]; then
     echo "  FAIL: $desc (expected $expected, got $result)"
     HOOK_TESTS_PASSED=0
   fi
@@ -23,7 +23,7 @@ _test_hook "Git status allowed" \
 _test_hook "Write outside project denied" \
   '{"tool_name":"Write","tool_input":{"file_path":"/etc/passwd"}}' "deny"
 
-if [ "$HOOK_TESTS_PASSED" -ne 1 ]; then
+if [[ "$HOOK_TESTS_PASSED" -ne 1 ]]; then
   echo "pre-push: BLOCKED — safety gate hook tests failed."
   exit 1
 fi
@@ -37,15 +37,15 @@ PUSH_DIFF=""
 CHANGED_FILES=""
 
 while read -r local_ref local_sha remote_ref remote_sha; do
-  if [ "$local_sha" = "$ZERO" ]; then
+  if [[ "$local_sha" = "$ZERO" ]]; then
     # Deleting a branch, nothing to review
     continue
   fi
 
-  if [ "$remote_sha" = "$ZERO" ]; then
+  if [[ "$remote_sha" = "$ZERO" ]]; then
     # New branch — diff against where it diverged from main
     MERGE_BASE=$(git merge-base main "$local_sha" 2>/dev/null || echo "")
-    if [ -n "$MERGE_BASE" ]; then
+    if [[ -n "$MERGE_BASE" ]]; then
       PUSH_DIFF+=$'\n'$(git diff "$MERGE_BASE".."$local_sha")
       CHANGED_FILES+=$'\n'$(git diff --name-only "$MERGE_BASE".."$local_sha")
     fi
@@ -55,7 +55,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 done
 
-if [ -z "$PUSH_DIFF" ]; then
+if [[ -z "$PUSH_DIFF" ]]; then
   echo "pre-push: no diff to review"
   exit 0
 fi
@@ -63,6 +63,7 @@ fi
 # --- Security scan: block secrets before they leave the machine ---
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/../scripts" && pwd)"
+# shellcheck source=../scripts/secrets-scan.sh
 source "$SCRIPT_DIR/secrets-scan.sh"
 scan_secrets "pre-push" || exit 1
 
@@ -70,8 +71,8 @@ scan_secrets "pre-push" || exit 1
 
 TMPDIR_REVIEW=$(mktemp -d)
 trap 'rm -rf "$TMPDIR_REVIEW"' EXIT
-printf '%s\n' "$PUSH_DIFF" > "$TMPDIR_REVIEW/diff.txt"
-printf '%s\n' "$CHANGED_FILES" > "$TMPDIR_REVIEW/files.txt"
+printf '%s\n' "$PUSH_DIFF" >"$TMPDIR_REVIEW/diff.txt"
+printf '%s\n' "$CHANGED_FILES" >"$TMPDIR_REVIEW/files.txt"
 
 "$SCRIPT_DIR/review.sh" --hook pre-push \
   --diff-file "$TMPDIR_REVIEW/diff.txt" \
