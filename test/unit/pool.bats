@@ -18,9 +18,16 @@ setup() {
   source "${SIPAG_ROOT}/lib/core/config.sh"
   source "${SIPAG_ROOT}/lib/core/worker.sh"
   source "${SIPAG_ROOT}/lib/core/pool.sh"
+  source "${SIPAG_ROOT}/lib/core/project.sh"
 
-  export RUN_DIR="${TEST_TMPDIR}/run"
+  # Use a project dir under SIPAG_HOME for multi-project tests
+  export RUN_DIR="${SIPAG_HOME}/projects/test-app"
   mkdir -p "${RUN_DIR}/workers" "${RUN_DIR}/logs"
+
+  # Also create the config so config_list_projects finds it
+  create_project_config "test-app"
+
+  mkdir -p "${SIPAG_HOME}/logs"
 }
 
 teardown() {
@@ -83,7 +90,7 @@ teardown() {
   kill "$live_pid" 2>/dev/null
 }
 
-@test "_pool_active_count: ignores non-numeric pid files" {
+@test "_pool_active_count: ignores non-alphanumeric pid files" {
   echo "content" > "${RUN_DIR}/workers/something.pid"
   sleep 300 &
   local pid=$!
@@ -130,7 +137,7 @@ teardown() {
   # Mock worker_run to just sleep
   worker_run() { sleep 300; }
 
-  _pool_spawn_worker "42" "$PROJECT_DIR" "$RUN_DIR"
+  _pool_spawn_worker "42" "$RUN_DIR"
 
   # Poll for PID file (up to 2s) instead of fixed sleep
   local tries=0
@@ -156,9 +163,9 @@ teardown() {
 @test "pool_start: detects already-running instance" {
   sleep 300 &
   local pid=$!
-  echo "$pid" > "${RUN_DIR}/sipag.pid"
+  echo "$pid" > "${SIPAG_HOME}/sipag.pid"
 
-  run pool_start "$PROJECT_DIR" "$RUN_DIR" "true"
+  run pool_start "$SIPAG_HOME" "true"
   [[ "$status" -ne 0 ]]
   [[ "$output" == *"already running"* ]]
 
@@ -168,15 +175,15 @@ teardown() {
 @test "pool_start: handles stale PID file" {
   local dead
   dead=$(_dead_pid)
-  echo "$dead" > "${RUN_DIR}/sipag.pid"
+  echo "$dead" > "${SIPAG_HOME}/sipag.pid"
 
   # Override _pool_loop to just exit
   _pool_loop() { return 0; }
 
-  pool_start "$PROJECT_DIR" "$RUN_DIR" "true"
+  pool_start "$SIPAG_HOME" "true"
 
   # Stale PID was removed and new one written
-  [[ -f "${RUN_DIR}/sipag.pid" ]]
+  [[ -f "${SIPAG_HOME}/sipag.pid" ]]
 }
 
 # --- pool_stop ---
@@ -184,19 +191,16 @@ teardown() {
 @test "pool_stop: kills workers and removes PID file" {
   sleep 300 &
   local main_pid=$!
-  echo "$main_pid" > "${RUN_DIR}/sipag.pid"
+  echo "$main_pid" > "${SIPAG_HOME}/sipag.pid"
 
   sleep 300 &
   local worker_pid=$!
   echo "$worker_pid" > "${RUN_DIR}/workers/42.pid"
   echo "42" > "${RUN_DIR}/workers/${worker_pid}.task"
 
-  # Mock source plugin functions needed by pool_stop
-  source_fail_task() { return 0; }
+  pool_stop "$SIPAG_HOME"
 
-  pool_stop "$RUN_DIR"
-
-  [[ ! -f "${RUN_DIR}/sipag.pid" ]]
+  [[ ! -f "${SIPAG_HOME}/sipag.pid" ]]
   [[ ! -f "${RUN_DIR}/workers/42.pid" ]]
 
   # Workers should be dead
@@ -204,7 +208,7 @@ teardown() {
 }
 
 @test "pool_stop: not running → exit 1" {
-  run pool_stop "$RUN_DIR"
+  run pool_stop "$SIPAG_HOME"
   [[ "$status" -ne 0 ]]
 }
 
@@ -215,14 +219,34 @@ teardown() {
   local pid=$!
   echo "$pid" > "${RUN_DIR}/workers/42.pid"
   echo "42" > "${RUN_DIR}/workers/${pid}.task"
-  echo "$$" > "${RUN_DIR}/sipag.pid"
+  echo "$$" > "${SIPAG_HOME}/sipag.pid"
 
-  pool_cleanup "$RUN_DIR"
+  pool_cleanup "$SIPAG_HOME"
 
-  [[ ! -f "${RUN_DIR}/sipag.pid" ]]
+  [[ ! -f "${SIPAG_HOME}/sipag.pid" ]]
   local remaining
   remaining=$(ls "${RUN_DIR}/workers/"*.pid 2>/dev/null | wc -l | tr -d ' ')
   [[ "$remaining" -eq 0 ]]
 
   kill "$pid" 2>/dev/null || true
+}
+
+# --- pool_status ---
+
+@test "pool_status: shows daemon status" {
+  sleep 300 &
+  local pid=$!
+  echo "$pid" > "${SIPAG_HOME}/sipag.pid"
+
+  run pool_status "$SIPAG_HOME"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == *"running"* ]]
+  [[ "$output" == *"PID"* ]]
+
+  kill "$pid" 2>/dev/null
+}
+
+@test "pool_status: not running → exit 1" {
+  run pool_status "$SIPAG_HOME"
+  [[ "$status" -ne 0 ]]
 }

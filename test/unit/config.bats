@@ -14,6 +14,8 @@ teardown() {
   teardown_common
 }
 
+# --- Legacy config_load ---
+
 @test "config_load: valid config loads all variables" {
   create_test_config "$PROJECT_DIR" "SIPAG_REPO=myorg/myrepo" "SIPAG_CONCURRENCY=4"
   config_load "$PROJECT_DIR"
@@ -29,13 +31,13 @@ teardown() {
   [[ "$status" -ne 0 ]]
 }
 
-@test "config_load: missing SIPAG_REPO → exit 1" {
+@test "config_load: missing SIPAG_REPO still loads (repo not required for all sources)" {
   cat > "${PROJECT_DIR}/.sipag" <<'EOF'
-SIPAG_SOURCE=github
+SIPAG_SOURCE=adhoc
 SIPAG_REPO=
 EOF
-  run config_load "$PROJECT_DIR"
-  [[ "$status" -ne 0 ]]
+  config_load "$PROJECT_DIR"
+  [[ "$SIPAG_SOURCE" == "adhoc" ]]
 }
 
 @test "config_load: invalid safety mode → fallback to strict + warning" {
@@ -77,6 +79,8 @@ EOF
   [[ "$SIPAG_LABEL_DONE" == "complete" ]]
 }
 
+# --- Legacy run dir helpers ---
+
 @test "config_get_run_dir: returns correct path format" {
   local run_dir
   run_dir=$(config_get_run_dir "$PROJECT_DIR")
@@ -100,4 +104,109 @@ EOF
   local run_dir
   run_dir=$(config_ensure_run_dir "$PROJECT_DIR")
   [[ "$run_dir" == "${PROJECT_DIR}/.sipag.d" ]]
+}
+
+# --- New: config_get_home ---
+
+@test "config_get_home: respects SIPAG_HOME env var" {
+  export SIPAG_HOME="/tmp/test-sipag-home"
+  local home
+  home=$(config_get_home)
+  [[ "$home" == "/tmp/test-sipag-home" ]]
+}
+
+@test "config_get_home: defaults to ~/.sipag" {
+  unset SIPAG_HOME
+  local home
+  home=$(config_get_home)
+  [[ "$home" == "${HOME}/.sipag" ]]
+}
+
+# --- New: config_get_project_dir ---
+
+@test "config_get_project_dir: returns correct path" {
+  local dir
+  dir=$(config_get_project_dir "my-app")
+  [[ "$dir" == "${SIPAG_HOME}/projects/my-app" ]]
+}
+
+# --- New: config_ensure_project_dir ---
+
+@test "config_ensure_project_dir: creates workers and logs subdirs" {
+  local dir
+  dir=$(config_ensure_project_dir "my-app")
+  [[ -d "${dir}/workers" ]]
+  [[ -d "${dir}/logs" ]]
+}
+
+# --- New: config_list_projects ---
+
+@test "config_list_projects: returns nothing when no projects" {
+  local result
+  result=$(config_list_projects)
+  [[ -z "$result" ]]
+}
+
+@test "config_list_projects: lists projects with config files" {
+  create_project_config "app-one" "SIPAG_REPO=org/app-one"
+  create_project_config "app-two" "SIPAG_REPO=org/app-two"
+
+  local result
+  result=$(config_list_projects)
+  [[ "$result" == *"app-one"* ]]
+  [[ "$result" == *"app-two"* ]]
+}
+
+@test "config_list_projects: skips dirs without config" {
+  mkdir -p "${SIPAG_HOME}/projects/broken"
+  create_project_config "valid" "SIPAG_REPO=org/valid"
+
+  local result
+  result=$(config_list_projects)
+  [[ "$result" == *"valid"* ]]
+  [[ "$result" != *"broken"* ]]
+}
+
+# --- New: config_load_project ---
+
+@test "config_load_project: loads project config vars" {
+  create_project_config "my-app" "SIPAG_REPO=myorg/my-app" "SIPAG_CONCURRENCY=4"
+  config_load_project "my-app"
+
+  [[ "$SIPAG_REPO" == "myorg/my-app" ]]
+  [[ "$SIPAG_CONCURRENCY" == "4" ]]
+}
+
+@test "config_load_project: missing project → exit 1" {
+  run config_load_project "nonexistent"
+  [[ "$status" -ne 0 ]]
+}
+
+# --- New: config_save_project ---
+
+@test "config_save_project: writes config file" {
+  SIPAG_SOURCE="github"
+  SIPAG_REPO="org/repo"
+  config_save_project "my-app"
+
+  local config_file="${SIPAG_HOME}/projects/my-app/config"
+  [[ -f "$config_file" ]]
+  grep -q "SIPAG_REPO=org/repo" "$config_file"
+  grep -q "SIPAG_SOURCE=github" "$config_file"
+}
+
+# --- New: clone URL derivation ---
+
+@test "_config_validate: derives clone URL from repo" {
+  SIPAG_REPO="myorg/myrepo"
+  SIPAG_CLONE_URL=""
+  _config_validate
+  [[ "$SIPAG_CLONE_URL" == "https://github.com/myorg/myrepo.git" ]]
+}
+
+@test "_config_validate: explicit clone URL preserved" {
+  SIPAG_REPO="myorg/myrepo"
+  SIPAG_CLONE_URL="git@github.com:myorg/myrepo.git"
+  _config_validate
+  [[ "$SIPAG_CLONE_URL" == "git@github.com:myorg/myrepo.git" ]]
 }

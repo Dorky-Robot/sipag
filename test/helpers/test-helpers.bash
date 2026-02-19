@@ -15,6 +15,10 @@ setup_common() {
   # Set SIPAG_ROOT to the real project root
   export SIPAG_ROOT="$SIPAG_TEST_ROOT"
 
+  # Set SIPAG_HOME to a temp dir (isolate from real ~/.sipag)
+  export SIPAG_HOME="${TEST_TMPDIR}/sipag-home"
+  mkdir -p "$SIPAG_HOME"
+
   # PATH isolation: prepend temp bin so mocks shadow real commands
   export ORIGINAL_PATH="$PATH"
   mkdir -p "${TEST_TMPDIR}/bin"
@@ -25,8 +29,10 @@ setup_common() {
   export SIPAG_SAFETY_MODE="strict"
   export SIPAG_SOURCE="github"
   export SIPAG_REPO="test-owner/test-repo"
+  export SIPAG_CLONE_URL=""
   export SIPAG_BASE_BRANCH="main"
   export SIPAG_CONCURRENCY="2"
+  export SIPAG_MAX_WORKERS="8"
   export SIPAG_LABEL_READY="sipag"
   export SIPAG_LABEL_WIP="sipag-wip"
   export SIPAG_LABEL_DONE="sipag-done"
@@ -34,6 +40,8 @@ setup_common() {
   export SIPAG_POLL_INTERVAL="60"
   export SIPAG_ALLOWED_TOOLS=""
   export SIPAG_PROMPT_PREFIX=""
+  export SIPAG_TAO_DB=""
+  export SIPAG_TAO_ACTION=""
 }
 
 teardown_common() {
@@ -100,6 +108,47 @@ SIPAG_LABEL_DONE=sipag-done
 SIPAG_TIMEOUT=600
 SIPAG_POLL_INTERVAL=60
 SIPAG_SAFETY_MODE=strict
+EOF
+
+  # Apply overrides
+  for override in "$@"; do
+    local key="${override%%=*}"
+    local val="${override#*=}"
+    if grep -q "^${key}=" "$config_file" 2>/dev/null; then
+      local tmp
+      tmp=$(mktemp)
+      sed "s|^${key}=.*|${key}=${val}|" "$config_file" > "$tmp" && mv "$tmp" "$config_file"
+    else
+      echo "${key}=${val}" >>"$config_file"
+    fi
+  done
+}
+
+# Create a project config in SIPAG_HOME/projects/<slug>/config
+create_project_config() {
+  local slug="$1"
+  shift
+  local project_dir="${SIPAG_HOME}/projects/${slug}"
+  mkdir -p "${project_dir}/workers" "${project_dir}/logs"
+  local config_file="${project_dir}/config"
+
+  # Start with required defaults
+  cat >"$config_file" <<'EOF'
+SIPAG_SOURCE=github
+SIPAG_REPO=test-owner/test-repo
+SIPAG_CLONE_URL=
+SIPAG_BASE_BRANCH=main
+SIPAG_CONCURRENCY=2
+SIPAG_LABEL_READY=sipag
+SIPAG_LABEL_WIP=sipag-wip
+SIPAG_LABEL_DONE=sipag-done
+SIPAG_TIMEOUT=600
+SIPAG_POLL_INTERVAL=60
+SIPAG_SAFETY_MODE=strict
+SIPAG_ALLOWED_TOOLS=
+SIPAG_PROMPT_PREFIX=
+SIPAG_TAO_DB=
+SIPAG_TAO_ACTION=
 EOF
 
   # Apply overrides

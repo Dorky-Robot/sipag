@@ -107,3 +107,12 @@ teardown() {
   # Should still be valid JSON
   jq . "$state_file" > /dev/null
 }
+
+@test "_worker_write_state: string task_id (ad-hoc hex ID)" {
+  _worker_write_state "$RUN_DIR" "a1b2c3d4" "running" "Ad-hoc task" "adhoc://test/a1b2c3d4" "sipag/a1b2c3d4-ad-hoc"
+
+  local state_file="${RUN_DIR}/workers/a1b2c3d4.json"
+  [[ -f "$state_file" ]]
+  jq . "$state_file" > /dev/null
+  assert_json_field "$(cat "$state_file")" ".task_id" "a1b2c3d4"
+}

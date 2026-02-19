@@ -31,7 +31,7 @@ _worker_write_state() {
   [[ "$err_json" != "null" ]] && err_json="\"$err_json\""
 
   cat >"$state_file" <<JSONEOF
-{"task_id":${task_id},"title":"${title}","url":"${url}","branch":"${branch}","status":"${status}","started_at":"${started_at}","finished_at":${finished_at},"pr_url":${pr_json},"error":${err_json}}
+{"task_id":"${task_id}","title":"${title}","url":"${url}","branch":"${branch}","status":"${status}","started_at":"${started_at}","finished_at":${finished_at},"pr_url":${pr_json},"error":${err_json}}
 JSONEOF
 }
 
@@ -70,8 +70,7 @@ HOOKJSON
 
 worker_run() {
   local task_id="$1"
-  local project_dir="$2"
-  local run_dir="$3"
+  local run_dir="$2"
 
   export SIPAG_WORKER_ID="${task_id}"
 
@@ -88,7 +87,8 @@ worker_run() {
   task_title=$(echo "$task_info" | grep '^TASK_TITLE=' | cut -d= -f2-)
   task_body=$(echo "$task_info" | grep '^TASK_BODY=' | cut -d= -f2-)
   task_number=$(echo "$task_info" | grep '^TASK_NUMBER=' | cut -d= -f2-)
-  task_url="https://github.com/${SIPAG_REPO}/issues/${task_number}"
+  task_url=$(echo "$task_info" | grep '^TASK_URL=' | cut -d= -f2-)
+  [[ -z "$task_url" ]] && task_url="https://github.com/${SIPAG_REPO}/issues/${task_number}"
 
   # Claim the task
   source_claim_task "$SIPAG_REPO" "$task_id" "$SIPAG_LABEL_WIP" "$SIPAG_LABEL_READY" || {
@@ -100,26 +100,24 @@ worker_run() {
   log_info "Claimed task #${task_id}: ${task_title}"
   _worker_write_state "$run_dir" "$task_id" "claimed" "$task_title" "$task_url"
 
-  # Create a working clone
+  # Clone from URL (no local repo needed)
+  local clone_url="${SIPAG_CLONE_URL:-}"
+  if [[ -z "$clone_url" && -n "$SIPAG_REPO" ]]; then
+    clone_url="https://github.com/${SIPAG_REPO}.git"
+  fi
+
   local work_dir="${run_dir}/workers/clone-${task_id}"
   rm -rf "$work_dir"
 
-  log_info "Cloning repo into ${work_dir}"
-  git clone "$project_dir" "$work_dir" 2>/dev/null || {
-    log_error "Failed to clone repo"
+  log_info "Cloning from ${clone_url} into ${work_dir}"
+  git clone "$clone_url" "$work_dir" 2>/dev/null || {
+    log_error "Failed to clone repo from ${clone_url}"
     source_fail_task "$SIPAG_REPO" "$task_id" "$SIPAG_LABEL_READY" "$SIPAG_LABEL_WIP" "Failed to clone repo"
     _worker_write_state "$run_dir" "$task_id" "failed" "$task_title" "$task_url" "" "" "Failed to clone repo"
     return 1
   }
 
   cd "$work_dir" || return 1
-
-  # Set up remote to point at the real origin
-  local origin_url
-  origin_url=$(git -C "$project_dir" remote get-url origin 2>/dev/null)
-  if [[ -n "$origin_url" ]]; then
-    git remote set-url origin "$origin_url"
-  fi
 
   # Create branch
   local branch_name
@@ -153,15 +151,10 @@ worker_run() {
   # Build claude args
   local claude_args=(--print)
   if [[ "$SIPAG_SAFETY_MODE" == "yolo" ]]; then
-    # Yolo mode: skip all permissions (existing behavior)
     claude_args+=(--dangerously-skip-permissions)
   else
-    # Hooks handle permissions; --dangerously-skip-permissions is required to
-    # prevent Claude Code from prompting interactively (which would hang an
-    # unattended worker). The PreToolUse hook provides the actual safety gate.
     claude_args+=(--dangerously-skip-permissions)
     if [[ -n "$SIPAG_ALLOWED_TOOLS" ]]; then
-      # allowedTools is an additional constraint on top of hooks
       IFS=',' read -ra tool_list <<<"$SIPAG_ALLOWED_TOOLS"
       for tool in "${tool_list[@]}"; do
         claude_args+=(--allowedTools "$tool")
@@ -191,9 +184,9 @@ worker_run() {
     return 1
   fi
 
-  # Check if there are any commits
+  # Check if there are any commits (use origin/ prefix since local branch may not exist)
   local commit_count
-  commit_count=$(git rev-list --count "${SIPAG_BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
+  commit_count=$(git rev-list --count "origin/${SIPAG_BASE_BRANCH}..HEAD" 2>/dev/null || echo "0")
 
   if [[ "$commit_count" -eq 0 ]]; then
     log_warn "No commits produced for task #${task_id}"

@@ -16,7 +16,10 @@ install: build-tui
 	@cp lib/hooks/*.sh $(SHAREDIR)/lib/hooks/
 	@chmod +x $(SHAREDIR)/lib/hooks/*.sh
 	@mkdir -p $(PREFIX)/bin
-	@ln -sf $(SHAREDIR)/bin/sipag $(PREFIX)/bin/sipag
+	@# Create wrapper that sets SIPAG_ROOT
+	@printf '#!/usr/bin/env bash\nexport SIPAG_ROOT="%s"\nexec "%s/bin/sipag" "$$@"\n' \
+		"$(SHAREDIR)" "$(SHAREDIR)" > $(PREFIX)/bin/sipag
+	@chmod +x $(PREFIX)/bin/sipag
 	@cp tui/target/release/sipag-tui $(PREFIX)/bin/sipag-tui
 	@echo "sipag installed to $(PREFIX)/bin/sipag"
 
@@ -32,7 +35,9 @@ install-bash:
 	@cp lib/hooks/*.sh $(SHAREDIR)/lib/hooks/
 	@chmod +x $(SHAREDIR)/lib/hooks/*.sh
 	@mkdir -p $(PREFIX)/bin
-	@ln -sf $(SHAREDIR)/bin/sipag $(PREFIX)/bin/sipag
+	@printf '#!/usr/bin/env bash\nexport SIPAG_ROOT="%s"\nexec "%s/bin/sipag" "$$@"\n' \
+		"$(SHAREDIR)" "$(SHAREDIR)" > $(PREFIX)/bin/sipag
+	@chmod +x $(PREFIX)/bin/sipag
 	@echo "sipag installed to $(PREFIX)/bin/sipag (no TUI)"
 
 uninstall:

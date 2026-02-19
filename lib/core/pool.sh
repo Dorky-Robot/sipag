@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# sipag — pool manager: spawn up to N workers, reap finished ones
+# sipag — pool manager: multi-project daemon with worker pool
 
 pool_start() {
-  local project_dir="$1"
-  local run_dir="$2"
-  local foreground="${3:-false}"
+  local home="$1"
+  local foreground="${2:-false}"
 
-  local pid_file="${run_dir}/sipag.pid"
+  local pid_file="${home}/sipag.pid"
+  mkdir -p "${home}/logs"
 
   # Check if already running
   if [[ -f "$pid_file" ]]; then
     local existing_pid
     existing_pid=$(cat "$pid_file")
     if kill -0 "$existing_pid" 2>/dev/null; then
-      die "sipag is already running (PID ${existing_pid}). Use 'sipag stop' first."
+      die "sipag daemon is already running (PID ${existing_pid}). Use 'sipag daemon stop' first."
     else
       log_warn "Stale PID file found, removing"
       rm -f "$pid_file"
@@ -22,31 +22,30 @@ pool_start() {
 
   if [[ "$foreground" == "true" ]]; then
     echo $$ >"$pid_file"
-    trap 'pool_cleanup "$run_dir"; exit 0' INT TERM
-    log_info "sipag started in foreground (PID $$)"
-    log_info "Polling ${SIPAG_REPO} for issues labeled '${SIPAG_LABEL_READY}' every ${SIPAG_POLL_INTERVAL}s"
-    log_info "Concurrency: ${SIPAG_CONCURRENCY}"
-    _pool_loop "$project_dir" "$run_dir"
+    trap 'pool_cleanup "$home"; exit 0' INT TERM
+    log_info "sipag daemon started in foreground (PID $$)"
+    log_info "Polling all projects every ${SIPAG_POLL_INTERVAL}s"
+    log_info "Global max workers: ${SIPAG_MAX_WORKERS}"
+    _pool_loop "$home"
   else
-    _pool_daemonize "$project_dir" "$run_dir" "$pid_file"
+    _pool_daemonize "$home" "$pid_file"
   fi
 }
 
 _pool_daemonize() {
-  local project_dir="$1"
-  local run_dir="$2"
-  local pid_file="$3"
-  local log_file="${run_dir}/logs/sipag.log"
+  local home="$1"
+  local pid_file="$2"
+  local log_file="${home}/logs/sipag.log"
 
   (
     echo $$ >"$pid_file"
-    trap 'pool_cleanup "$run_dir"; exit 0' INT TERM
+    trap 'pool_cleanup "$home"; exit 0' INT TERM
 
-    log_info "sipag started as daemon (PID $$)"
-    log_info "Polling ${SIPAG_REPO} for issues labeled '${SIPAG_LABEL_READY}' every ${SIPAG_POLL_INTERVAL}s"
-    log_info "Concurrency: ${SIPAG_CONCURRENCY}"
+    log_info "sipag daemon started (PID $$)"
+    log_info "Polling all projects every ${SIPAG_POLL_INTERVAL}s"
+    log_info "Global max workers: ${SIPAG_MAX_WORKERS}"
 
-    _pool_loop "$project_dir" "$run_dir"
+    _pool_loop "$home"
   ) >>"$log_file" 2>&1 &
 
   local daemon_pid=$!
@@ -58,53 +57,85 @@ _pool_daemonize() {
   if [[ -f "$pid_file" ]]; then
     local actual_pid
     actual_pid=$(cat "$pid_file")
-    log_info "sipag started (PID ${actual_pid}). Logs: ${log_file}"
+    log_info "sipag daemon started (PID ${actual_pid}). Logs: ${log_file}"
   else
-    log_info "sipag started (PID ${daemon_pid}). Logs: ${log_file}"
+    log_info "sipag daemon started (PID ${daemon_pid}). Logs: ${log_file}"
   fi
 }
 
 _pool_loop() {
-  local project_dir="$1"
-  local run_dir="$2"
+  local home="$1"
 
   while true; do
-    _pool_reap_workers "$run_dir"
+    # Count total active workers across all projects
+    local total_active=0
 
-    local active_count
-    active_count=$(_pool_active_count "$run_dir")
+    for slug in $(config_list_projects); do
+      local project_dir
+      project_dir="$(config_get_project_dir "$slug")"
+      config_ensure_project_dir "$slug" >/dev/null
 
-    if [[ "$active_count" -lt "$SIPAG_CONCURRENCY" ]]; then
-      local slots=$((SIPAG_CONCURRENCY - active_count))
+      _pool_reap_workers "$project_dir"
+
+      local project_active
+      project_active=$(_pool_active_count "$project_dir")
+      total_active=$((total_active + project_active))
+    done
+
+    # Now spawn workers for each project
+    for slug in $(config_list_projects); do
+      # Load this project's config
+      export SIPAG_PROJECT_SLUG="$slug"
+      config_load_project "$slug"
+      _load_source_plugin
+
+      local project_dir
+      project_dir="$(config_get_project_dir "$slug")"
+
+      local project_active
+      project_active=$(_pool_active_count "$project_dir")
+
+      # Respect per-project concurrency AND global max
+      local project_slots=$((SIPAG_CONCURRENCY - project_active))
+      local global_slots=$((SIPAG_MAX_WORKERS - total_active))
+      local slots=$((project_slots < global_slots ? project_slots : global_slots))
+
+      if [[ "$slots" -le 0 ]]; then
+        continue
+      fi
 
       # Fetch ready tasks
       local tasks
-      tasks=$(source_list_tasks "$SIPAG_REPO" "$SIPAG_LABEL_READY" 2>/dev/null)
+      tasks=$(source_list_tasks "$SIPAG_REPO" "$SIPAG_LABEL_READY" 2>/dev/null) || true
 
       if [[ -n "$tasks" ]]; then
         while IFS= read -r task_id && [[ "$slots" -gt 0 ]]; do
+          [[ -z "$task_id" ]] && continue
+
           # Skip if already being worked on
-          if [[ -f "${run_dir}/workers/${task_id}.pid" ]]; then
+          if [[ -f "${project_dir}/workers/${task_id}.pid" ]]; then
             continue
           fi
 
-          _pool_spawn_worker "$task_id" "$project_dir" "$run_dir"
+          _pool_spawn_worker "$task_id" "$project_dir"
           slots=$((slots - 1))
+          total_active=$((total_active + 1))
         done <<<"$tasks"
       fi
-    fi
+    done
 
-    sleep "$SIPAG_POLL_INTERVAL"
+    # Reload global config for poll interval
+    config_load_global 2>/dev/null || true
+    sleep "${SIPAG_POLL_INTERVAL:-60}"
   done
 }
 
 _pool_spawn_worker() {
   local task_id="$1"
-  local project_dir="$2"
-  local run_dir="$3"
+  local run_dir="$2"
 
   (
-    worker_run "$task_id" "$project_dir" "$run_dir"
+    worker_run "$task_id" "$run_dir"
   ) &
 
   local worker_pid=$!
@@ -122,8 +153,8 @@ _pool_reap_workers() {
 
     local task_id
     task_id=$(basename "$pid_file" .pid)
-    # Skip non-numeric (like PID.task files matched by glob)
-    [[ "$task_id" =~ ^[0-9]+$ ]] || continue
+    # Skip non-task files (PID.task files matched by glob)
+    [[ "$task_id" =~ ^[a-zA-Z0-9]+$ ]] || continue
 
     local worker_pid
     worker_pid=$(cat "$pid_file")
@@ -145,7 +176,7 @@ _pool_active_count() {
 
     local task_id
     task_id=$(basename "$pid_file" .pid)
-    [[ "$task_id" =~ ^[0-9]+$ ]] || continue
+    [[ "$task_id" =~ ^[a-zA-Z0-9]+$ ]] || continue
 
     local worker_pid
     worker_pid=$(cat "$pid_file")
@@ -159,11 +190,11 @@ _pool_active_count() {
 }
 
 pool_status() {
-  local run_dir="$1"
-  local pid_file="${run_dir}/sipag.pid"
+  local home="$1"
+  local pid_file="${home}/sipag.pid"
 
   if [[ ! -f "$pid_file" ]]; then
-    echo "sipag is not running"
+    echo "sipag daemon is not running"
     return 1
   fi
 
@@ -171,46 +202,54 @@ pool_status() {
   main_pid=$(cat "$pid_file")
 
   if ! kill -0 "$main_pid" 2>/dev/null; then
-    echo "sipag is not running (stale PID file)"
+    echo "sipag daemon is not running (stale PID file)"
     return 1
   fi
 
-  echo "sipag is running (PID ${main_pid})"
+  echo "sipag daemon is running (PID ${main_pid})"
   echo ""
 
-  local active=0
-  for pid_file in "${run_dir}/workers/"*.pid; do
-    [[ -f "$pid_file" ]] || continue
+  local total_active=0
+  for slug in $(config_list_projects); do
+    local project_dir
+    project_dir="$(config_get_project_dir "$slug")"
 
-    local task_id
-    task_id=$(basename "$pid_file" .pid)
-    [[ "$task_id" =~ ^[0-9]+$ ]] || continue
+    local active=0
+    echo "  Project: ${slug}"
 
-    local worker_pid
-    worker_pid=$(cat "$pid_file")
+    for pid_file_w in "${project_dir}/workers/"*.pid; do
+      [[ -f "$pid_file_w" ]] || continue
 
-    if kill -0 "$worker_pid" 2>/dev/null; then
-      echo "  Worker PID ${worker_pid} → task #${task_id} (running)"
-      active=$((active + 1))
-    else
-      echo "  Worker PID ${worker_pid} → task #${task_id} (finished)"
+      local task_id
+      task_id=$(basename "$pid_file_w" .pid)
+      [[ "$task_id" =~ ^[a-zA-Z0-9]+$ ]] || continue
+
+      local worker_pid
+      worker_pid=$(cat "$pid_file_w")
+
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        echo "    Worker PID ${worker_pid} → task #${task_id} (running)"
+        active=$((active + 1))
+      fi
+    done
+
+    if [[ "$active" -eq 0 ]]; then
+      echo "    No active workers"
     fi
+    total_active=$((total_active + active))
   done
 
-  if [[ "$active" -eq 0 ]]; then
-    echo "  No active workers (waiting for tasks)"
-  fi
-
   echo ""
-  echo "Concurrency: ${SIPAG_CONCURRENCY} | Poll interval: ${SIPAG_POLL_INTERVAL}s"
+  echo "Total active workers: ${total_active}/${SIPAG_MAX_WORKERS}"
+  echo "Poll interval: ${SIPAG_POLL_INTERVAL:-60}s"
 }
 
 pool_stop() {
-  local run_dir="$1"
-  local pid_file="${run_dir}/sipag.pid"
+  local home="$1"
+  local pid_file="${home}/sipag.pid"
 
   if [[ ! -f "$pid_file" ]]; then
-    echo "sipag is not running"
+    echo "sipag daemon is not running"
     return 1
   fi
 
@@ -218,59 +257,70 @@ pool_stop() {
   main_pid=$(cat "$pid_file")
 
   if ! kill -0 "$main_pid" 2>/dev/null; then
-    echo "sipag is not running (cleaning up stale PID file)"
+    echo "sipag daemon is not running (cleaning up stale PID file)"
     rm -f "$pid_file"
     return 1
   fi
 
-  echo "Stopping sipag (PID ${main_pid})..."
+  echo "Stopping sipag daemon (PID ${main_pid})..."
 
-  # Kill workers first
-  for wpid_file in "${run_dir}/workers/"*.pid; do
-    [[ -f "$wpid_file" ]] || continue
+  # Kill workers across all projects
+  for slug in $(config_list_projects); do
+    local project_dir
+    project_dir="$(config_get_project_dir "$slug")"
 
-    local task_id
-    task_id=$(basename "$wpid_file" .pid)
-    [[ "$task_id" =~ ^[0-9]+$ ]] || continue
+    for wpid_file in "${project_dir}/workers/"*.pid; do
+      [[ -f "$wpid_file" ]] || continue
 
-    local worker_pid
-    worker_pid=$(cat "$wpid_file")
+      local task_id
+      task_id=$(basename "$wpid_file" .pid)
+      [[ "$task_id" =~ ^[a-zA-Z0-9]+$ ]] || continue
 
-    if kill -0 "$worker_pid" 2>/dev/null; then
-      log_info "Stopping worker PID ${worker_pid} (task #${task_id})"
-      kill "$worker_pid" 2>/dev/null
-    fi
+      local worker_pid
+      worker_pid=$(cat "$wpid_file")
 
-    rm -f "$wpid_file"
-    rm -f "${run_dir}/workers/${worker_pid}.task"
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        log_info "Stopping worker PID ${worker_pid} (task #${task_id})"
+        kill "$worker_pid" 2>/dev/null
+      fi
+
+      rm -f "$wpid_file"
+      rm -f "${project_dir}/workers/${worker_pid}.task"
+    done
   done
 
   # Kill main process
   kill "$main_pid" 2>/dev/null
   rm -f "$pid_file"
 
-  echo "sipag stopped"
+  echo "sipag daemon stopped"
 }
 
 pool_cleanup() {
-  local run_dir="$1"
+  local home="$1"
 
   log_info "Cleaning up..."
 
-  for wpid_file in "${run_dir}/workers/"*.pid; do
-    [[ -f "$wpid_file" ]] || continue
+  for slug in $(config_list_projects 2>/dev/null); do
+    local project_dir
+    project_dir="$(config_get_project_dir "$slug")"
 
-    local worker_pid
-    worker_pid=$(cat "$wpid_file")
+    for wpid_file in "${project_dir}/workers/"*.pid; do
+      [[ -f "$wpid_file" ]] || continue
 
-    if kill -0 "$worker_pid" 2>/dev/null; then
-      kill "$worker_pid" 2>/dev/null
-    fi
+      local worker_pid
+      worker_pid=$(cat "$wpid_file")
+
+      if kill -0 "$worker_pid" 2>/dev/null; then
+        kill "$worker_pid" 2>/dev/null
+      fi
+    done
+
+    rm -f "${project_dir}/workers/"*.pid
+    rm -f "${project_dir}/workers/"*.task
   done
 
-  rm -f "${run_dir}/workers/"*.pid
-  rm -f "${run_dir}/workers/"*.task
-  rm -f "${run_dir}/sipag.pid"
+  rm -f "${home}/sipag.pid"
 
   log_info "Cleanup complete"
 }

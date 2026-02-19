@@ -29,6 +29,7 @@ _log() {
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     local prefix=""
     [[ -n "${SIPAG_WORKER_ID:-}" ]] && prefix="[worker:${SIPAG_WORKER_ID}] "
+    [[ -n "${SIPAG_PROJECT_SLUG:-}" && -z "${SIPAG_WORKER_ID:-}" ]] && prefix="[${SIPAG_PROJECT_SLUG}] "
     printf '%s [%-5s] %s%s\n' "$timestamp" "$level" "$prefix" "$*" >&2
   fi
 }

@@ -53,8 +53,20 @@ pub enum View {
     Log(usize, u16), // task index, scroll offset
 }
 
+pub enum AppMode {
+    /// New multi-project mode: reads from ~/.sipag/
+    MultiProject {
+        sipag_home: PathBuf,
+        project_filter: Option<String>,
+    },
+    /// Legacy single-project mode: reads from <project_dir>/.sipag.d/
+    Legacy {
+        project_dir: PathBuf,
+    },
+}
+
 pub struct App {
-    pub project_dir: PathBuf,
+    pub mode: AppMode,
     pub config: SipagConfig,
     pub state: FullState,
     pub filter: FilterMode,
@@ -65,10 +77,32 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(project_dir: PathBuf, config: SipagConfig) -> Result<Self> {
-        let st = state::read_state(&project_dir)?;
+    pub fn new(sipag_home: PathBuf, config: SipagConfig, project_filter: Option<String>) -> Result<Self> {
+        let st = state::read_state(&sipag_home, &project_filter)?;
         let mut app = App {
-            project_dir,
+            mode: AppMode::MultiProject {
+                sipag_home,
+                project_filter,
+            },
+            config,
+            state: st,
+            filter: FilterMode::All,
+            filtered_indices: Vec::new(),
+            table_state: TableState::default(),
+            view: View::List,
+            last_refresh: Instant::now(),
+        };
+        app.rebuild_filtered();
+        if !app.filtered_indices.is_empty() {
+            app.table_state.select(Some(0));
+        }
+        Ok(app)
+    }
+
+    pub fn new_legacy(project_dir: PathBuf, config: SipagConfig) -> Result<Self> {
+        let st = state::read_state_legacy(&project_dir)?;
+        let mut app = App {
+            mode: AppMode::Legacy { project_dir },
             config,
             state: st,
             filter: FilterMode::All,
@@ -85,7 +119,15 @@ impl App {
     }
 
     pub fn refresh(&mut self) {
-        if let Ok(st) = state::read_state(&self.project_dir) {
+        let new_state = match &self.mode {
+            AppMode::MultiProject { sipag_home, project_filter } => {
+                state::read_state(sipag_home, project_filter)
+            }
+            AppMode::Legacy { project_dir } => {
+                state::read_state_legacy(project_dir)
+            }
+        };
+        if let Ok(st) = new_state {
             self.state = st;
         }
         self.rebuild_filtered();
@@ -145,6 +187,10 @@ impl App {
             .iter()
             .filter(|t| matches!(t.status.as_str(), "claimed" | "running" | "pushing"))
             .count()
+    }
+
+    fn is_multi_project(&self) -> bool {
+        matches!(self.mode, AppMode::MultiProject { .. })
     }
 }
 
@@ -245,16 +291,24 @@ fn render_header(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let active = app.active_count();
-    let repo = if app.config.repo.is_empty() {
-        "unknown".to_string()
-    } else {
-        app.config.repo.clone()
-    };
+    let max = app.config.max_workers;
 
-    let header_text = format!(
-        " sipag  {}  {}   workers: {}/{}  [{}]",
-        repo, daemon_status, active, app.config.concurrency, app.filter.label()
-    );
+    let header_text = if app.is_multi_project() {
+        format!(
+            " sipag  {}  workers: {}/{}  [{}]",
+            daemon_status, active, max, app.filter.label()
+        )
+    } else {
+        let repo = if app.config.repo.is_empty() {
+            "unknown".to_string()
+        } else {
+            app.config.repo.clone()
+        };
+        format!(
+            " sipag  {}  {}   workers: {}/{}  [{}]",
+            repo, daemon_status, active, app.config.concurrency, app.filter.label()
+        )
+    };
 
     let header = Paragraph::new(header_text)
         .style(Style::default().fg(Color::White).bg(Color::DarkGray).bold());
@@ -326,7 +380,14 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let header_cells = ["", "ISSUE", "TITLE", "STATUS", "ELAPSED"]
+    let multi = app.is_multi_project();
+
+    let header_labels: Vec<&str> = if multi {
+        vec!["", "PROJECT", "ISSUE", "TITLE", "STATUS", "ELAPSED"]
+    } else {
+        vec!["", "ISSUE", "TITLE", "STATUS", "ELAPSED"]
+    };
+    let header_cells = header_labels
         .into_iter()
         .map(|h| Cell::from(h).style(Style::default().bold().fg(Color::Cyan)));
     let header = Row::new(header_cells).height(1);
@@ -338,33 +399,55 @@ fn render_list(f: &mut Frame, app: &mut App, area: Rect) {
             let task = &app.state.tasks[idx];
             let ss = status_style(&task.status);
             let issue = format!("#{}", task.task_id);
-            let title = truncate(&task.title, 40);
+            let title = truncate(&task.title, if multi { 35 } else { 40 });
             let elapsed = format_elapsed(&task.started_at);
 
-            Row::new(vec![
-                Cell::from(""),
-                Cell::from(issue),
-                Cell::from(title),
-                Cell::from(task.status.clone()).style(ss),
-                Cell::from(elapsed),
-            ])
+            if multi {
+                let project = truncate(&task.project, 15);
+                Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(project),
+                    Cell::from(issue),
+                    Cell::from(title),
+                    Cell::from(task.status.clone()).style(ss),
+                    Cell::from(elapsed),
+                ])
+            } else {
+                Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(issue),
+                    Cell::from(title),
+                    Cell::from(task.status.clone()).style(ss),
+                    Cell::from(elapsed),
+                ])
+            }
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [
+    let widths: Vec<Constraint> = if multi {
+        vec![
+            Constraint::Length(2),
+            Constraint::Length(16),
+            Constraint::Length(10),
+            Constraint::Min(20),
+            Constraint::Length(10),
+            Constraint::Length(12),
+        ]
+    } else {
+        vec![
             Constraint::Length(2),
             Constraint::Length(8),
             Constraint::Min(20),
             Constraint::Length(10),
             Constraint::Length(12),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::TOP))
-    .row_highlight_style(Style::default().bg(Color::DarkGray))
-    .highlight_symbol("> ");
+        ]
+    };
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::TOP))
+        .row_highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol("> ");
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
@@ -376,7 +459,16 @@ fn render_detail(f: &mut Frame, app: &App, idx: usize, area: Rect) {
         return;
     };
 
-    let mut lines = vec![
+    let mut lines = Vec::new();
+
+    if app.is_multi_project() {
+        lines.push(Line::from(vec![
+            Span::styled("Project:  ", Style::default().bold()),
+            Span::raw(&task.project),
+        ]));
+    }
+
+    lines.extend(vec![
         Line::from(vec![
             Span::styled("Issue:    ", Style::default().bold()),
             Span::raw(format!("#{}", task.task_id)),
@@ -405,7 +497,7 @@ fn render_detail(f: &mut Frame, app: &App, idx: usize, area: Rect) {
             Span::styled("Elapsed:  ", Style::default().bold()),
             Span::raw(format_elapsed(&task.started_at)),
         ]),
-    ];
+    ]);
 
     if let Some(ref finished) = task.finished_at {
         lines.push(Line::from(vec![
@@ -449,7 +541,15 @@ fn render_log(f: &mut Frame, app: &App, idx: usize, scroll: u16, area: Rect) {
         return;
     };
 
-    let content = state::read_log_file(&app.project_dir, task.task_id);
+    let content = match &app.mode {
+        AppMode::MultiProject { sipag_home, .. } => {
+            state::read_log_file(sipag_home, &task.project, &task.task_id)
+        }
+        AppMode::Legacy { project_dir } => {
+            state::read_log_file_legacy(project_dir, &task.task_id)
+        }
+    };
+
     let lines: Vec<Line> = if content.is_empty() {
         vec![Line::from(Span::styled(
             "No log output yet...",
