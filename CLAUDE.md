@@ -113,6 +113,37 @@ seen         # worker dedup list (issue numbers already dispatched)
 token        # Claude OAuth token for worker containers
 ```
 
+## Host machine workflow (PR-only)
+
+The host machine running sipag is for **conversation and commands only**. All code changes must happen through PRs built in Docker workers. No local edits, no pushing to main directly.
+
+### What happens in a sipag start session
+
+- Human and Claude talk about product and architecture
+- Claude creates/edits/labels issues via `gh`
+- Claude kicks off `sipag work` as a background task
+- Claude reviews PRs by reading diffs via `gh pr diff`
+- Claude approves or requests changes via `gh pr review`
+- Claude merges via `gh pr merge`
+- **Claude NEVER edits files locally or pushes to main**
+
+### How code changes happen
+
+```
+Create/update issue  →  label approved  →  sipag work (Docker)  →  PR  →  review  →  merge
+```
+
+All code changes go through `sipag work` → Docker container → PR. The only thing that touches main is a merge.
+
+### Prompt for start sessions
+
+`lib/prompts/start.md` contains the full prompt that enforces this workflow. It instructs Claude to:
+
+- Not edit files on the host machine
+- Not commit or push to main directly
+- Route all code changes through issues and `sipag work`
+- Limit host-machine actions to `gh` issue/PR management and `sipag` commands
+
 ## Working on sipag
 
 ### Use sipag to manage its own backlog
