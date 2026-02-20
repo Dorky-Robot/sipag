@@ -193,6 +193,55 @@ CLAUDE.md            # repo root (most common)
 
 sipag's executor prompt explicitly instructs Claude to read and follow `CLAUDE.md` before writing any code. No configuration is needed — just add the file to your repo.
 
+### What to include in your CLAUDE.md
+
+A good `CLAUDE.md` for a sipag-managed repo answers four questions for Claude before it reads a single line of code:
+
+| Section | What to write |
+|---|---|
+| **Project** | One paragraph: what the repo does and who uses it |
+| **Priorities** | What matters right now — stability, a specific feature area, a migration in progress |
+| **Architecture** | Tech stack, key modules, patterns Claude must follow or avoid |
+| **Testing** | Exact commands to run tests; what "passing" looks like |
+
+Keep it short. Claude reads CLAUDE.md before writing code, so dense prose slows it down. Bullet points and short paragraphs work best.
+
+### Example CLAUDE.md for a sipag-managed repo
+
+```markdown
+## Project
+dorky_robot is a personal mesh network for self-hosted services.
+Rust/Axum backend, HTMX frontend, SQLite database. Passkey auth, no passwords.
+
+## Priorities
+Stability > features. Hardening auth before adding new mesh capabilities.
+Do not change the passkey flow without a green test suite first.
+
+## Architecture
+- src/auth/     — passkey registration and assertion
+- src/api/      — Axum route handlers (thin — business logic lives in src/domain/)
+- src/domain/   — pure Rust, no async, no framework dependencies
+- migrations/   — SQLite migrations via sqlx (never edit existing migrations)
+
+## Testing
+cargo test                   # unit + integration
+npx playwright test          # E2E (requires running dev server)
+make ci                      # full suite used in CI
+
+All tests must pass before opening a PR. If a test is flaky, note it in the PR body.
+```
+
+### Labels and conventions
+
+sipag workers only pick up issues labeled **`approved`**. Add any project-specific label conventions to CLAUDE.md so Claude can apply them correctly when opening PRs:
+
+```markdown
+## Labels
+- `approved` — ready for a sipag worker to implement
+- `needs-spec` — issue needs more detail before approval
+- `blocked` — waiting on external dependency
+```
+
 ## Project structure
 
 ```
