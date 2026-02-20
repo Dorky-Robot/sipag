@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# sipag — shell entry point for agile workflow commands
+#
+# Provides shell-native commands that use Claude to manage GitHub repositories
+# through an agile workflow: triage → refine → work → review → merge.
+#
+# Environment variables:
+#   SIPAG_ROOT            — repo root (auto-detected if not set)
+#   SIPAG_MODEL           — Claude model to use (optional)
+#   SIPAG_TIMEOUT         — Claude timeout in seconds (default: 600)
+#   SIPAG_SKIP_PERMISSIONS — pass --dangerously-skip-permissions (default: 1)
+#   SIPAG_CLAUDE_ARGS     — extra whitespace-separated args for claude (optional)
+
+set -euo pipefail
+
+SIPAG_VERSION="2.0.0"
+
+# Resolve project root relative to this script so the libraries can be
+# sourced regardless of the working directory.
+SIPAG_ROOT="${SIPAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# shellcheck source=../lib/run.sh
+source "${SIPAG_ROOT}/lib/run.sh"
+# shellcheck source=../lib/triage.sh
+source "${SIPAG_ROOT}/lib/triage.sh"
+# shellcheck source=../lib/refine.sh
+source "${SIPAG_ROOT}/lib/refine.sh"
+# shellcheck source=../lib/review.sh
+source "${SIPAG_ROOT}/lib/review.sh"
+# shellcheck source=../lib/merge.sh
+source "${SIPAG_ROOT}/lib/merge.sh"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+usage() {
+	cat <<'EOF'
+sipag — agile workflow automation via Claude
+
+Usage:
+  sipag triage <owner/repo>    Claude triages open issues
+  sipag refine <owner/repo>    Claude refines/breaks down issues
+  sipag review <owner/repo>    Claude reviews open PRs
+  sipag merge <owner/repo>     Merge approved PRs (no Claude)
+  sipag version                Print version
+  sipag help                   Show this help
+
+sipag agile workflow:
+  triage → refine → work → review → merge
+
+  triage: Label, prioritize, close duplicates
+  refine: Split large issues, clarify requirements, mark ready
+  work:   Pick up issues, write code in Docker, create PRs
+  review: Review open PRs, approve or request changes
+  merge:  Merge approved PRs serially with rebase
+
+Environment:
+  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_MODEL             Model override (e.g. claude-opus-4-5)
+  SIPAG_SKIP_PERMISSIONS  Set to 0 for interactive mode (default: 1)
+  SIPAG_CLAUDE_ARGS       Extra raw args appended to the claude invocation
+
+Requirements:
+  gh      GitHub CLI (authenticated)
+  claude  Anthropic Claude CLI
+  jq      JSON processor
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_triage() {
+	local repo="${1:?Usage: sipag triage <owner/repo>}"
+	triage_run "$repo"
+}
+
+cmd_refine() {
+	local repo="${1:?Usage: sipag refine <owner/repo>}"
+	refine_run "$repo"
+}
+
+cmd_review() {
+	local repo="${1:?Usage: sipag review <owner/repo>}"
+	review_run "$repo"
+}
+
+cmd_merge() {
+	local repo="${1:?Usage: sipag merge <owner/repo>}"
+	merge_run "$repo"
+}
+
+cmd_version() {
+	printf 'sipag %s\n' "$SIPAG_VERSION"
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing & dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+	local command=""
+	local triage_repo=""
+	local refine_repo=""
+	local review_repo=""
+	local merge_repo=""
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		triage)
+			command="triage"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				triage_repo="$1"
+				shift
+			fi
+			;;
+		refine)
+			command="refine"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				refine_repo="$1"
+				shift
+			fi
+			;;
+		review)
+			command="review"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				review_repo="$1"
+				shift
+			fi
+			;;
+		merge)
+			command="merge"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				merge_repo="$1"
+				shift
+			fi
+			;;
+		version | -v | --version)
+			cmd_version
+			return 0
+			;;
+		help | -h | --help)
+			usage
+			return 0
+			;;
+		-*)
+			printf 'Unknown flag: %s\n\n' "$1" >&2
+			usage >&2
+			return 1
+			;;
+		*)
+			if [[ -z "$command" ]]; then
+				printf 'Unknown command: %s\n\n' "$1" >&2
+				usage >&2
+				return 1
+			fi
+			shift
+			;;
+		esac
+	done
+
+	if [[ -z "$command" ]]; then
+		usage
+		return 0
+	fi
+
+	case "$command" in
+	triage) cmd_triage "$triage_repo" ;;
+	refine) cmd_refine "$refine_repo" ;;
+	review) cmd_review "$review_repo" ;;
+	merge)  cmd_merge  "$merge_repo"  ;;
+	esac
+}
+
+main "$@"
