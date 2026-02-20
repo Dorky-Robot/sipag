@@ -23,6 +23,8 @@ SIPAG_DIR="${SIPAG_DIR:-${HOME}/.sipag}"
 SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
 CONTINUE=0
 DRY_RUN=0
+ADD_REPO=""
+ADD_PRIORITY="medium"
 
 # --- Help ---
 
@@ -35,15 +37,18 @@ Usage:
   sipag init                   Create ~/.sipag/{queue,running,done,failed}
   sipag next [-c] [-n] [-f]   Find first - [ ], run claude, mark - [x]
   sipag list [-f path]         Print all tasks with status
-  sipag add "task" [-f path]   Append - [ ] task to file
+  sipag add "task" [--repo <name>] [--priority <level>]
+                               Queue a task (writes YAML frontmatter to queue/)
   sipag start                  Start the executor (auto-inits if needed)
   sipag version                Print version
   sipag help                   Show this help
 
 Flags:
-  -c, --continue     After completing, loop to the next task
-  -n, --dry-run      Show what would run, don't invoke claude
-  -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
+  -c, --continue            After completing, loop to the next task
+  -n, --dry-run             Show what would run, don't invoke claude
+  -f, --file <path>         Task file (default: ./tasks.md or $SIPAG_FILE)
+      --repo <name>         Repository name for the queued task
+      --priority <level>    Priority level (default: medium)
 
 Environment:
   SIPAG_DIR               Base directory (default: ~/.sipag)
@@ -109,8 +114,10 @@ cmd_list() {
 }
 
 cmd_add() {
-	if [[ $# -eq 0 ]]; then
-		echo "Usage: sipag add \"task text\" [-f path]"
+	local text="$1"
+
+	if [[ -z "$text" ]]; then
+		echo "Usage: sipag add \"task text\" [--repo <name>] [--priority <level>]"
 		return 1
 	fi
 
@@ -119,9 +126,17 @@ cmd_add() {
 		sipag_init_dirs "${SIPAG_DIR}" >/dev/null
 	fi
 
-	local text="$1"
-	task_add "$SIPAG_FILE" "$text"
-	echo "Added: ${text}"
+	if [[ -n "$ADD_REPO" ]]; then
+		# Frontmatter format: write a named file to queue/
+		local filename
+		filename=$(task_next_filename "${SIPAG_DIR}/queue" "$text")
+		task_write_file "${SIPAG_DIR}/queue/${filename}" "$text" "$ADD_REPO" "$ADD_PRIORITY"
+		echo "Added: ${text}"
+	else
+		# Legacy format: append checklist item to SIPAG_FILE
+		task_add "$SIPAG_FILE" "$text"
+		echo "Added: ${text}"
+	fi
 }
 
 cmd_version() {
@@ -151,10 +166,6 @@ main() {
 		add)
 			command="add"
 			shift
-			if [[ $# -gt 0 && "$1" != -* ]]; then
-				add_text="$1"
-				shift
-			fi
 			;;
 		start)
 			command="start"
@@ -181,17 +192,31 @@ main() {
 			SIPAG_FILE="${1:?--file requires a path}"
 			shift
 			;;
+		--repo)
+			shift
+			ADD_REPO="${1:?--repo requires a name}"
+			shift
+			;;
+		--priority)
+			shift
+			ADD_PRIORITY="${1:?--priority requires a level}"
+			shift
+			;;
 		-*)
 			echo "Unknown flag: $1"
 			usage
 			return 1
 			;;
 		*)
-			# If no command yet, treat as command
+			# If no command yet, treat as unknown command
 			if [[ -z "$command" ]]; then
 				echo "Unknown command: $1"
 				usage
 				return 1
+			fi
+			# Capture positional argument for add subcommand
+			if [[ "$command" == "add" && -z "$add_text" ]]; then
+				add_text="$1"
 			fi
 			shift
 			;;

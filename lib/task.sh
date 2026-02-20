@@ -131,3 +131,159 @@ task_add() {
 		echo "- [ ] ${text}" >>"$file"
 	fi
 }
+
+# Parse a task file with YAML frontmatter.
+# Sets: TASK_REPO, TASK_PRIORITY (default: medium), TASK_SOURCE, TASK_ADDED,
+#       TASK_TITLE (first non-empty line after frontmatter), TASK_BODY (remaining lines).
+# Returns 1 if the file is not found.
+task_parse_file() {
+	local file="$1"
+
+	if [[ ! -f "$file" ]]; then
+		return 1
+	fi
+
+	# shellcheck disable=SC2034
+	TASK_REPO=""
+	# shellcheck disable=SC2034
+	TASK_PRIORITY="medium"
+	# shellcheck disable=SC2034
+	TASK_SOURCE=""
+	# shellcheck disable=SC2034
+	TASK_ADDED=""
+	# shellcheck disable=SC2034
+	TASK_TITLE=""
+	# shellcheck disable=SC2034
+	TASK_BODY=""
+
+	# Read all lines into an array for indexed access
+	local lines=()
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		lines+=("$line")
+	done <"$file"
+
+	local n=${#lines[@]}
+	local i=0
+
+	# Check for opening frontmatter delimiter
+	if [[ $n -gt 0 && "${lines[0]}" == "---" ]]; then
+		i=1
+		# Parse frontmatter key: value pairs until closing ---
+		while [[ $i -lt $n ]]; do
+			if [[ "${lines[$i]}" == "---" ]]; then
+				i=$((i + 1))
+				break
+			fi
+			if [[ "${lines[$i]}" =~ ^([a-zA-Z_]+):\ *(.*)$ ]]; then
+				local key="${BASH_REMATCH[1]}"
+				local value="${BASH_REMATCH[2]}"
+				case "$key" in
+				repo) TASK_REPO="$value" ;;
+				priority) TASK_PRIORITY="$value" ;;
+				source) TASK_SOURCE="$value" ;;
+				added) TASK_ADDED="$value" ;;
+				esac
+			fi
+			i=$((i + 1))
+		done
+	fi
+
+	# Find title: first non-empty line after frontmatter
+	while [[ $i -lt $n ]]; do
+		if [[ -n "${lines[$i]}" ]]; then
+			# shellcheck disable=SC2034
+			TASK_TITLE="${lines[$i]}"
+			i=$((i + 1))
+			break
+		fi
+		i=$((i + 1))
+	done
+
+	# Find last non-empty line index to trim trailing blank lines from body
+	local body_end=$i
+	local j=$((n - 1))
+	while [[ $j -ge $i ]]; do
+		if [[ -n "${lines[$j]}" ]]; then
+			body_end=$((j + 1))
+			break
+		fi
+		j=$((j - 1))
+	done
+
+	# Skip leading blank lines in body
+	while [[ $i -lt $body_end && -z "${lines[$i]}" ]]; do
+		i=$((i + 1))
+	done
+
+	# Build TASK_BODY from remaining lines
+	local first=1
+	while [[ $i -lt $body_end ]]; do
+		if [[ $first -eq 0 ]]; then
+			TASK_BODY+=$'\n'
+		fi
+		TASK_BODY+="${lines[$i]}"
+		first=0
+		i=$((i + 1))
+	done
+
+	return 0
+}
+
+# Convert text to a URL-safe slug (lowercase, hyphens only, no special chars).
+task_slugify() {
+	local text="$1"
+	printf '%s' "$text" \
+		| tr '[:upper:]' '[:lower:]' \
+		| tr -cs 'a-z0-9' '-' \
+		| sed 's/^-*//;s/-*$//'
+}
+
+# Generate the next sequential filename for a task in a queue directory.
+# Pattern: NNN-slugified-title.md where NNN is zero-padded (e.g. 001, 042).
+task_next_filename() {
+	local queue_dir="$1"
+	local title="$2"
+	local slug
+	slug=$(task_slugify "$title")
+
+	local max_num=0
+	if [[ -d "$queue_dir" ]]; then
+		for f in "${queue_dir}"/*.md; do
+			[[ -f "$f" ]] || continue
+			local base="${f##*/}"
+			if [[ "$base" =~ ^([0-9]+)- ]]; then
+				local num=$((10#${BASH_REMATCH[1]}))
+				if [[ $num -gt $max_num ]]; then
+					max_num=$num
+				fi
+			fi
+		done
+	fi
+
+	local next_num=$((max_num + 1))
+	printf '%03d-%s.md\n' "$next_num" "$slug"
+}
+
+# Write a task file with YAML frontmatter.
+# Arguments: file title repo [priority] [source]
+task_write_file() {
+	local file="$1"
+	local title="$2"
+	local repo="$3"
+	local priority="${4:-medium}"
+	local source="${5:-}"
+	local added
+	added=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+	{
+		printf -- '---\n'
+		printf 'repo: %s\n' "$repo"
+		printf 'priority: %s\n' "$priority"
+		if [[ -n "$source" ]]; then
+			printf 'source: %s\n' "$source"
+		fi
+		printf 'added: %s\n' "$added"
+		printf -- '---\n'
+		printf '%s\n' "$title"
+	} >"$file"
+}
