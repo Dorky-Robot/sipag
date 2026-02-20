@@ -89,6 +89,14 @@ The container is the safety boundary. Workers have full autonomy inside it.
 
 ## Installation
 
+### One-line install (macOS and Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
+```
+
+Supports macOS (Intel and Apple Silicon) and Linux (x86\_64 and ARM64). Installs the binary to `/usr/local/bin/sipag`.
+
 ### From source (Rust + Cargo required)
 
 ```bash
