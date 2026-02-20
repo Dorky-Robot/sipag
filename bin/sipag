@@ -39,6 +39,8 @@ Usage:
   sipag list [-f path]         Print all tasks with status
   sipag add "task" [--repo <name>] [--priority <level>]
                                Queue a task (writes YAML frontmatter to queue/)
+  sipag show <name>            Print task file and log (searches all dirs)
+  sipag retry <name>           Move task from failed/ back to queue/
   sipag start                  Start the executor (auto-inits if needed)
   sipag version                Print version
   sipag help                   Show this help
@@ -143,11 +145,61 @@ cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
 
+cmd_show() {
+	if [[ $# -eq 0 ]]; then
+		echo "Usage: sipag show <name>"
+		return 1
+	fi
+	local name="$1"
+	local found_file=""
+	local found_status=""
+	for dir_status in queue running done failed; do
+		local candidate="${SIPAG_DIR}/${dir_status}/${name}.md"
+		if [[ -f "$candidate" ]]; then
+			found_file="$candidate"
+			found_status="$dir_status"
+			break
+		fi
+	done
+	if [[ -z "$found_file" ]]; then
+		echo "Error: task '${name}' not found"
+		return 1
+	fi
+	echo "=== Task: ${name} ==="
+	echo "Status: ${found_status}"
+	cat "$found_file"
+	local log_file="${SIPAG_DIR}/${found_status}/${name}.log"
+	if [[ -f "$log_file" ]]; then
+		echo "=== Log ==="
+		cat "$log_file"
+	fi
+}
+
+cmd_retry() {
+	if [[ $# -eq 0 ]]; then
+		echo "Usage: sipag retry <name>"
+		return 1
+	fi
+	local name="$1"
+	local failed_file="${SIPAG_DIR}/failed/${name}.md"
+	local log_file="${SIPAG_DIR}/failed/${name}.log"
+	if [[ ! -f "$failed_file" ]]; then
+		echo "Error: task '${name}' not found in failed/"
+		return 1
+	fi
+	mv "$failed_file" "${SIPAG_DIR}/queue/${name}.md"
+	if [[ -f "$log_file" ]]; then
+		rm "$log_file"
+	fi
+	echo "Retrying: ${name} (moved to queue)"
+}
+
 # --- Argument parsing ---
 
 main() {
 	local command=""
 	local add_text=""
+	local cmd_name_arg=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -166,6 +218,22 @@ main() {
 		add)
 			command="add"
 			shift
+			;;
+		show)
+			command="show"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				cmd_name_arg="$1"
+				shift
+			fi
+			;;
+		retry)
+			command="retry"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				cmd_name_arg="$1"
+				shift
+			fi
 			;;
 		start)
 			command="start"
@@ -233,6 +301,8 @@ main() {
 	next) cmd_next ;;
 	list) cmd_list ;;
 	add) cmd_add "$add_text" ;;
+	show) cmd_show "$cmd_name_arg" ;;
+	retry) cmd_retry "$cmd_name_arg" ;;
 	start) cmd_start ;;
 	esac
 }
