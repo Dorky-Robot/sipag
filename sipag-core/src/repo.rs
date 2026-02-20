@@ -1,93 +1,117 @@
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::Write as IoWrite;
+use std::io::Write;
 use std::path::Path;
 
-/// Look up a repo URL by name from `repos.conf`.
-///
-/// File format: one `name=url` entry per line.
-/// Returns an error if the name is not found.
-pub fn repo_url(name: &str, sipag_dir: &Path) -> Result<String> {
+/// Look up a repo name in repos.conf and return its URL.
+pub fn get_repo_url(sipag_dir: &Path, name: &str) -> Result<String> {
     let conf = sipag_dir.join("repos.conf");
-
     if !conf.exists() {
-        bail!("repos.conf not found (use 'sipag repo add' to register a repo)");
+        bail!("No repos registered. Use: sipag repo add <name> <url>");
     }
-
     let content = fs::read_to_string(&conf)
-        .with_context(|| format!("failed to read {}", conf.display()))?;
-
+        .with_context(|| format!("Failed to read {}", conf.display()))?;
     for line in content.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        // Split on first '=' only so URLs with '=' in query params are preserved
-        if let Some(eq_pos) = line.find('=') {
-            let key = &line[..eq_pos];
-            let val = &line[eq_pos + 1..];
-            if key == name {
-                return Ok(val.to_string());
+        if let Some((key, val)) = line.split_once('=') {
+            if key.trim() == name {
+                return Ok(val.trim().to_string());
             }
         }
     }
-
-    bail!("repo '{}' not found in repos.conf", name)
+    bail!("Repo '{}' not found in repos.conf", name)
 }
 
-/// Register a new repo name → URL mapping.
-///
-/// Returns an error if the name is already registered.
-pub fn repo_add(name: &str, url: &str, sipag_dir: &Path) -> Result<()> {
+/// Register a new repo name → URL mapping in repos.conf.
+pub fn add_repo(sipag_dir: &Path, name: &str, url: &str) -> Result<()> {
     let conf = sipag_dir.join("repos.conf");
-
-    // Check for duplicate
     if conf.exists() {
-        let content = fs::read_to_string(&conf)?;
+        let content = fs::read_to_string(&conf)
+            .with_context(|| format!("Failed to read {}", conf.display()))?;
         for line in content.lines() {
-            if let Some(eq_pos) = line.find('=') {
-                if &line[..eq_pos] == name {
-                    bail!("repo '{}' already exists", name);
+            if let Some((key, _)) = line.split_once('=') {
+                if key.trim() == name {
+                    bail!("Error: repo '{}' already exists", name);
                 }
             }
         }
     }
-
-    // Ensure parent directory exists
-    if let Some(parent) = conf.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let mut f = fs::OpenOptions::new()
+    let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&conf)
-        .with_context(|| format!("failed to open {}", conf.display()))?;
-
-    writeln!(f, "{}={}", name, url)?;
+        .with_context(|| format!("Failed to open {}", conf.display()))?;
+    writeln!(file, "{}={}", name, url)?;
     Ok(())
 }
 
-/// List all registered repos as `(name, url)` pairs.
-pub fn repo_list(sipag_dir: &Path) -> Result<Vec<(String, String)>> {
+/// List all repos from repos.conf as (name, url) pairs.
+pub fn list_repos(sipag_dir: &Path) -> Result<Vec<(String, String)>> {
     let conf = sipag_dir.join("repos.conf");
-
     if !conf.exists() {
-        return Ok(vec![]);
+        return Ok(Vec::new());
     }
-
-    let content = fs::read_to_string(&conf)?;
-    let mut repos = Vec::new();
-
-    for line in content.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(eq_pos) = line.find('=') {
-            let name = line[..eq_pos].to_string();
-            let url = line[eq_pos + 1..].to_string();
-            repos.push((name, url));
-        }
-    }
-
+    let content = fs::read_to_string(&conf)
+        .with_context(|| format!("Failed to read {}", conf.display()))?;
+    let repos = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            line.split_once('=')
+                .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect();
     Ok(repos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_add_and_get_repo() {
+        let dir = TempDir::new().unwrap();
+        add_repo(dir.path(), "myrepo", "https://github.com/org/repo").unwrap();
+        let url = get_repo_url(dir.path(), "myrepo").unwrap();
+        assert_eq!(url, "https://github.com/org/repo");
+    }
+
+    #[test]
+    fn test_get_repo_not_found() {
+        let dir = TempDir::new().unwrap();
+        assert!(get_repo_url(dir.path(), "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_get_repo_no_conf_file() {
+        let dir = TempDir::new().unwrap();
+        // No repos.conf exists
+        assert!(get_repo_url(dir.path(), "anyrepo").is_err());
+    }
+
+    #[test]
+    fn test_add_duplicate_repo() {
+        let dir = TempDir::new().unwrap();
+        add_repo(dir.path(), "myrepo", "https://github.com/org/repo").unwrap();
+        assert!(add_repo(dir.path(), "myrepo", "https://github.com/org/other").is_err());
+    }
+
+    #[test]
+    fn test_list_repos() {
+        let dir = TempDir::new().unwrap();
+        add_repo(dir.path(), "repo1", "https://github.com/org/repo1").unwrap();
+        add_repo(dir.path(), "repo2", "https://github.com/org/repo2").unwrap();
+        let repos = list_repos(dir.path()).unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].0, "repo1");
+        assert_eq!(repos[0].1, "https://github.com/org/repo1");
+        assert_eq!(repos[1].0, "repo2");
+    }
+
+    #[test]
+    fn test_list_repos_empty() {
+        let dir = TempDir::new().unwrap();
+        let repos = list_repos(dir.path()).unwrap();
+        assert!(repos.is_empty());
+    }
 }
