@@ -151,11 +151,13 @@ claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${done_dir}/${task_id}.md"
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 				echo "==> Done: ${task_id}"
+				notify "success" "${description}"
 			else
 				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
 				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${failed_dir}/${task_id}.md"
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 				echo "==> Failed: ${task_id}"
+				notify "failure" "${description}"
 			fi
 		) &
 		disown
@@ -175,11 +177,13 @@ claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 			mv "${tracking_file}" "${done_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 			echo "==> Done: ${task_id}"
+			notify "success" "${description}"
 		else
 			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
 			mv "${tracking_file}" "${failed_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 			echo "==> Failed: ${task_id}"
+			notify "failure" "${description}"
 		fi
 	fi
 }
@@ -218,6 +222,7 @@ executor_run() {
 			echo "Error: failed to parse task file: ${task_file}" >&2
 			mv "$task_file" "${failed_dir}/${task_name}.md"
 			echo "==> Failed: ${task_name}"
+			notify "failure" "${task_name}"
 			processed=$((processed + 1))
 			continue
 		fi
@@ -228,6 +233,7 @@ executor_run() {
 			echo "Error: repo '${TASK_REPO}' not found in repos.conf" >&2
 			mv "$task_file" "${failed_dir}/${task_name}.md"
 			echo "==> Failed: ${task_name}"
+			notify "failure" "${TASK_TITLE}"
 			processed=$((processed + 1))
 			continue
 		fi

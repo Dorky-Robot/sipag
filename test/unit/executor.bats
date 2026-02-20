@@ -8,6 +8,7 @@ setup() {
   setup_common
   source "${SIPAG_ROOT}/lib/task.sh"
   source "${SIPAG_ROOT}/lib/repo.sh"
+  source "${SIPAG_ROOT}/lib/notify.sh"
   source "${SIPAG_ROOT}/lib/executor.sh"
 
   export SIPAG_DIR="${TEST_TMPDIR}/sipag"
