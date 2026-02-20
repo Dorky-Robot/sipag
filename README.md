@@ -130,6 +130,26 @@ Simplify sipag to sandbox launcher
 | `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |
 | `GH_TOKEN` | _(required)_ | Passed into container |
 
+## Customizing behavior with CLAUDE.md
+
+Repos can control how Claude behaves inside the sandbox by adding a `CLAUDE.md` file. Claude Code reads it automatically when it starts in the repo directory.
+
+Common uses:
+
+- **Coding conventions** — preferred style, naming rules, patterns to avoid
+- **Test commands** — how to run tests for this repo (e.g. `make test`, `pytest`, `npm test`)
+- **Architecture notes** — module layout, important constraints, areas to avoid touching
+- **Commit message format** — conventional commits, ticket prefixes, etc.
+
+**Where to put it:**
+
+```
+CLAUDE.md            # repo root (most common)
+.claude/CLAUDE.md    # alternative location Claude also reads
+```
+
+sipag's executor prompt explicitly instructs Claude to read and follow `CLAUDE.md` before writing any code. No configuration is needed — just add the file to your repo.
+
 ## Part of the dorky robot stack
 
 ```
