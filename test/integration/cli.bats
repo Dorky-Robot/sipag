@@ -345,6 +345,81 @@ EOF
   assert_file_contains "$queuefile" "priority: low"
 }
 
+# --- sipag show ---
+
+@test "show: found in done/" {
+  local dir="${TEST_TMPDIR}/sipag-dirs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Fix the flaky test" >"${dir}/done/003-fix-flaky-test.md"
+
+  run "${SIPAG_ROOT}/bin/sipag" show 003-fix-flaky-test
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "=== Task: 003-fix-flaky-test ==="
+  assert_output_contains "Status: done"
+  assert_output_contains "Fix the flaky test"
+}
+
+@test "show: found in failed/ with log" {
+  local dir="${TEST_TMPDIR}/sipag-dirs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Fix the flaky test" >"${dir}/failed/003-fix-flaky-test.md"
+  echo "Error: timeout after 600s" >"${dir}/failed/003-fix-flaky-test.log"
+
+  run "${SIPAG_ROOT}/bin/sipag" show 003-fix-flaky-test
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "=== Task: 003-fix-flaky-test ==="
+  assert_output_contains "Status: failed"
+  assert_output_contains "Fix the flaky test"
+  assert_output_contains "=== Log ==="
+  assert_output_contains "Error: timeout after 600s"
+}
+
+@test "show: not found exits with error" {
+  local dir="${TEST_TMPDIR}/sipag-dirs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" show nonexistent-task
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Error"
+  assert_output_contains "nonexistent-task"
+}
+
+# --- sipag retry ---
+
+@test "retry: moves task from failed/ to queue/ and deletes log" {
+  local dir="${TEST_TMPDIR}/sipag-dirs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Fix the flaky test" >"${dir}/failed/003-fix-flaky-test.md"
+  echo "Error: timeout after 600s" >"${dir}/failed/003-fix-flaky-test.log"
+
+  run "${SIPAG_ROOT}/bin/sipag" retry 003-fix-flaky-test
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Retrying"
+  assert_output_contains "003-fix-flaky-test"
+
+  # Task file moved to queue/
+  [[ -f "${dir}/queue/003-fix-flaky-test.md" ]]
+  # No longer in failed/
+  [[ ! -f "${dir}/failed/003-fix-flaky-test.md" ]]
+  # Log deleted
+  [[ ! -f "${dir}/failed/003-fix-flaky-test.log" ]]
+}
+
+@test "retry: errors if task not in failed/" {
+  local dir="${TEST_TMPDIR}/sipag-dirs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" retry nonexistent-task
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Error"
+  assert_output_contains "nonexistent-task"
+}
+
 # --- default command ---
 
 @test "bare sipag: defaults to next" {
