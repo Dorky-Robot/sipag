@@ -194,7 +194,7 @@ EOF
 @test "help: prints usage" {
   run "${SIPAG_ROOT}/bin/sipag" help
   [[ "$status" -eq 0 ]]
-  assert_output_contains "task queue feeder"
+  assert_output_contains "sandbox launcher"
   assert_output_contains "SIPAG_FILE"
 }
 
@@ -550,4 +550,373 @@ MOCK
   [[ "$status" -eq 0 ]]
   assert_output_contains "Task 1: First task"
   assert_output_contains "Done: First task"
+}
+
+# --- sipag run ---
+
+@test "run: requires --repo flag" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" run "fix the bug"
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "--repo"
+}
+
+@test "run: requires task description" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "description"
+}
+
+@test "run: prints task ID and moves to done on docker success" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 "Task output"
+
+  # Pass-through timeout
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Task ID:"
+  assert_output_contains "Done:"
+
+  # File should be in done/
+  local done_count
+  done_count=$(ls "${dir}/done"/*.md 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$done_count" -gt 0 ]]
+}
+
+@test "run: moves to failed on docker failure" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 1 "Docker error"
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Task ID:"
+  assert_output_contains "Failed:"
+
+  local failed_count
+  failed_count=$(ls "${dir}/failed"/*.md 2>/dev/null | wc -l | tr -d ' ')
+  [[ "$failed_count" -gt 0 ]]
+}
+
+@test "run: tracking file in done/ contains repo and started" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 ""
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+
+  local done_file
+  done_file=$(ls "${dir}/done"/*.md 2>/dev/null | head -1)
+  assert_file_contains "$done_file" "repo: https://github.com/org/repo"
+  assert_file_contains "$done_file" "started:"
+}
+
+@test "run: log file is created in done/ on success" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 "hello from docker"
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+
+  local done_log
+  done_log=$(ls "${dir}/done"/*.log 2>/dev/null | head -1)
+  assert_file_exists "$done_log"
+}
+
+@test "run: --issue flag stored in tracking file" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 ""
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo --issue 42 "fix the bug"
+
+  local done_file
+  done_file=$(ls "${dir}/done"/*.md 2>/dev/null | head -1)
+  assert_file_contains "$done_file" "issue: 42"
+}
+
+@test "run: auto-inits directory structure" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 ""
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+  [[ "$status" -eq 0 ]]
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
+}
+
+# --- sipag ps ---
+
+@test "ps: shows running tasks with status" {
+  local dir="${TEST_TMPDIR}/sipag-ps"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  cat >"${dir}/running/001-fix-bug.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+container: sipag-001-fix-bug
+---
+Fix the bug
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" ps
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "001-fix-bug"
+  assert_output_contains "running"
+  assert_output_contains "https://github.com/org/repo"
+}
+
+@test "ps: shows done and failed tasks" {
+  local dir="${TEST_TMPDIR}/sipag-ps"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  cat >"${dir}/done/001-done-task.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+ended: 2024-01-01T12:10:00Z
+---
+Done task
+EOF
+
+  cat >"${dir}/failed/002-failed-task.md" <<'EOF'
+---
+repo: https://github.com/org/repo2
+started: 2024-01-01T13:00:00Z
+---
+Failed task
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" ps
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "001-done-task"
+  assert_output_contains "done"
+  assert_output_contains "002-failed-task"
+  assert_output_contains "failed"
+}
+
+@test "ps: shows duration for tasks with started timestamp" {
+  local dir="${TEST_TMPDIR}/sipag-ps"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running"
+
+  cat >"${dir}/running/001-task.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+container: sipag-001-task
+---
+A task
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" ps
+  [[ "$status" -eq 0 ]]
+  # Duration should not be "-" since started is set
+  assert_output_contains "001-task"
+}
+
+@test "ps: shows header row" {
+  local dir="${TEST_TMPDIR}/sipag-ps"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" ps
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "ID"
+  assert_output_contains "STATUS"
+  assert_output_contains "REPO"
+}
+
+@test "ps: shows no tasks message when all dirs empty" {
+  local dir="${TEST_TMPDIR}/sipag-ps"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" ps
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "No tasks found"
+}
+
+# --- sipag logs ---
+
+@test "logs: requires task id" {
+  local dir="${TEST_TMPDIR}/sipag-logs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running"
+
+  run "${SIPAG_ROOT}/bin/sipag" logs
+  [[ "$status" -ne 0 ]]
+}
+
+@test "logs: prints log for running task" {
+  local dir="${TEST_TMPDIR}/sipag-logs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Running task output" >"${dir}/running/001-fix-bug.log"
+
+  run "${SIPAG_ROOT}/bin/sipag" logs 001-fix-bug
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Running task output"
+}
+
+@test "logs: prints log for done task" {
+  local dir="${TEST_TMPDIR}/sipag-logs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Done task output" >"${dir}/done/001-fix-bug.log"
+
+  run "${SIPAG_ROOT}/bin/sipag" logs 001-fix-bug
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Done task output"
+}
+
+@test "logs: prints log for failed task" {
+  local dir="${TEST_TMPDIR}/sipag-logs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/done" "${dir}/failed"
+  echo "Error: timeout" >"${dir}/failed/001-fix-bug.log"
+
+  run "${SIPAG_ROOT}/bin/sipag" logs 001-fix-bug
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Error: timeout"
+}
+
+@test "logs: errors when task not found" {
+  local dir="${TEST_TMPDIR}/sipag-logs"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" logs nonexistent-task
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Error"
+  assert_output_contains "nonexistent-task"
+}
+
+# --- sipag kill ---
+
+@test "kill: requires task id" {
+  local dir="${TEST_TMPDIR}/sipag-kill"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running"
+
+  run "${SIPAG_ROOT}/bin/sipag" kill
+  [[ "$status" -ne 0 ]]
+}
+
+@test "kill: errors when task not in running/" {
+  local dir="${TEST_TMPDIR}/sipag-kill"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" kill nonexistent-task
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Error"
+  assert_output_contains "nonexistent-task"
+}
+
+@test "kill: calls docker kill and moves task to failed/" {
+  local dir="${TEST_TMPDIR}/sipag-kill"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/failed"
+  create_mock "docker" 0 ""
+
+  cat >"${dir}/running/001-fix-bug.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+container: sipag-001-fix-bug
+---
+Fix the bug
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" kill 001-fix-bug
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Killed"
+  assert_output_contains "001-fix-bug"
+
+  # Task moved to failed/
+  [[ -f "${dir}/failed/001-fix-bug.md" ]]
+  [[ ! -f "${dir}/running/001-fix-bug.md" ]]
+
+  # docker kill was called
+  local calls
+  calls="$(get_mock_calls "docker")"
+  [[ "$calls" == *"kill"* ]]
+  [[ "$calls" == *"sipag-001-fix-bug"* ]]
+}
+
+@test "kill: moves log file to failed/ along with task" {
+  local dir="${TEST_TMPDIR}/sipag-kill"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/running" "${dir}/failed"
+  create_mock "docker" 0 ""
+
+  echo "partial output" >"${dir}/running/001-fix-bug.log"
+  cat >"${dir}/running/001-fix-bug.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+container: sipag-001-fix-bug
+---
+Fix the bug
+EOF
+
+  "${SIPAG_ROOT}/bin/sipag" kill 001-fix-bug
+
+  [[ -f "${dir}/failed/001-fix-bug.log" ]]
+  [[ ! -f "${dir}/running/001-fix-bug.log" ]]
 }

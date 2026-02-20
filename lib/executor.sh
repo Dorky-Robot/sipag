@@ -76,8 +76,101 @@ claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 		>"$log_file" 2>&1
 }
 
+# Core implementation for the sipag run command.
+# Args: task_id repo_url description [issue] [background:0|1]
+# Expects SIPAG_DIR to be set.
+# Creates a tracking file in running/, runs docker, moves to done/ or failed/ on completion.
+executor_run_impl() {
+	local task_id="$1"
+	local repo_url="$2"
+	local description="$3"
+	local issue="${4:-}"
+	local background="${5:-0}"
+
+	local running_dir="${SIPAG_DIR}/running"
+	local done_dir="${SIPAG_DIR}/done"
+	local failed_dir="${SIPAG_DIR}/failed"
+	local tracking_file="${running_dir}/${task_id}.md"
+	local log_file="${running_dir}/${task_id}.log"
+	local container_name="sipag-${task_id}"
+
+	# Write tracking file with run metadata
+	{
+		printf -- '---\n'
+		printf 'repo: %s\n' "${repo_url}"
+		[[ -n "${issue}" ]] && printf 'issue: %s\n' "${issue}"
+		printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		printf 'container: %s\n' "${container_name}"
+		printf -- '---\n'
+		printf '%s\n' "${description}"
+	} >"${tracking_file}"
+
+	# Build Claude prompt
+	local prompt
+	prompt=$(executor_build_prompt "${description}" "")
+
+	# Resolve OAuth token from file if not already in environment
+	local token_file="${SIPAG_TOKEN_FILE:-${HOME}/.sipag/token}"
+	if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -f "${token_file}" ]]; then
+		CLAUDE_CODE_OAUTH_TOKEN="$(cat "${token_file}")"
+		export CLAUDE_CODE_OAUTH_TOKEN
+	fi
+
+	local image="${SIPAG_IMAGE:-sipag-worker:latest}"
+	local timeout_val="${SIPAG_TIMEOUT:-1800}"
+
+	if [[ "${background}" -eq 1 ]]; then
+		(
+			if timeout "${timeout_val}" docker run --rm --name "${container_name}" \
+				-e CLAUDE_CODE_OAUTH_TOKEN \
+				-e GH_TOKEN \
+				-e "REPO_URL=${repo_url}" \
+				-e "PROMPT=${prompt}" \
+				"${image}" \
+				bash -c 'git clone "$REPO_URL" /work && cd /work
+git config user.name "sipag"
+git config user.email "sipag@localhost"
+claude --print --dangerously-skip-permissions -p "$PROMPT"' \
+				>"${log_file}" 2>&1; then
+				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${done_dir}/${task_id}.md"
+				[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
+				echo "==> Done: ${task_id}"
+			else
+				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+				[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
+				echo "==> Failed: ${task_id}"
+			fi
+		) &
+		disown
+	else
+		if timeout "${timeout_val}" docker run --rm --name "${container_name}" \
+			-e CLAUDE_CODE_OAUTH_TOKEN \
+			-e GH_TOKEN \
+			-e "REPO_URL=${repo_url}" \
+			-e "PROMPT=${prompt}" \
+			"${image}" \
+			bash -c 'git clone "$REPO_URL" /work && cd /work
+git config user.name "sipag"
+git config user.email "sipag@localhost"
+claude --print --dangerously-skip-permissions -p "$PROMPT"' \
+			>"${log_file}" 2>&1; then
+			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			mv "${tracking_file}" "${done_dir}/${task_id}.md"
+			[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
+			echo "==> Done: ${task_id}"
+		else
+			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+			[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
+			echo "==> Failed: ${task_id}"
+		fi
+	fi
+}
+
 # Worker loop: pick tasks from queue/, run in Docker, move to done/ or failed/.
-# Loops until queue/ is empty.
+# Loops until queue/ is empty. Uses executor_run_impl() internally.
 executor_run() {
 	local queue_dir="${SIPAG_DIR}/queue"
 	local running_dir="${SIPAG_DIR}/running"
@@ -104,24 +197,31 @@ executor_run() {
 
 		local task_name
 		task_name="$(basename "$task_file" .md)"
-		local running_file="${running_dir}/${task_name}.md"
-		local running_log="${running_dir}/${task_name}.log"
 
-		# Move task to running/
-		mv "$task_file" "$running_file"
-
-		if executor_run_task "$running_file"; then
-			# Success: move task and log to done/
-			mv "$running_file" "${done_dir}/${task_name}.md"
-			[[ -f "$running_log" ]] && mv "$running_log" "${done_dir}/${task_name}.log"
-			echo "==> Done: ${task_name}"
-		else
-			local ec=$?
-			# Failure: move task and log to failed/
-			mv "$running_file" "${failed_dir}/${task_name}.md"
-			[[ -f "$running_log" ]] && mv "$running_log" "${failed_dir}/${task_name}.log"
-			echo "==> Failed (exit ${ec}): ${task_name}"
+		# Parse task frontmatter to get repo and description
+		if ! task_parse_file "$task_file"; then
+			echo "Error: failed to parse task file: ${task_file}" >&2
+			mv "$task_file" "${failed_dir}/${task_name}.md"
+			echo "==> Failed: ${task_name}"
+			processed=$((processed + 1))
+			continue
 		fi
+
+		# Look up repo URL
+		local url
+		if ! url=$(repo_url "$TASK_REPO"); then
+			echo "Error: repo '${TASK_REPO}' not found in repos.conf" >&2
+			mv "$task_file" "${failed_dir}/${task_name}.md"
+			echo "==> Failed: ${task_name}"
+			processed=$((processed + 1))
+			continue
+		fi
+
+		# Move task to running/ — executor_run_impl will overwrite it with tracking metadata
+		mv "$task_file" "${running_dir}/${task_name}.md"
+
+		# Run the task in foreground via executor_run_impl
+		executor_run_impl "${task_name}" "${url}" "${TASK_TITLE}" "" 0 || true
 
 		processed=$((processed + 1))
 	done

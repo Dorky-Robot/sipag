@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# sipag — task queue feeder for Claude Code
+# sipag — sandbox launcher for Claude Code
 #
-# Reads a markdown checklist, feeds the next unchecked item to claude,
-# marks it done, moves on.
+# Claude Code is the orchestrator. sipag spins up isolated Docker sandboxes
+# and makes progress visible.
 
 set -euo pipefail
 
@@ -34,25 +34,34 @@ ADD_PRIORITY="medium"
 
 usage() {
 	cat <<'EOF'
-sipag — task queue feeder for Claude Code
+sipag — sandbox launcher for Claude Code
 
 Usage:
-  sipag                           Run next unchecked task (same as sipag next)
-  sipag init                      Create ~/.sipag/{queue,running,done,failed}
-  sipag next [-c] [-n] [-f]      Find first - [ ], run claude, mark - [x]
-  sipag list [-f path]            Print all tasks with status
+  sipag run --repo <url> [--issue <n>] [-b] "<task>"
+                                Launch a Docker sandbox for a task
+  sipag ps                      List running and recent tasks
+  sipag logs <id>               Print log for a task
+  sipag kill <id>               Kill a running task container
+  sipag start                   Process queue/ serially (uses sipag run internally)
+  sipag init                    Create ~/.sipag/{queue,running,done,failed}
   sipag add "task" [--repo <name>] [--priority <level>]
                                 Queue a task (writes YAML frontmatter to queue/)
-  sipag show <name>               Print task file and log (searches all dirs)
-  sipag retry <name>              Move task from failed/ back to queue/
-  sipag start                     Start the executor (auto-inits if needed)
-  sipag repo add <name> <url>     Register a repo
-  sipag repo list                 List registered repos
-  sipag status                    Show queue state across all directories
-  sipag version                   Print version
-  sipag help                      Show this help
+  sipag list [-f path]          Print all tasks with status
+  sipag next [-c] [-n] [-f]     Find first - [ ], run claude, mark - [x]
+  sipag show <name>             Print task file and log (searches all dirs)
+  sipag retry <name>            Move task from failed/ back to queue/
+  sipag repo add <name> <url>   Register a repo
+  sipag repo list               List registered repos
+  sipag status                  Show queue state across all directories
+  sipag version                 Print version
+  sipag help                    Show this help
 
-Flags:
+Run flags:
+  --repo <url>              Repository URL to clone (required)
+  --issue <n>               GitHub issue number to associate
+  -b, --background          Run in background (default: foreground)
+
+Queue flags:
   -c, --continue            After completing, loop to the next task
   -n, --dry-run             Show what would run, don't invoke claude
   -f, --file <path>         Task file (default: ./tasks.md or $SIPAG_FILE)
@@ -62,7 +71,8 @@ Flags:
 Environment:
   SIPAG_DIR               Base directory (default: ~/.sipag)
   SIPAG_FILE              Task file path (default: ./tasks.md)
-  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_IMAGE             Docker base image (default: sipag-worker:latest)
+  SIPAG_TIMEOUT           Container timeout in seconds (default: 1800)
   SIPAG_MODEL             Model override
   SIPAG_PROMPT_PREFIX     Prepended to every prompt
   SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
@@ -266,6 +276,183 @@ cmd_retry() {
 	echo "Retrying: ${name} (moved to queue)"
 }
 
+# sipag run — launch a Docker sandbox for a task
+cmd_run() {
+	local repo_url=""
+	local issue=""
+	local background=0
+	local description=""
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--repo)
+			shift
+			repo_url="${1:?--repo requires a URL}"
+			shift
+			;;
+		--issue)
+			shift
+			issue="${1:?--issue requires a number}"
+			shift
+			;;
+		-b | --background)
+			background=1
+			shift
+			;;
+		-*)
+			echo "Unknown flag: $1" >&2
+			echo "Usage: sipag run --repo <url> [--issue <n>] [-b] \"<task>\"" >&2
+			return 1
+			;;
+		*)
+			description="$1"
+			shift
+			;;
+		esac
+	done
+
+	if [[ -z "$repo_url" ]]; then
+		echo "Usage: sipag run --repo <url> [--issue <n>] [-b] \"<task>\"" >&2
+		echo "  --repo is required" >&2
+		return 1
+	fi
+
+	if [[ -z "$description" ]]; then
+		echo "Usage: sipag run --repo <url> [--issue <n>] [-b] \"<task>\"" >&2
+		echo "  task description is required" >&2
+		return 1
+	fi
+
+	# Auto-init if needed
+	if [[ ! -d "${SIPAG_DIR}/running" ]]; then
+		sipag_init_dirs "${SIPAG_DIR}" >/dev/null
+	fi
+
+	# Generate unique task ID from timestamp + slugified description
+	local slug
+	slug=$(task_slugify "$description")
+	local task_id
+	task_id="$(date +%Y%m%d%H%M%S)-${slug:0:30}"
+	# Strip trailing hyphens from the slug portion
+	task_id="${task_id%-}"
+
+	echo "Task ID: ${task_id}"
+
+	executor_run_impl "${task_id}" "${repo_url}" "${description}" "${issue}" "${background}"
+}
+
+# sipag ps — list running and recent tasks
+cmd_ps() {
+	local now
+	now=$(date +%s)
+
+	printf '%-44s  %-8s  %-10s  %s\n' "ID" "STATUS" "DURATION" "REPO"
+
+	local found=0
+	for dir_status in running done failed; do
+		local dir="${SIPAG_DIR}/${dir_status}"
+		[[ -d "$dir" ]] || continue
+
+		local f
+		for f in "${dir}"/*.md; do
+			[[ -f "$f" ]] || continue
+
+			local task_id
+			task_id="$(basename "$f" .md)"
+
+			# Parse metadata from tracking file
+			local repo started ended
+			repo=$(grep -m1 "^repo:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			started=$(grep -m1 "^started:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			ended=$(grep -m1 "^ended:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+
+			# Compute duration
+			local duration="-"
+			if [[ -n "$started" ]]; then
+				local started_epoch ended_epoch
+				if [[ "$(uname)" == "Darwin" ]]; then
+					started_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || echo "$now")
+				else
+					started_epoch=$(date -d "$started" +%s 2>/dev/null || echo "$now")
+				fi
+				if [[ -n "$ended" ]]; then
+					if [[ "$(uname)" == "Darwin" ]]; then
+						ended_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ended" +%s 2>/dev/null || echo "$now")
+					else
+						ended_epoch=$(date -d "$ended" +%s 2>/dev/null || echo "$now")
+					fi
+				else
+					ended_epoch="$now"
+				fi
+				local diff=$((ended_epoch - started_epoch))
+				if [[ $diff -lt 60 ]]; then
+					duration="${diff}s"
+				elif [[ $diff -lt 3600 ]]; then
+					duration="$((diff / 60))m$((diff % 60))s"
+				else
+					duration="$((diff / 3600))h$((diff % 3600 / 60))m"
+				fi
+			fi
+
+			printf '%-44s  %-8s  %-10s  %s\n' \
+				"${task_id:0:44}" "${dir_status}" "${duration}" "${repo:-unknown}"
+			found=1
+		done
+	done
+
+	if [[ "$found" -eq 0 ]]; then
+		echo "No tasks found."
+	fi
+}
+
+# sipag logs <id> — print log for a task
+cmd_logs() {
+	local task_id="${1:-}"
+	if [[ -z "$task_id" ]]; then
+		echo "Usage: sipag logs <id>" >&2
+		return 1
+	fi
+
+	for dir_status in running done failed; do
+		local log_file="${SIPAG_DIR}/${dir_status}/${task_id}.log"
+		if [[ -f "$log_file" ]]; then
+			cat "$log_file"
+			return 0
+		fi
+	done
+
+	echo "Error: no log found for task '${task_id}'" >&2
+	return 1
+}
+
+# sipag kill <id> — kill a running container and move task to failed/
+cmd_kill() {
+	local task_id="${1:-}"
+	if [[ -z "$task_id" ]]; then
+		echo "Usage: sipag kill <id>" >&2
+		return 1
+	fi
+
+	local tracking_file="${SIPAG_DIR}/running/${task_id}.md"
+	if [[ ! -f "$tracking_file" ]]; then
+		echo "Error: task '${task_id}' not found in running/" >&2
+		return 1
+	fi
+
+	# Container name is deterministic: sipag-<task_id>
+	local container_name="sipag-${task_id}"
+
+	# Kill the Docker container (ignore errors if already stopped)
+	docker kill "${container_name}" 2>/dev/null || true
+
+	# Move task and log to failed/
+	local log_file="${SIPAG_DIR}/running/${task_id}.log"
+	mv "${tracking_file}" "${SIPAG_DIR}/failed/${task_id}.md"
+	[[ -f "$log_file" ]] && mv "$log_file" "${SIPAG_DIR}/failed/${task_id}.log"
+
+	echo "Killed: ${task_id}"
+}
+
 # --- Argument parsing ---
 
 main() {
@@ -275,6 +462,7 @@ main() {
 	local repo_subcmd=""
 	local repo_name=""
 	local repo_url_arg=""
+	local -a run_args=()
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -313,6 +501,32 @@ main() {
 		start)
 			command="start"
 			shift
+			;;
+		run)
+			command="run"
+			shift
+			run_args=("$@")
+			break
+			;;
+		ps)
+			command="ps"
+			shift
+			;;
+		logs)
+			command="logs"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				cmd_name_arg="$1"
+				shift
+			fi
+			;;
+		kill)
+			command="kill"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				cmd_name_arg="$1"
+				shift
+			fi
 			;;
 		repo)
 			command="repo"
@@ -399,6 +613,10 @@ main() {
 	show) cmd_show "$cmd_name_arg" ;;
 	retry) cmd_retry "$cmd_name_arg" ;;
 	start) cmd_start ;;
+	run) cmd_run "${run_args[@]+"${run_args[@]}"}" ;;
+	ps) cmd_ps ;;
+	logs) cmd_logs "$cmd_name_arg" ;;
+	kill) cmd_kill "$cmd_name_arg" ;;
 	repo) cmd_repo "$repo_subcmd" "$repo_name" "$repo_url_arg" ;;
 	status) cmd_status ;;
 	esac
