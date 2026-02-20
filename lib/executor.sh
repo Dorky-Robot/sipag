@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 # sipag — Docker executor
 
+# Format seconds as human-readable duration (e.g. "12m34s", "1h30m", "45s").
+format_duration() {
+	local seconds="$1"
+	if [[ $seconds -lt 60 ]]; then
+		printf '%ds' "$seconds"
+	elif [[ $seconds -lt 3600 ]]; then
+		printf '%dm%ds' "$((seconds / 60))" "$((seconds % 60))"
+	else
+		local h=$((seconds / 3600))
+		local m=$((seconds % 3600 / 60))
+		if [[ $m -eq 0 ]]; then
+			printf '%dh' "$h"
+		else
+			printf '%dh%dm' "$h" "$m"
+		fi
+	fi
+}
+
 # Build the Claude prompt for a task.
 # Arguments: title body [issue]
 # issue: optional GitHub issue number (e.g. "142") to include in the draft PR body
@@ -109,12 +127,17 @@ executor_run_impl() {
 	local log_file="${running_dir}/${task_id}.log"
 	local container_name="sipag-${task_id}"
 
+	# Capture start time for duration calculation
+	local start_time start_epoch
+	start_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	start_epoch="$(date +%s)"
+
 	# Write tracking file with run metadata
 	{
 		printf -- '---\n'
 		printf 'repo: %s\n' "${repo_url}"
 		[[ -n "${issue}" ]] && printf 'issue: %s\n' "${issue}"
-		printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+		printf 'started: %s\n' "${start_time}"
 		printf 'container: %s\n' "${container_name}"
 		printf -- '---\n'
 		printf '%s\n' "${description}"
@@ -147,13 +170,21 @@ git config user.name "sipag"
 git config user.email "sipag@localhost"
 claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 				>"${log_file}" 2>&1; then
-				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
-				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${done_dir}/${task_id}.md"
+				if [[ -f "${tracking_file}" ]]; then
+					local end_epoch; end_epoch="$(date +%s)"
+					printf 'completed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+					printf 'duration: %s\n' "$(format_duration $((end_epoch - start_epoch)))" >>"${tracking_file}"
+					mv "${tracking_file}" "${done_dir}/${task_id}.md"
+				fi
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 				echo "==> Done: ${task_id}"
 			else
-				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
-				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+				if [[ -f "${tracking_file}" ]]; then
+					local end_epoch; end_epoch="$(date +%s)"
+					printf 'completed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+					printf 'duration: %s\n' "$(format_duration $((end_epoch - start_epoch)))" >>"${tracking_file}"
+					mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+				fi
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 				echo "==> Failed: ${task_id}"
 			fi
@@ -171,12 +202,16 @@ git config user.name "sipag"
 git config user.email "sipag@localhost"
 claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 			>"${log_file}" 2>&1; then
-			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			local end_epoch; end_epoch="$(date +%s)"
+			printf 'completed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			printf 'duration: %s\n' "$(format_duration $((end_epoch - start_epoch)))" >>"${tracking_file}"
 			mv "${tracking_file}" "${done_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 			echo "==> Done: ${task_id}"
 		else
-			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			local end_epoch; end_epoch="$(date +%s)"
+			printf 'completed: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			printf 'duration: %s\n' "$(format_duration $((end_epoch - start_epoch)))" >>"${tracking_file}"
 			mv "${tracking_file}" "${failed_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 			echo "==> Failed: ${task_id}"

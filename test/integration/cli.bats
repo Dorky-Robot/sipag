@@ -638,6 +638,26 @@ MOCK
   assert_file_contains "$done_file" "started:"
 }
 
+@test "run: tracking file in done/ contains completed and duration" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+  create_mock "docker" 0 ""
+
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  "${SIPAG_ROOT}/bin/sipag" run --repo https://github.com/org/repo "fix the bug"
+
+  local done_file
+  done_file=$(ls "${dir}/done"/*.md 2>/dev/null | head -1)
+  assert_file_contains "$done_file" "completed:"
+  assert_file_contains "$done_file" "duration:"
+}
+
 @test "run: log file is created in done/ on success" {
   local dir="${TEST_TMPDIR}/fresh-sipag"
   export SIPAG_DIR="$dir"
@@ -728,7 +748,7 @@ EOF
 ---
 repo: https://github.com/org/repo
 started: 2024-01-01T12:00:00Z
-ended: 2024-01-01T12:10:00Z
+completed: 2024-01-01T12:10:00Z
 ---
 Done task
 EOF
@@ -919,4 +939,140 @@ EOF
 
   [[ -f "${dir}/failed/001-fix-bug.log" ]]
   [[ ! -f "${dir}/running/001-fix-bug.log" ]]
+}
+
+# --- sipag stats ---
+
+@test "stats: shows separator lines and task sections" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Total tasks:"
+  assert_output_contains "Completed:"
+  assert_output_contains "Failed:"
+  assert_output_contains "Pending:"
+}
+
+@test "stats: shows all zeros when no tasks exist" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Total tasks:     0"
+  assert_output_contains "Completed:       0"
+  assert_output_contains "Failed:          0"
+  assert_output_contains "Pending:         0"
+}
+
+@test "stats: counts tasks by state" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  echo "task" >"${dir}/done/001-done.md"
+  echo "task" >"${dir}/done/002-done.md"
+  echo "task" >"${dir}/failed/003-failed.md"
+  echo "task" >"${dir}/queue/004-pending.md"
+  echo "task" >"${dir}/queue/005-pending.md"
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Total tasks:     5"
+  assert_output_contains "Completed:       2"
+  assert_output_contains "Failed:          1"
+  assert_output_contains "Pending:         2"
+}
+
+@test "stats: shows percentage of completed and failed" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  echo "task" >"${dir}/done/001-done.md"
+  echo "task" >"${dir}/done/002-done.md"
+  echo "task" >"${dir}/failed/003-failed.md"
+  echo "task" >"${dir}/queue/004-pending.md"
+  echo "task" >"${dir}/queue/005-pending.md"
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  # 2/5 = 40%, 1/5 = 20%
+  assert_output_contains "40%"
+  assert_output_contains "20%"
+}
+
+@test "stats: shows duration stats from started/completed timestamps" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/done" "${dir}/failed" "${dir}/queue" "${dir}/running"
+
+  # Task 1: 10 minutes (600s)
+  cat >"${dir}/done/001-task.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+completed: 2024-01-01T12:10:00Z
+---
+Task one
+EOF
+
+  # Task 2: 5 minutes (300s)
+  cat >"${dir}/done/002-task.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T13:00:00Z
+completed: 2024-01-01T13:05:00Z
+---
+Task two
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Avg duration:"
+  assert_output_contains "Total time:"
+  assert_output_contains "Longest:"
+  # Longest is 10min = 600s -> "10m0s"
+  assert_output_contains "10m0s"
+  # 001-task is the longest
+  assert_output_contains "001-task"
+}
+
+@test "stats: skips duration section when no tasks have timestamps" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/done" "${dir}/failed" "${dir}/queue" "${dir}/running"
+
+  echo "task without timestamps" >"${dir}/done/001-done.md"
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Avg duration:"
+  assert_output_not_contains "Total time:"
+  assert_output_not_contains "Longest:"
+}
+
+@test "stats: includes failed tasks in duration stats" {
+  local dir="${TEST_TMPDIR}/sipag-stats"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/done" "${dir}/failed" "${dir}/queue" "${dir}/running"
+
+  cat >"${dir}/failed/001-failed.md" <<'EOF'
+---
+repo: https://github.com/org/repo
+started: 2024-01-01T12:00:00Z
+completed: 2024-01-01T12:03:00Z
+---
+Failed task
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" stats
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Avg duration:"
+  # 3 minutes = 180s -> "3m0s"
+  assert_output_contains "3m0s"
 }
