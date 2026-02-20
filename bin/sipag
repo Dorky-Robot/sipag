@@ -24,6 +24,8 @@ source "${SIPAG_ROOT}/lib/setup.sh"
 source "${SIPAG_ROOT}/lib/start.sh"
 # shellcheck source=../lib/merge.sh
 source "${SIPAG_ROOT}/lib/merge.sh"
+# shellcheck source=../lib/doctor.sh
+source "${SIPAG_ROOT}/lib/doctor.sh"
 
 # --- Defaults ---
 
@@ -39,6 +41,7 @@ sipag — autonomous dev agent powered by Claude Code
 
 Usage:
   sipag start <owner/repo>     Prime a Claude Code session with GitHub context
+  sipag doctor                 Diagnose setup problems and show exact fix commands
   sipag setup                  Configure Claude Code permissions for sipag
   sipag work <owner/repo>      Poll repo for issues, spin up Docker workers
   sipag merge <owner/repo>     Output PR context for a conversational merge session
@@ -137,6 +140,10 @@ cmd_start() {
 	start_run "$repo"
 }
 
+cmd_doctor() {
+	doctor_run
+}
+
 cmd_setup() {
 	setup_run
 }
@@ -176,6 +183,10 @@ main() {
 				start_repo="$1"
 				shift
 			fi
+			;;
+		doctor)
+			command="doctor"
+			shift
 			;;
 		setup)
 			command="setup"
@@ -258,6 +269,7 @@ main() {
 
 	case "$command" in
 	start) cmd_start "$start_repo" ;;
+	doctor) cmd_doctor ;;
 	setup) cmd_setup ;;
 	work) cmd_work "$work_repo" ;;
 	merge) cmd_merge "$merge_repo" ;;
