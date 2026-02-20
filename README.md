@@ -4,42 +4,88 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Spin up isolated Docker sandboxes. Make progress visible.*
+*Conversational agile for Claude Code. You talk; workers ship PRs.*
 
 </div>
 
 ## What is sipag?
 
-sipag is a sandbox launcher for Claude Code. Claude Code is the orchestrator — it decides what to work on, in what order, and handles retries. sipag does one thing well: spinning up isolated Docker sandboxes and making progress visible.
+sipag turns your Claude Code session into a product team. You open a conversation, type `sipag start <repo>`, and Claude reads your GitHub board — issues, PRs, labels — and starts working with you on priorities. When work is approved, Claude spins up Docker workers that build PRs autonomously. You make the calls; Claude and the workers do the work.
 
-```bash
-# Launch a Docker sandbox for a task
-sipag run --repo https://github.com/org/repo --issue 21 "Simplify sipag to sandbox launcher"
+The two commands you type as a human:
 
-# Watch what's happening
-sipag ps
-sipag logs <task-id>
+- **`sipag start <repo>`** — begin a sipag session inside Claude Code
+- **`sipag merge <repo>`** — begin a merge review conversation
 
-# If something goes wrong
-sipag kill <task-id>
+Everything else (`sipag work`, `sipag run`, `sipag next`) is Claude's domain.
 
-# Open the interactive TUI (no args)
-sipag
-```
+## Quick start
+
+1. Install sipag and run the setup wizard:
+
+   ```bash
+   sipag setup
+   ```
+
+2. Start a Claude Code session and kick off sipag:
+
+   ```bash
+   claude
+   ```
+
+   Then inside Claude Code, type:
+
+   ```
+   sipag start Dorky-Robot/my-project
+   ```
+
+3. Have a conversation. Claude reads the board, asks product questions, and handles triaging issues, refining specs, spinning up workers, and reviewing PRs. You make the decisions, Claude does the work.
+
+4. When PRs are ready to merge:
+
+   ```
+   sipag merge Dorky-Robot/my-project
+   ```
+
+   Claude walks through open PRs with you, you decide what ships.
 
 ## How it works
 
 ```
-sipag run → Docker container → clone repo → claude -p → PR
+you type: sipag start <repo>
+          ↓
+Claude reads GitHub board (issues, PRs, labels)
+          ↓
+conversation: priorities, triage, refinement
+          ↓
+Claude creates/approves issues via gh
+          ↓
+Claude runs: sipag work <repo>  (in background)
+          ↓
+Docker workers → clone → claude --dangerously-skip-permissions → PR
+          ↓
+you type: sipag merge <repo>
+          ↓
+conversation: review, decide, merge
 ```
 
-1. Claude Code calls `sipag run` with a repo URL and task description
-2. sipag generates a unique task ID, creates a tracking file in `running/`
-3. Spins up a Docker container: clones the repo, injects credentials
-4. Runs `claude --dangerously-skip-permissions` — Claude plans, codes, tests, commits, pushes, opens a PR
-5. Records the result in `done/` or `failed/` with a log file
+### What `sipag start` does
 
-The container is the safety boundary. Claude has full autonomy inside it.
+`sipag start <repo>` dumps the current GitHub board state to stdout — open issues, open PRs, labels, recent activity. This primes Claude Code with full context so it can immediately engage on product questions: what's approved, what needs refinement, what's blocked, what should ship next.
+
+Claude then adapts the conversation to what the board needs. If there's a backlog of approved issues, it starts workers. If issues need specs, it asks you product questions and opens refined issues. If PRs are stacking up, it suggests a merge session.
+
+### What workers do
+
+When Claude decides work is ready, it runs `sipag work <repo>` in the background. Workers:
+
+1. Poll GitHub for issues labeled `approved`
+2. Spin up an isolated Docker container per issue
+3. Clone the repo, inject credentials
+4. Run `claude --dangerously-skip-permissions` — Claude plans, codes, tests, commits, pushes, opens a PR
+5. Label the issue `in-progress`; on failure return it to `approved`
+
+The container is the safety boundary. Workers have full autonomy inside it.
 
 ## Installation
 
@@ -64,80 +110,19 @@ make build
 # Binary at: target/release/sipag
 ```
 
-## CLI
-
-### Sandbox commands (primary interface for Claude Code)
-
-```
-sipag run --repo <url> [--issue <n>] [-b] "<task>"
-                              Launch a Docker sandbox for a task
-sipag ps                      List running and recent tasks with status
-sipag logs <id>               Print the log for a task
-sipag kill <id>               Kill a running container, move task to failed/
-```
-
-### Queue commands (batch processing)
-
-```
-sipag start                   Process queue/ serially (uses sipag run internally)
-sipag add <title> --repo <name> [--priority <level>]
-                              Add a task to queue/
-sipag status                  Show queue state across all directories
-sipag show <name>             Print task file and log
-sipag retry <name>            Re-queue a failed task
-sipag repo add <name> <url>   Register a repo name → URL mapping
-sipag repo list               List registered repos
-```
-
-### Legacy checklist commands
-
-```
-sipag add "<title>"           Append task to ./tasks.md (no --repo)
-sipag list [-f <file>]        List tasks from a markdown checklist file
-sipag next [-c] [-n] [-f]     Run claude on the next pending checklist task
-```
-
-### Utility
-
-```
-sipag init                    Create ~/.sipag/{queue,running,done,failed}
-sipag version                 Print version
-sipag help                    Show help
-sipag tui                     Launch interactive TUI (same as no args)
-```
-
 ## TUI
 
-Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI:
+Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI to observe worker activity:
 
 - Scrollable task list across all states (queue, running, done, failed)
 - Color-coded by status: yellow=queued, cyan=running, green=done, red=failed
 - Keyboard navigation: `↑`/`k` up, `↓`/`j` down, `r` refresh, `q`/`Esc` quit
 
-## sipag run
-
-```bash
-sipag run --repo <url> [--issue <n>] [-b|--background] "<task description>"
-```
-
-- `--repo <url>` — repository URL to clone inside the container (required)
-- `--issue <n>` — GitHub issue number to associate with this task (optional)
-- `-b`, `--background` — run in background; sipag returns immediately (default: foreground)
-
-On launch, sipag:
-
-1. Auto-inits `~/.sipag/` if needed
-2. Generates a task ID: `YYYYMMDDHHMMSS-slug`
-3. Prints the task ID so you can follow up with `sipag logs` or `sipag kill`
-4. Creates a tracking file in `running/` with repo, issue, started timestamp
-5. Streams container output to a log file in `running/`
-6. On completion, moves tracking file + log to `done/` or `failed/`
-
 ## File layout
 
 ```
 ~/.sipag/
-  queue/                     # pending items (for sipag start)
+  queue/                     # pending items
     001-password-reset.md
   running/                   # currently executing (tracking files + logs)
     20240101120000-fix-bug.md
@@ -277,3 +262,52 @@ tao (decide)  ─────┘
 ## Status
 
 sipag v2 is in active development. See [VISION.md](VISION.md) for the full product vision.
+
+---
+
+## Appendix: Full CLI reference
+
+Most of these commands are invoked by Claude, not the human directly.
+
+### Human-facing
+
+```
+sipag start <owner/repo>      Prime a Claude Code session with board state
+sipag merge <owner/repo>      Start a merge review conversation
+sipag setup                   Run the interactive setup wizard
+sipag tui                     Launch interactive TUI (same as no args)
+sipag version                 Print version
+sipag help                    Show help
+```
+
+### Worker commands (Claude's domain)
+
+```
+sipag work <owner/repo>       Poll GitHub for approved issues, spin up Docker workers
+sipag run --repo <url> [--issue <n>] [-b] "<task>"
+                              Launch a Docker sandbox for a task
+sipag ps                      List running and recent tasks with status
+sipag logs <id>               Print the log for a task
+sipag kill <id>               Kill a running container, move task to failed/
+```
+
+### Queue commands (Claude's domain)
+
+```
+sipag add <title> --repo <name> [--priority <level>]
+                              Add a task to queue/
+sipag status                  Show queue state across all directories
+sipag show <name>             Print task file and log
+sipag retry <name>            Re-queue a failed task
+sipag repo add <name> <url>   Register a repo name → URL mapping
+sipag repo list               List registered repos
+sipag init                    Create ~/.sipag/{queue,running,done,failed}
+```
+
+### Legacy checklist commands
+
+```
+sipag next [-c] [-n] [-f]     Run claude on the next pending checklist task
+sipag list [-f <file>]        List tasks from a markdown checklist file
+sipag add "<title>"           Append task to ./tasks.md (no --repo)
+```
