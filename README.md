@@ -13,7 +13,7 @@
 sipag is a sandbox launcher for Claude Code. Claude Code is the orchestrator — it decides what to work on, in what order, and handles retries. sipag does one thing well: spinning up isolated Docker sandboxes and making progress visible.
 
 ```bash
-# Claude Code tells sipag what to run
+# Launch a Docker sandbox for a task
 sipag run --repo https://github.com/org/repo --issue 21 "Simplify sipag to sandbox launcher"
 
 # Watch what's happening
@@ -22,6 +22,9 @@ sipag logs <task-id>
 
 # If something goes wrong
 sipag kill <task-id>
+
+# Open the interactive TUI (no args)
+sipag
 ```
 
 ## How it works
@@ -37,6 +40,29 @@ sipag run → Docker container → clone repo → claude -p → PR
 5. Records the result in `done/` or `failed/` with a log file
 
 The container is the safety boundary. Claude has full autonomy inside it.
+
+## Installation
+
+### From source (Rust + Cargo required)
+
+```bash
+cargo install --path sipag
+```
+
+Or use the Makefile:
+
+```bash
+make install
+```
+
+This installs `sipag` to `~/.cargo/bin/sipag`.
+
+### Build without installing
+
+```bash
+make build
+# Binary at: target/release/sipag
+```
 
 ## CLI
 
@@ -63,13 +89,30 @@ sipag repo add <name> <url>   Register a repo name → URL mapping
 sipag repo list               List registered repos
 ```
 
+### Legacy checklist commands
+
+```
+sipag add "<title>"           Append task to ./tasks.md (no --repo)
+sipag list [-f <file>]        List tasks from a markdown checklist file
+sipag next [-c] [-n] [-f]     Run claude on the next pending checklist task
+```
+
 ### Utility
 
 ```
 sipag init                    Create ~/.sipag/{queue,running,done,failed}
 sipag version                 Print version
 sipag help                    Show help
+sipag tui                     Launch interactive TUI (same as no args)
 ```
+
+## TUI
+
+Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI:
+
+- Scrollable task list across all states (queue, running, done, failed)
+- Color-coded by status: yellow=queued, cyan=running, green=done, red=failed
+- Keyboard navigation: `↑`/`k` up, `↓`/`j` down, `r` refresh, `q`/`Esc` quit
 
 ## sipag run
 
@@ -150,6 +193,26 @@ CLAUDE.md            # repo root (most common)
 
 sipag's executor prompt explicitly instructs Claude to read and follow `CLAUDE.md` before writing any code. No configuration is needed — just add the file to your repo.
 
+## Project structure
+
+```
+sipag-core/    # Library: task parsing, repo registry, Docker executor
+sipag/         # Binary: CLI (clap) + TUI (ratatui)
+extras/        # safety-gate.sh: PreToolUse hook for Claude Code
+```
+
+## Development
+
+```bash
+# Requirements: Rust toolchain (rustup)
+cargo build          # debug build
+make build           # release build
+make test            # cargo test
+make lint            # cargo clippy -D warnings
+make fmt             # cargo fmt
+make dev             # lint + fmt-check + test
+```
+
 ## Part of the dorky robot stack
 
 ```
@@ -161,15 +224,6 @@ tao (decide)  ─────┘
 - [kubo](https://github.com/Dorky-Robot/kubo) — chain-of-thought reasoning, breaks problems into steps
 - [tao](https://github.com/Dorky-Robot/tao) — decision ledger, surfaces suspended actions
 - **sipag** — autonomous executor, turns backlog into PRs
-
-## Development
-
-```bash
-brew install bats-core shellcheck shfmt
-make dev     # lint + fmt-check + test
-make test    # all tests
-make lint    # shellcheck
-```
 
 ## Status
 

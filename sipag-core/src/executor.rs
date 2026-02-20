@@ -1,21 +1,13 @@
-use anyhow::Result;
-use chrono::Utc;
-use std::fs;
-use std::io::Write as IoWrite;
-use std::path::{Path, PathBuf};
+use anyhow::{Context, Result};
+use std::fs::{self, File};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::config::Config;
-use crate::repo;
-use crate::task;
+use crate::task::{append_ended, slugify, write_tracking_file};
 
-/// Build the Claude prompt for a task, matching the bash executor exactly.
+/// Build the Claude prompt for a task.
 pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
-    let mut prompt = String::new();
-    prompt.push_str("You are working on the repository at /work.\n");
-    prompt.push_str("\nYour task:\n");
-    prompt.push_str(title);
-    prompt.push('\n');
+    let mut prompt = format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
     if !body.is_empty() {
         prompt.push_str(body);
         prompt.push('\n');
@@ -23,12 +15,11 @@ pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
     prompt.push_str("\nInstructions:\n");
     prompt.push_str("- Create a new branch with a descriptive name\n");
     prompt.push_str("- Before writing any code, open a draft pull request with this body:\n");
-    prompt.push_str(
-        "    > This PR is being worked on by sipag. Commits will appear as work progresses.\n",
-    );
-    prompt.push_str(&format!("    Task: {}\n", title));
+    prompt.push_str(&format!(
+        "    > This PR is being worked on by sipag. Commits will appear as work progresses.\n    Task: {title}\n"
+    ));
     if let Some(iss) = issue {
-        prompt.push_str(&format!("    Issue: #{}\n", iss));
+        prompt.push_str(&format!("    Issue: #{iss}\n"));
     }
     prompt.push_str("- The PR title should match the task title\n");
     prompt.push_str("- Commit after each logical unit of work (not just at the end)\n");
@@ -41,408 +32,303 @@ pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
     prompt
 }
 
-/// Resolve the OAuth token: env var takes precedence, then token file.
-fn resolve_token(config: &Config) -> Option<String> {
-    std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if config.token_file.exists() {
-                fs::read_to_string(&config.token_file)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            } else {
-                None
-            }
-        })
+/// Configuration for running a task in a Docker container.
+pub struct RunConfig<'a> {
+    pub task_id: &'a str,
+    pub repo_url: &'a str,
+    pub description: &'a str,
+    pub issue: Option<&'a str>,
+    pub background: bool,
+    pub image: &'a str,
+    pub timeout_secs: u64,
 }
 
-/// Bash script run inside the Docker container.
-const CONTAINER_SCRIPT: &str = r#"git clone "$REPO_URL" /work && cd /work
+/// Run a task in a Docker container. Blocks until the container exits.
+/// Moves tracking file + log to done/ or failed/ based on exit code.
+pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
+    let RunConfig {
+        task_id,
+        repo_url,
+        description,
+        issue,
+        background,
+        image,
+        timeout_secs,
+    } = cfg;
+    let running_dir = sipag_dir.join("running");
+    let done_dir = sipag_dir.join("done");
+    let failed_dir = sipag_dir.join("failed");
+    let tracking_file = running_dir.join(format!("{task_id}.md"));
+    let log_path = running_dir.join(format!("{task_id}.log"));
+    let container_name = format!("sipag-{task_id}");
+
+    // Write tracking file
+    write_tracking_file(
+        &tracking_file,
+        repo_url,
+        issue,
+        &container_name,
+        description,
+    )?;
+
+    let prompt = build_prompt(description, "", issue);
+
+    // Resolve OAuth token from file if not in environment
+    let mut oauth_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    if oauth_token.is_none() {
+        if let Ok(home) = std::env::var("HOME") {
+            let token_file = Path::new(&home).join(".sipag/token");
+            if token_file.exists() {
+                oauth_token = fs::read_to_string(&token_file)
+                    .ok()
+                    .map(|s| s.trim().to_string());
+            }
+        }
+    }
+
+    let bash_script = r#"git clone "$REPO_URL" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
 claude --print --dangerously-skip-permissions -p "$PROMPT""#;
 
-/// Build the `docker run` Command for a task, without running it.
-fn docker_command(
-    container_name: &str,
-    repo_url: &str,
-    prompt: &str,
-    config: &Config,
-    log_path: &Path,
-) -> Result<Command> {
-    let log_file = fs::File::create(log_path)?;
-    let log_file2 = log_file.try_clone()?;
+    let run_docker = |log_file: &Path| -> bool {
+        let log_out = match File::create(log_file) {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let log_err = match log_out.try_clone() {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
 
-    let mut cmd = Command::new("timeout");
-    cmd.arg(config.timeout.to_string());
-    cmd.args(["docker", "run", "--rm", "--name", container_name]);
-    cmd.args(["-e", "CLAUDE_CODE_OAUTH_TOKEN"]);
-    cmd.args(["-e", "GH_TOKEN"]);
-    cmd.arg("-e").arg(format!("REPO_URL={}", repo_url));
-    cmd.arg("-e").arg(format!("PROMPT={}", prompt));
-    cmd.arg(&config.image);
-    cmd.args(["bash", "-c", CONTAINER_SCRIPT]);
-    cmd.stdout(Stdio::from(log_file));
-    cmd.stderr(Stdio::from(log_file2));
+        let mut cmd = Command::new("timeout");
+        cmd.arg(timeout_secs.to_string())
+            .arg("docker")
+            .arg("run")
+            .arg("--rm")
+            .arg("--name")
+            .arg(&container_name)
+            .arg("-e")
+            .arg("CLAUDE_CODE_OAUTH_TOKEN")
+            .arg("-e")
+            .arg("GH_TOKEN")
+            .arg("-e")
+            .arg(format!("REPO_URL={repo_url}"))
+            .arg("-e")
+            .arg(format!("PROMPT={prompt}"))
+            .arg(image)
+            .arg("bash")
+            .arg("-c")
+            .arg(bash_script)
+            .stdout(Stdio::from(log_out))
+            .stderr(Stdio::from(log_err));
 
-    Ok(cmd)
+        if let Some(ref token) = oauth_token {
+            cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+        }
+
+        cmd.status().map(|s| s.success()).unwrap_or(false)
+    };
+
+    if background {
+        // Spawn a subprocess to manage the container lifecycle.
+        // We re-invoke the binary with an internal subcommand so the
+        // post-completion file moves happen even after the parent exits.
+        let exe = std::env::current_exe().unwrap_or_else(|_| "sipag".into());
+        Command::new(&exe)
+            .args([
+                "_bg-exec",
+                "--task-id",
+                task_id,
+                "--repo-url",
+                repo_url,
+                "--description",
+                description,
+                "--image",
+                image,
+                "--timeout",
+                &timeout_secs.to_string(),
+                "--sipag-dir",
+                &sipag_dir.to_string_lossy(),
+            ])
+            .spawn()
+            .context("Failed to spawn background worker")?;
+    } else {
+        let success = run_docker(&log_path);
+        let _ = append_ended(&tracking_file);
+        if success {
+            if tracking_file.exists() {
+                fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
+            }
+            if log_path.exists() {
+                fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
+            }
+            println!("==> Done: {task_id}");
+        } else {
+            if tracking_file.exists() {
+                fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
+            }
+            if log_path.exists() {
+                fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
+            }
+            println!("==> Failed: {task_id}");
+        }
+    }
+
+    Ok(())
 }
 
-/// Append `ended: <timestamp>` to a tracking file.
-fn append_ended(tracking_file: &Path) {
-    let ended = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(tracking_file) {
-        let _ = writeln!(f, "ended: {}", ended);
-    }
-}
-
-/// Move a task (and optional log) to the destination directory.
-fn move_task(task_id: &str, src_dir: &Path, dst_dir: &Path) {
-    let src_md = src_dir.join(format!("{}.md", task_id));
-    let dst_md = dst_dir.join(format!("{}.md", task_id));
-    if src_md.exists() {
-        let _ = fs::rename(&src_md, &dst_md);
-    }
-
-    let src_log = src_dir.join(format!("{}.log", task_id));
-    let dst_log = dst_dir.join(format!("{}.log", task_id));
-    if src_log.exists() {
-        let _ = fs::rename(&src_log, &dst_log);
-    }
-}
-
-/// Core implementation for `sipag run`.
-///
-/// Creates a tracking file in `running/`, launches Docker (foreground or background),
-/// then moves the task to `done/` or `failed/` when complete.
-pub fn run_impl(
+/// Internal background worker: runs Docker and handles file moves on completion.
+/// Called by run_impl when background=true.
+pub fn run_bg_exec(
+    sipag_dir: &Path,
     task_id: &str,
     repo_url: &str,
     description: &str,
-    issue: Option<&str>,
-    background: bool,
-    config: &Config,
+    image: &str,
+    timeout_secs: u64,
 ) -> Result<()> {
-    let running_dir = config.sipag_dir.join("running");
-    let done_dir = config.sipag_dir.join("done");
-    let failed_dir = config.sipag_dir.join("failed");
-    let tracking_file = running_dir.join(format!("{}.md", task_id));
-    let log_file = running_dir.join(format!("{}.log", task_id));
-    let container_name = format!("sipag-{}", task_id);
+    let running_dir = sipag_dir.join("running");
+    let done_dir = sipag_dir.join("done");
+    let failed_dir = sipag_dir.join("failed");
+    let tracking_file = running_dir.join(format!("{task_id}.md"));
+    let log_path = running_dir.join(format!("{task_id}.log"));
+    let container_name = format!("sipag-{task_id}");
 
-    // Write tracking file
-    let started = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let mut tracking_content = format!("---\nrepo: {}\n", repo_url);
-    if let Some(iss) = issue {
-        tracking_content.push_str(&format!("issue: {}\n", iss));
-    }
-    tracking_content.push_str(&format!("started: {}\n", started));
-    tracking_content.push_str(&format!("container: {}\n", container_name));
-    tracking_content.push_str("---\n");
-    tracking_content.push_str(description);
-    tracking_content.push('\n');
-    fs::write(&tracking_file, &tracking_content)?;
+    let prompt = build_prompt(description, "", None);
 
-    // Build prompt
-    let prompt = build_prompt(description, "", issue);
-
-    // Ensure token is in env for Docker to inherit
-    if let Some(token) = resolve_token(config) {
-        // SAFETY: single-threaded at this point; we're just forwarding the credential
-        unsafe {
-            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", &token);
+    let mut oauth_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    if oauth_token.is_none() {
+        if let Ok(home) = std::env::var("HOME") {
+            let token_file = Path::new(&home).join(".sipag/token");
+            if token_file.exists() {
+                oauth_token = fs::read_to_string(&token_file)
+                    .ok()
+                    .map(|s| s.trim().to_string());
+            }
         }
     }
 
-    if background {
-        let config_clone = config.clone();
-        let task_id_owned = task_id.to_string();
-        let repo_url_owned = repo_url.to_string();
-        let prompt_owned = prompt.clone();
-        let container_name_owned = container_name.clone();
-        let running_dir_clone = running_dir.clone();
-        let done_dir_clone = done_dir.clone();
-        let failed_dir_clone = failed_dir.clone();
-        let log_file_clone = log_file.clone();
-        let tracking_file_clone = tracking_file.clone();
+    let bash_script = r#"git clone "$REPO_URL" /work && cd /work
+git config user.name "sipag"
+git config user.email "sipag@localhost"
+claude --print --dangerously-skip-permissions -p "$PROMPT""#;
 
-        std::thread::spawn(move || {
-            let mut cmd = match docker_command(
-                &container_name_owned,
-                &repo_url_owned,
-                &prompt_owned,
-                &config_clone,
-                &log_file_clone,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Error building docker command: {}", e);
-                    return;
-                }
-            };
+    let log_out = File::create(&log_path).context("Failed to create log file")?;
+    let log_err = log_out.try_clone()?;
 
-            let success = cmd.status().map(|s| s.success()).unwrap_or(false);
+    let mut cmd = Command::new("timeout");
+    cmd.arg(timeout_secs.to_string())
+        .arg("docker")
+        .arg("run")
+        .arg("--rm")
+        .arg("--name")
+        .arg(&container_name)
+        .arg("-e")
+        .arg("CLAUDE_CODE_OAUTH_TOKEN")
+        .arg("-e")
+        .arg("GH_TOKEN")
+        .arg("-e")
+        .arg(format!("REPO_URL={repo_url}"))
+        .arg("-e")
+        .arg(format!("PROMPT={prompt}"))
+        .arg(image)
+        .arg("bash")
+        .arg("-c")
+        .arg(bash_script)
+        .stdout(Stdio::from(log_out))
+        .stderr(Stdio::from(log_err));
 
-            append_ended(&tracking_file_clone);
+    if let Some(ref token) = oauth_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
 
-            if success {
-                move_task(&task_id_owned, &running_dir_clone, &done_dir_clone);
-                println!("==> Done: {}", task_id_owned);
-            } else {
-                move_task(&task_id_owned, &running_dir_clone, &failed_dir_clone);
-                println!("==> Failed: {}", task_id_owned);
-            }
-        });
+    let success = cmd.status().map(|s| s.success()).unwrap_or(false);
+    let _ = append_ended(&tracking_file);
+
+    if success {
+        if tracking_file.exists() {
+            fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
+        }
+        if log_path.exists() {
+            fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
+        }
+        println!("==> Done: {task_id}");
     } else {
-        let mut cmd = docker_command(
-            &container_name,
-            repo_url,
-            &prompt,
-            config,
-            &log_file,
-        )?;
-
-        let status = cmd.status()?;
-
-        append_ended(&tracking_file);
-
-        if status.success() {
-            move_task(task_id, &running_dir, &done_dir);
-            println!("==> Done: {}", task_id);
-        } else {
-            move_task(task_id, &running_dir, &failed_dir);
-            println!("==> Failed: {}", task_id);
+        if tracking_file.exists() {
+            fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
         }
+        if log_path.exists() {
+            fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
+        }
+        println!("==> Failed: {task_id}");
     }
 
     Ok(())
 }
 
-/// Worker loop: pick tasks from `queue/`, run in Docker, move to `done/` or `failed/`.
-///
-/// Loops until the queue is empty.
-pub fn run_queue(config: &Config) -> Result<()> {
-    let queue_dir = config.sipag_dir.join("queue");
-    let running_dir = config.sipag_dir.join("running");
-    let failed_dir = config.sipag_dir.join("failed");
-    let mut processed = 0usize;
-
-    loop {
-        // Get the first .md file from queue (sorted alphabetically)
-        let mut files = task::sorted_md_files(&queue_dir)?;
-        files.retain(|p| p.extension().map(|x| x == "md").unwrap_or(false));
-
-        let task_file = match files.into_iter().next() {
-            Some(f) => f,
-            None => {
-                if processed == 0 {
-                    println!("No tasks in queue — use 'sipag add' to queue a task");
-                } else {
-                    println!("Queue empty — processed {} task(s)", processed);
-                }
-                return Ok(());
-            }
-        };
-
-        let task_name = task_file
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
-
-        // Parse task frontmatter
-        let parsed = match task::parse_task_file(&task_file) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!(
-                    "Error: failed to parse task file: {}: {}",
-                    task_file.display(),
-                    e
-                );
-                let _ = fs::rename(&task_file, failed_dir.join(format!("{}.md", task_name)));
-                println!("==> Failed: {}", task_name);
-                processed += 1;
-                continue;
-            }
-        };
-
-        // Look up repo URL
-        let url = match repo::repo_url(&parsed.repo, &config.sipag_dir) {
-            Ok(u) => u,
-            Err(_) => {
-                eprintln!(
-                    "Error: repo '{}' not found in repos.conf",
-                    parsed.repo
-                );
-                let _ = fs::rename(&task_file, failed_dir.join(format!("{}.md", task_name)));
-                println!("==> Failed: {}", task_name);
-                processed += 1;
-                continue;
-            }
-        };
-
-        // Extract issue number from source (e.g. "github#142" -> "142")
-        let issue_num: Option<String> = parsed.source.as_ref().and_then(|s| {
-            s.rfind('#').map(|i| s[i + 1..].to_string())
-        });
-
-        // Move task to running/ (run_impl will overwrite with tracking metadata)
-        let running_path = running_dir.join(format!("{}.md", task_name));
-        let _ = fs::rename(&task_file, &running_path);
-
-        let _ = run_impl(
-            &task_name,
-            &url,
-            &parsed.title,
-            issue_num.as_deref(),
-            false,
-            config,
-        );
-
-        processed += 1;
+/// Run claude directly (non-Docker mode, for the `next` command).
+pub fn run_claude(title: &str, body: &str) -> Result<()> {
+    let mut prompt = title.to_string();
+    if let Ok(prefix) = std::env::var("SIPAG_PROMPT_PREFIX") {
+        prompt = format!("{prefix}\n\n{prompt}");
     }
-}
-
-/// Kill a running container and move the task to `failed/`.
-pub fn kill_task(task_id: &str, config: &Config) -> Result<()> {
-    let tracking_file = config.sipag_dir.join("running").join(format!("{}.md", task_id));
-
-    if !tracking_file.exists() {
-        anyhow::bail!("task '{}' not found in running/", task_id);
+    if !body.is_empty() {
+        prompt.push_str(&format!("\n\n{body}"));
     }
 
-    let container_name = format!("sipag-{}", task_id);
-
-    // Kill the container (ignore errors if already stopped)
-    let _ = Command::new("docker")
-        .args(["kill", &container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    let running_dir = config.sipag_dir.join("running");
-    let failed_dir = config.sipag_dir.join("failed");
-    move_task(task_id, &running_dir, &failed_dir);
-
-    println!("Killed: {}", task_id);
-    Ok(())
-}
-
-/// Show queue state: for each of queue/running/done/failed, list files and counts.
-pub fn print_status(sipag_dir: &Path) -> Result<()> {
-    for (label, subdir) in &[
-        ("Queue", "queue"),
-        ("Running", "running"),
-        ("Done", "done"),
-        ("Failed", "failed"),
-    ] {
-        let dir = sipag_dir.join(subdir);
-        let mut items: Vec<String> = if dir.is_dir() {
-            fs::read_dir(&dir)?
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect()
-        } else {
-            vec![]
-        };
-        items.sort();
-
-        if !items.is_empty() {
-            println!("{} ({}):", label, items.len());
-            for item in &items {
-                println!("  {}", item);
-            }
+    let mut args = vec!["--print".to_string()];
+    let skip_perms = std::env::var("SIPAG_SKIP_PERMISSIONS").unwrap_or_else(|_| "1".to_string());
+    if skip_perms == "1" {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Ok(model) = std::env::var("SIPAG_MODEL") {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+    if let Ok(extra) = std::env::var("SIPAG_CLAUDE_ARGS") {
+        for arg in extra.split_whitespace() {
+            args.push(arg.to_string());
         }
     }
-    Ok(())
+    args.push("-p".to_string());
+    args.push(prompt);
+
+    let timeout = std::env::var("SIPAG_TIMEOUT")
+        .unwrap_or_else(|_| "600".to_string())
+        .parse::<u64>()
+        .unwrap_or(600);
+
+    let status = Command::new("timeout")
+        .arg(timeout.to_string())
+        .arg("claude")
+        .args(&args)
+        .status()
+        .context("Failed to run claude")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("claude exited with non-zero status: {}", status)
+    }
 }
 
-/// List tasks from running/, done/, failed/ in tabular form.
-pub fn print_ps(sipag_dir: &Path) -> Result<()> {
-    println!(
-        "{:<44}  {:<8}  {:<10}  REPO",
-        "ID", "STATUS", "DURATION"
-    );
-
-    let now = Utc::now();
-    let mut found = false;
-
-    for dir_status in &["running", "done", "failed"] {
-        let dir = sipag_dir.join(dir_status);
-        if !dir.is_dir() {
-            continue;
-        }
-
-        let mut files: Vec<PathBuf> = fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().map(|x| x == "md").unwrap_or(false))
-            .collect();
-        files.sort();
-
-        for file in files {
-            let task_id = file
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-
-            let info = match task::parse_tracking_file(&file) {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-
-            let duration = compute_duration(&info.started, &info.ended, &now);
-            let repo_display = if info.repo.is_empty() {
-                "unknown".to_string()
-            } else {
-                info.repo.clone()
-            };
-
-            println!(
-                "{:<44}  {:<8}  {:<10}  {}",
-                &task_id[..task_id.len().min(44)],
-                dir_status,
-                duration,
-                repo_display,
-            );
-            found = true;
-        }
-    }
-
-    if !found {
-        println!("No tasks found.");
-    }
-
-    Ok(())
+/// Generate a task ID from the current timestamp and a slugified description.
+pub fn generate_task_id(description: &str) -> String {
+    let slug = slugify(description);
+    let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
+    let truncated = slug.get(..30.min(slug.len())).unwrap_or(&slug);
+    let id = format!("{ts}-{truncated}");
+    id.trim_end_matches('-').to_string()
 }
 
-fn compute_duration(
-    started: &Option<String>,
-    ended: &Option<String>,
-    now: &chrono::DateTime<Utc>,
-) -> String {
-    let start = match started {
-        Some(s) => match s.parse::<chrono::DateTime<Utc>>() {
-            Ok(dt) => dt,
-            Err(_) => return "-".to_string(),
-        },
-        None => return "-".to_string(),
-    };
-
-    let end = match ended {
-        Some(e) => match e.parse::<chrono::DateTime<Utc>>() {
-            Ok(dt) => dt,
-            Err(_) => *now,
-        },
-        None => *now,
-    };
-
-    let secs = (end - start).num_seconds().max(0);
+/// Format a duration in seconds as human-readable string.
+pub fn format_duration(secs: i64) -> String {
+    if secs < 0 {
+        return "-".to_string();
+    }
     if secs < 60 {
-        format!("{}s", secs)
+        format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m{}s", secs / 60, secs % 60)
     } else {
@@ -450,60 +336,61 @@ fn compute_duration(
     }
 }
 
-/// Print task file and log for a named task.
-pub fn show_task(name: &str, sipag_dir: &Path) -> Result<()> {
-    for dir_status in &["queue", "running", "done", "failed"] {
-        let candidate = sipag_dir.join(dir_status).join(format!("{}.md", name));
-        if candidate.exists() {
-            println!("=== Task: {} ===", name);
-            println!("Status: {}", dir_status);
-            let content = fs::read_to_string(&candidate)?;
-            print!("{}", content);
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            let log_file = sipag_dir.join(dir_status).join(format!("{}.log", name));
-            if log_file.exists() {
-                println!("=== Log ===");
-                let log = fs::read_to_string(&log_file)?;
-                print!("{}", log);
-            }
-
-            return Ok(());
-        }
+    #[test]
+    fn test_build_prompt_basic() {
+        let prompt = build_prompt("Fix the bug", "", None);
+        assert!(prompt.contains("Fix the bug"));
+        assert!(prompt.contains("repository at /work"));
+        assert!(prompt.contains("pull request"));
     }
 
-    anyhow::bail!("task '{}' not found", name)
-}
-
-/// Print the log for a task.
-pub fn print_logs(task_id: &str, sipag_dir: &Path) -> Result<()> {
-    for dir_status in &["running", "done", "failed"] {
-        let log_file = sipag_dir.join(dir_status).join(format!("{}.log", task_id));
-        if log_file.exists() {
-            let content = fs::read_to_string(&log_file)?;
-            print!("{}", content);
-            return Ok(());
-        }
+    #[test]
+    fn test_build_prompt_with_issue() {
+        let prompt = build_prompt("Fix the bug", "", Some("42"));
+        assert!(prompt.contains("Issue: #42"));
     }
 
-    anyhow::bail!("no log found for task '{}'", task_id)
-}
-
-/// Move a task from `failed/` back to `queue/` for retry.
-pub fn retry_task(name: &str, sipag_dir: &Path) -> Result<()> {
-    let failed_file = sipag_dir.join("failed").join(format!("{}.md", name));
-    if !failed_file.exists() {
-        anyhow::bail!("task '{}' not found in failed/", name);
+    #[test]
+    fn test_build_prompt_with_body() {
+        let prompt = build_prompt("Fix the bug", "Some detailed body", None);
+        assert!(prompt.contains("Some detailed body"));
     }
 
-    let queue_file = sipag_dir.join("queue").join(format!("{}.md", name));
-    fs::rename(&failed_file, &queue_file)?;
-
-    // Remove the old log if present
-    let log_file = sipag_dir.join("failed").join(format!("{}.log", name));
-    if log_file.exists() {
-        let _ = fs::remove_file(&log_file);
+    #[test]
+    fn test_build_prompt_no_issue() {
+        let prompt = build_prompt("Fix the bug", "", None);
+        assert!(!prompt.contains("Issue: #"));
     }
 
-    println!("Retrying: {} (moved to queue)", name);
-    Ok(())
+    #[test]
+    fn test_format_duration_seconds() {
+        assert_eq!(format_duration(30), "30s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes() {
+        assert_eq!(format_duration(90), "1m30s");
+    }
+
+    #[test]
+    fn test_format_duration_hours() {
+        assert_eq!(format_duration(3661), "1h1m");
+    }
+
+    #[test]
+    fn test_format_duration_negative() {
+        assert_eq!(format_duration(-1), "-");
+    }
+
+    #[test]
+    fn test_generate_task_id() {
+        let id = generate_task_id("Fix the authentication bug");
+        assert!(id.contains("fix-the-authentication-bug"));
+        // Should start with timestamp (14 digits)
+        assert!(id.chars().take(14).all(|c| c.is_ascii_digit()));
+    }
 }

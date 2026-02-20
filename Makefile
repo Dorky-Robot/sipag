@@ -1,34 +1,24 @@
-.PHONY: test test-unit test-integ lint fmt-check dev tui build clippy cargo-test
+.PHONY: build install test lint fmt fmt-check dev clean
 
-test: test-unit test-integ
+build:
+	cargo build --release
 
-test-unit:
-	bats test/unit/
+install:
+	cargo install --path sipag
 
-test-integ:
-	bats test/integration/
+test:
+	cargo test
 
 lint:
-	shellcheck -x -S warning bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
-
-fmt-check:
-	shfmt -d bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
+	cargo clippy --all-targets -- -D warnings
 
 fmt:
-	shfmt -w bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
+	cargo fmt
+
+fmt-check:
+	cargo fmt -- --check
 
 dev: lint fmt-check test
 
-# ── Rust TUI ──────────────────────────────────────────────────────────────────
-
-tui:
-	cargo build --release --manifest-path tui/Cargo.toml
-
-build:
-	cargo build
-
-clippy:
-	cargo clippy -- -D warnings
-
-cargo-test:
-	cargo test
+clean:
+	cargo clean

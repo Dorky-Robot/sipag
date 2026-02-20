@@ -1,0 +1,17 @@
+[package]
+name = "sipag"
+version = "2.0.0"
+edition = "2021"
+description = "Sandbox launcher for Claude Code — single binary with CLI and TUI"
+
+[[bin]]
+name = "sipag"
+path = "src/main.rs"
+
+[dependencies]
+sipag-core = { path = "../sipag-core" }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = "0.4"
+anyhow = "1"
