@@ -267,6 +267,86 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     Ok(())
 }
 
+/// Build the Claude prompt for an interactive PR review session.
+///
+/// `repo` is the `owner/name` identifier of the GitHub repository.
+/// `prs_json` is the raw JSON output from `gh pr list`.
+pub fn start_build_review_prompt(repo: &str, prs_json: &str) -> String {
+    format!(
+        r#"You are facilitating a PR review session for {repo}.
+
+Open PRs:
+{prs_json}
+
+YOUR ROLE:
+- Summarize the open PRs at a high level — group by size/type
+- Ask the human about their review priorities and risk tolerance
+- Discuss trade-offs for non-trivial PRs
+- For simple/clean PRs, propose batch approvals
+- When the human agrees, apply reviews via gh pr review
+- You can: approve, request changes, or comment on PRs
+- You can fetch full diffs on demand with: gh pr diff <number> --repo {repo}
+
+Keep it conversational. Start with a high-level summary and ask where to focus."#
+    )
+}
+
+/// Start an interactive PR review session for `repo` (owner/name format).
+///
+/// Fetches open PRs via `gh pr list`, builds a review prompt, and launches
+/// `claude` in interactive mode so the human can discuss and apply reviews.
+pub fn run_review(repo: &str) -> Result<()> {
+    println!("Fetching open PRs for {repo}...");
+    let pr_output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,body,files,reviewDecision,additions,deletions",
+            "--limit",
+            "20",
+        ])
+        .output()
+        .context("Failed to run 'gh pr list' — is the gh CLI installed and authenticated?")?;
+
+    if !pr_output.status.success() {
+        let stderr = String::from_utf8_lossy(&pr_output.stderr);
+        anyhow::bail!("gh pr list failed: {}", stderr.trim());
+    }
+
+    let prs_json = String::from_utf8_lossy(&pr_output.stdout);
+    let prompt = start_build_review_prompt(repo, prs_json.trim());
+
+    // Launch claude interactively (no --print so it stays in chat mode).
+    let mut args = vec!["--dangerously-skip-permissions".to_string()];
+    if let Ok(model) = std::env::var("SIPAG_MODEL") {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+    if let Ok(extra) = std::env::var("SIPAG_CLAUDE_ARGS") {
+        for arg in extra.split_whitespace() {
+            args.push(arg.to_string());
+        }
+    }
+    args.push("-p".to_string());
+    args.push(prompt);
+
+    let status = Command::new("claude")
+        .args(&args)
+        .status()
+        .context("Failed to run claude — is it installed?")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("claude exited with non-zero status: {}", status)
+    }
+}
+
 /// Run claude directly (non-Docker mode, for the `next` command).
 pub fn run_claude(title: &str, body: &str) -> Result<()> {
     let mut prompt = title.to_string();
@@ -392,5 +472,32 @@ mod tests {
         assert!(id.contains("fix-the-authentication-bug"));
         // Should start with timestamp (14 digits)
         assert!(id.chars().take(14).all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_start_build_review_prompt_contains_repo() {
+        let prompt = start_build_review_prompt("acme/backend", "[]");
+        assert!(prompt.contains("acme/backend"));
+    }
+
+    #[test]
+    fn test_start_build_review_prompt_contains_prs_json() {
+        let prs = r#"[{"number":42,"title":"Add caching","additions":150,"deletions":10}]"#;
+        let prompt = start_build_review_prompt("acme/backend", prs);
+        assert!(prompt.contains(prs));
+    }
+
+    #[test]
+    fn test_start_build_review_prompt_role_instructions() {
+        let prompt = start_build_review_prompt("acme/backend", "[]");
+        assert!(prompt.contains("gh pr review"));
+        assert!(prompt.contains("gh pr diff"));
+        assert!(prompt.contains("batch"));
+    }
+
+    #[test]
+    fn test_start_build_review_prompt_diff_command_includes_repo() {
+        let prompt = start_build_review_prompt("myorg/myrepo", "[]");
+        assert!(prompt.contains("gh pr diff <number> --repo myorg/myrepo"));
     }
 }

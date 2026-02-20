@@ -7,6 +7,7 @@ use sipag_core::{
 };
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -60,8 +61,11 @@ pub enum Commands {
         id: String,
     },
 
-    /// Process queue/ serially (uses sipag run internally)
-    Start,
+    /// Process queue/ serially, or start an interactive PR review session
+    Start {
+        #[command(subcommand)]
+        mode: Option<StartMode>,
+    },
 
     /// Create ~/.sipag/{queue,running,done,failed}
     Init,
@@ -152,6 +156,17 @@ pub enum RepoCommands {
     List,
 }
 
+#[derive(Subcommand)]
+pub enum StartMode {
+    /// Interactive PR review session — Claude discusses open PRs and applies reviews
+    Review {
+        /// GitHub repository in owner/name format (or full URL).
+        /// Defaults to the current directory's git remote origin.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None | Some(Commands::Tui) => {
@@ -163,7 +178,10 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
-        Some(Commands::Start) => cmd_start(),
+        Some(Commands::Start { mode }) => match mode {
+            None => cmd_start(),
+            Some(StartMode::Review { repo }) => cmd_review(repo.as_deref()),
+        },
         Some(Commands::Run {
             repo,
             issue,
@@ -591,6 +609,45 @@ fn cmd_retry(name: &str) -> Result<()> {
 
     println!("Retrying: {name} (moved to queue)");
     Ok(())
+}
+
+fn normalize_repo(repo: &str) -> String {
+    // Strip trailing .git
+    let repo = repo.trim().trim_end_matches(".git");
+    // https://github.com/owner/repo  →  owner/repo
+    if let Some(path) = repo.strip_prefix("https://github.com/") {
+        return path.to_string();
+    }
+    // git@github.com:owner/repo  →  owner/repo
+    if let Some(path) = repo.strip_prefix("git@github.com:") {
+        return path.to_string();
+    }
+    repo.to_string()
+}
+
+/// Resolve the target repo: use the provided value, or detect from `git remote origin`.
+fn resolve_repo(repo: Option<&str>) -> Result<String> {
+    if let Some(r) = repo {
+        return Ok(normalize_repo(r));
+    }
+
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .context("Failed to run git — is this a git repository?")?;
+
+    if !output.status.success() {
+        bail!("Could not detect repository from git remote. Use --repo owner/name to specify.");
+    }
+
+    let url = String::from_utf8_lossy(&output.stdout);
+    Ok(normalize_repo(url.trim()))
+}
+
+fn cmd_review(repo: Option<&str>) -> Result<()> {
+    let repo = resolve_repo(repo)?;
+    println!("Starting PR review session for {repo}...");
+    executor::run_review(&repo)
 }
 
 fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
