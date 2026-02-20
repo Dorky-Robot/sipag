@@ -417,7 +417,120 @@ EOF
   run "${SIPAG_ROOT}/bin/sipag" retry nonexistent-task
   [[ "$status" -ne 0 ]]
   assert_output_contains "Error"
-  assert_output_contains "nonexistent-task"
+  assert_output_contains "nonexistent-task"}
+
+# --- sipag repo add ---
+
+@test "repo add: registers a new repo" {
+  local dir="${TEST_TMPDIR}/sipag-repos"
+  export SIPAG_DIR="$dir"
+  mkdir -p "$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" repo add myrepo https://github.com/org/myrepo
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Registered"
+  assert_file_contains "${dir}/repos.conf" "myrepo=https://github.com/org/myrepo"
+}
+
+@test "repo add: creates repos.conf if missing" {
+  local dir="${TEST_TMPDIR}/sipag-repos"
+  export SIPAG_DIR="$dir"
+  mkdir -p "$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" repo add newrepo https://github.com/org/newrepo
+  [[ "$status" -eq 0 ]]
+  assert_file_exists "${dir}/repos.conf"
+}
+
+@test "repo add: errors if name already exists" {
+  local dir="${TEST_TMPDIR}/sipag-repos"
+  export SIPAG_DIR="$dir"
+  mkdir -p "$dir"
+  echo "existing=https://github.com/org/existing" >"${dir}/repos.conf"
+
+  run "${SIPAG_ROOT}/bin/sipag" repo add existing https://github.com/org/other
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "already exists"
+}
+
+# --- sipag repo list ---
+
+@test "repo list: prints all registered repos" {
+  local dir="${TEST_TMPDIR}/sipag-repos"
+  export SIPAG_DIR="$dir"
+  mkdir -p "$dir"
+  cat >"${dir}/repos.conf" <<'EOF'
+alpha=https://github.com/org/alpha
+beta=https://github.com/org/beta
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" repo list
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "alpha=https://github.com/org/alpha"
+  assert_output_contains "beta=https://github.com/org/beta"
+}
+
+@test "repo list: shows message when no repos registered" {
+  local dir="${TEST_TMPDIR}/sipag-repos"
+  export SIPAG_DIR="$dir"
+  mkdir -p "$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" repo list
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "No repos registered"
+}
+
+# --- sipag status ---
+
+@test "status: shows items by section with counts" {
+  local dir="${TEST_TMPDIR}/sipag-status"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  touch "${dir}/queue/005-add-input-validation"
+  touch "${dir}/queue/006-refactor-date-helpers"
+  touch "${dir}/running/007-fix-n-plus-one"
+  touch "${dir}/done/001-password-reset"
+  touch "${dir}/done/002-rate-limiting"
+  touch "${dir}/failed/003-fix-flaky-test"
+
+  run "${SIPAG_ROOT}/bin/sipag" status
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Queue (2):"
+  assert_output_contains "005-add-input-validation"
+  assert_output_contains "006-refactor-date-helpers"
+  assert_output_contains "Running (1):"
+  assert_output_contains "007-fix-n-plus-one"
+  assert_output_contains "Done (2):"
+  assert_output_contains "001-password-reset"
+  assert_output_contains "002-rate-limiting"
+  assert_output_contains "Failed (1):"
+  assert_output_contains "003-fix-flaky-test"
+}
+
+@test "status: skips sections with 0 items" {
+  local dir="${TEST_TMPDIR}/sipag-status"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  touch "${dir}/done/001-completed"
+
+  run "${SIPAG_ROOT}/bin/sipag" status
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Done (1):"
+  assert_output_not_contains "Queue"
+  assert_output_not_contains "Running"
+  assert_output_not_contains "Failed"
+}
+
+@test "status: shows nothing when all dirs empty" {
+  local dir="${TEST_TMPDIR}/sipag-status"
+  export SIPAG_DIR="$dir"
+  mkdir -p "${dir}/queue" "${dir}/running" "${dir}/done" "${dir}/failed"
+
+  run "${SIPAG_ROOT}/bin/sipag" status
+  [[ "$status" -eq 0 ]]
+  [[ -z "$output" ]]
 }
 
 # --- default command ---
