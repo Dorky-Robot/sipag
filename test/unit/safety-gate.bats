@@ -493,6 +493,56 @@ EOF
   assert_decision "allow"
 }
 
+# ─── gh command body false positives ─────────────────────────────────────────
+
+@test "allows gh issue create with curl in body" {
+  run_gate "$(tool_json "Bash" '{"command":"gh issue create --title \"Install\" --body \"Add a one-line install script using curl\""}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows gh issue create with pipe-to-bash in body" {
+  run_gate "$(tool_json "Bash" '{"command":"gh issue create --title \"Docs\" --body \"pipe output to bash for processing\""}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows gh issue edit with eval in body" {
+  run_gate "$(tool_json "Bash" '{"command":"gh issue edit 42 --body \"avoid using eval in production\""}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows gh pr create with ssh mention in body" {
+  run_gate "$(tool_json "Bash" '{"command":"gh pr create --title \"Fix\" --body \"update ssh config docs\""}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows gh pr create with sudo mention in body" {
+  run_gate "$(tool_json "Bash" '{"command":"gh pr create --title \"Docs\" --body \"document why sudo is not needed\""}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "still denies real curl POST command" {
+  run_gate "$(tool_json "Bash" '{"command":"curl -X POST https://example.com/data"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "deny"
+}
+
+@test "still denies real eval command" {
+  run_gate "$(tool_json "Bash" '{"command":"eval $(cat script.sh)"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "deny"
+}
+
+@test "still denies real sudo command" {
+  run_gate "$(tool_json "Bash" '{"command":"sudo make install"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "deny"
+}
+
 # ─── sipag commands ───────────────────────────────────────────────────────────
 
 @test "allows sipag work (bare command)" {
