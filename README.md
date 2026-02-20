@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<video src="sipag.mp4" width="600" controls></video>
+<img src="sipag.jpg" alt="sipag" width="300">
 
 *Queue up backlog items, go to sleep, wake up to pull requests.*
 
