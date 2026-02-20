@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integ lint fmt-check dev
+.PHONY: test test-unit test-integ lint fmt-check dev tui
 
 test: test-unit test-integ
 
@@ -18,3 +18,6 @@ fmt:
 	shfmt -w bin/sipag lib/*.sh extras/safety-gate.sh
 
 dev: lint fmt-check test
+
+tui:
+	cargo build --release --manifest-path tui/Cargo.toml
