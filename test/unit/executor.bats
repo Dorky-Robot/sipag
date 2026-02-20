@@ -111,6 +111,12 @@ EOF
   assert_output_contains "Run any existing tests"
 }
 
+@test "executor_build_prompt: contains CLAUDE.md instruction" {
+  run executor_build_prompt "Task" ""
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Read and follow any CLAUDE.md"
+}
+
 # --- executor_run_task ---
 
 @test "executor_run_task: returns 0 on docker success" {
