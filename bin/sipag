@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# sipag — task queue feeder for Claude Code
+#
+# Reads a markdown checklist, feeds the next unchecked item to claude,
+# marks it done, moves on.
+
+set -euo pipefail
+
+SIPAG_VERSION="2.0.0"
+
+# Resolve project root
+SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Source libraries
+# shellcheck source=../lib/task.sh
+source "${SIPAG_ROOT}/lib/task.sh"
+# shellcheck source=../lib/run.sh
+source "${SIPAG_ROOT}/lib/run.sh"
+# shellcheck source=../lib/worker.sh
+source "${SIPAG_ROOT}/lib/worker.sh"
+
+# --- Defaults ---
+
+SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
+CONTINUE=0
+DRY_RUN=0
+
+# --- Help ---
+
+usage() {
+	cat <<'EOF'
+sipag — autonomous dev agent powered by Claude Code
+
+Usage:
+  sipag work <owner/repo>      Poll repo for issues, spin up Docker workers
+  sipag next [-c] [-n] [-f]   Run next task from a markdown checklist
+  sipag list [-f path]         Print all tasks with status
+  sipag add "task" [-f path]   Append task to checklist
+  sipag version                Print version
+  sipag help                   Show this help
+
+sipag work:
+  Continuously polls a GitHub repo for open issues, launches isolated
+  Docker containers running Claude Code, and creates PRs. Runs until
+  killed (Ctrl+C). Configure via ~/.sipag/config.
+
+Flags:
+  -c, --continue     After completing, loop to the next task
+  -n, --dry-run      Show what would run, don't invoke claude
+  -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
+
+Config (~/.sipag/config):
+  batch_size=4                 Max parallel Docker containers
+  image=sipag-worker:latest    Docker image for workers
+  timeout=1800                 Per-task timeout in seconds
+  poll_interval=120            Seconds between polling for new issues
+
+Environment:
+  SIPAG_FILE              Task file path (default: ./tasks.md)
+  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_MODEL             Model override
+  SIPAG_PROMPT_PREFIX     Prepended to every prompt
+  SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
+  SIPAG_CLAUDE_ARGS       Extra raw args to claude
+EOF
+}
+
+# --- Commands ---
+
+cmd_next() {
+	while true; do
+		if ! task_parse_next "$SIPAG_FILE"; then
+			echo "No pending tasks in ${SIPAG_FILE}"
+			return 0
+		fi
+
+		echo "==> Task ${TASK_LINE}: ${TASK_TITLE}"
+
+		if [[ $DRY_RUN -eq 1 ]]; then
+			if [[ -n "$TASK_BODY" ]]; then
+				echo ""
+				echo "$TASK_BODY"
+			fi
+			echo ""
+			echo "(dry run — skipping claude)"
+			return 0
+		fi
+
+		if run_claude "$TASK_TITLE" "$TASK_BODY"; then
+			task_mark_done "$SIPAG_FILE" "$TASK_LINE"
+			echo "==> Done: ${TASK_TITLE}"
+		else
+			local rc=$?
+			echo "==> Failed (exit ${rc}): ${TASK_TITLE}"
+			return $rc
+		fi
+
+		if [[ $CONTINUE -eq 0 ]]; then
+			return 0
+		fi
+
+		echo ""
+	done
+}
+
+cmd_list() {
+	task_list "$SIPAG_FILE"
+}
+
+cmd_add() {
+	if [[ $# -eq 0 ]]; then
+		echo "Usage: sipag add \"task text\" [-f path]"
+		return 1
+	fi
+
+	local text="$1"
+	task_add "$SIPAG_FILE" "$text"
+	echo "Added: ${text}"
+}
+
+cmd_work() {
+	local repo="${1:?Usage: sipag work <owner/repo>}"
+	worker_load_config
+	worker_init
+	worker_loop "$repo"
+}
+
+cmd_version() {
+	echo "sipag ${SIPAG_VERSION}"
+}
+
+# --- Argument parsing ---
+
+main() {
+	local command=""
+	local add_text=""
+
+	local work_repo=""
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		work)
+			command="work"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				work_repo="$1"
+				shift
+			fi
+			;;
+		next)
+			command="next"
+			shift
+			;;
+		list)
+			command="list"
+			shift
+			;;
+		add)
+			command="add"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				add_text="$1"
+				shift
+			fi
+			;;
+		version | --version)
+			cmd_version
+			return 0
+			;;
+		help | --help | -h)
+			usage
+			return 0
+			;;
+		-c | --continue)
+			CONTINUE=1
+			shift
+			;;
+		-n | --dry-run)
+			DRY_RUN=1
+			shift
+			;;
+		-f | --file)
+			shift
+			SIPAG_FILE="${1:?--file requires a path}"
+			shift
+			;;
+		-*)
+			echo "Unknown flag: $1"
+			usage
+			return 1
+			;;
+		*)
+			# If no command yet, treat as command
+			if [[ -z "$command" ]]; then
+				echo "Unknown command: $1"
+				usage
+				return 1
+			fi
+			shift
+			;;
+		esac
+	done
+
+	# Default command
+	if [[ -z "$command" ]]; then
+		command="next"
+	fi
+
+	case "$command" in
+	work) cmd_work "$work_repo" ;;
+	next) cmd_next ;;
+	list) cmd_list ;;
+	add) cmd_add "$add_text" ;;
+	esac
+}
+
+main "$@"
