@@ -52,6 +52,7 @@ Usage:
   sipag retry <name>            Move task from failed/ back to queue/
   sipag repo add <name> <url>   Register a repo
   sipag repo list               List registered repos
+  sipag stats                   Show aggregate task stats (counts and durations)
   sipag status                  Show queue state across all directories
   sipag version                 Print version
   sipag help                    Show this help
@@ -361,37 +362,31 @@ cmd_ps() {
 			task_id="$(basename "$f" .md)"
 
 			# Parse metadata from tracking file
-			local repo started ended
+			local repo started completed stored_dur
 			repo=$(grep -m1 "^repo:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
 			started=$(grep -m1 "^started:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
-			ended=$(grep -m1 "^ended:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			completed=$(grep -m1 "^completed:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			# Backwards compat: also check ended: (pre-stats tracking files)
+			if [[ -z "$completed" ]]; then
+				completed=$(grep -m1 "^ended:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			fi
+			stored_dur=$(grep -m1 "^duration:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
 
 			# Compute duration
 			local duration="-"
-			if [[ -n "$started" ]]; then
-				local started_epoch ended_epoch
-				if [[ "$(uname)" == "Darwin" ]]; then
-					started_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started" +%s 2>/dev/null || echo "$now")
+			if [[ -n "$stored_dur" && "$dir_status" != "running" ]]; then
+				duration="$stored_dur"
+			elif [[ -n "$started" ]]; then
+				local started_epoch end_epoch diff
+				started_epoch=$(_ts_to_epoch "$started")
+				if [[ -n "$completed" ]]; then
+					end_epoch=$(_ts_to_epoch "$completed")
 				else
-					started_epoch=$(date -d "$started" +%s 2>/dev/null || echo "$now")
+					end_epoch="$now"
 				fi
-				if [[ -n "$ended" ]]; then
-					if [[ "$(uname)" == "Darwin" ]]; then
-						ended_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ended" +%s 2>/dev/null || echo "$now")
-					else
-						ended_epoch=$(date -d "$ended" +%s 2>/dev/null || echo "$now")
-					fi
-				else
-					ended_epoch="$now"
-				fi
-				local diff=$((ended_epoch - started_epoch))
-				if [[ $diff -lt 60 ]]; then
-					duration="${diff}s"
-				elif [[ $diff -lt 3600 ]]; then
-					duration="$((diff / 60))m$((diff % 60))s"
-				else
-					duration="$((diff / 3600))h$((diff % 3600 / 60))m"
-				fi
+				diff=$((end_epoch - started_epoch))
+				[[ $diff -lt 0 ]] && diff=0
+				duration=$(_secs_to_dur "$diff")
 			fi
 
 			printf '%-44s  %-8s  %-10s  %s\n' \
@@ -403,6 +398,90 @@ cmd_ps() {
 	if [[ "$found" -eq 0 ]]; then
 		echo "No tasks found."
 	fi
+}
+
+# sipag stats — show aggregate task stats
+cmd_stats() {
+	local done_dir="${SIPAG_DIR}/done"
+	local failed_dir="${SIPAG_DIR}/failed"
+	local queue_dir="${SIPAG_DIR}/queue"
+	local running_dir="${SIPAG_DIR}/running"
+
+	local total_done=0
+	local total_failed=0
+	local total_pending=0
+	local f
+
+	if [[ -d "$done_dir" ]]; then
+		for f in "${done_dir}"/*.md; do [[ -f "$f" ]] && total_done=$((total_done + 1)); done
+	fi
+	if [[ -d "$failed_dir" ]]; then
+		for f in "${failed_dir}"/*.md; do [[ -f "$f" ]] && total_failed=$((total_failed + 1)); done
+	fi
+	if [[ -d "$queue_dir" ]]; then
+		for f in "${queue_dir}"/*.md; do [[ -f "$f" ]] && total_pending=$((total_pending + 1)); done
+	fi
+	if [[ -d "$running_dir" ]]; then
+		for f in "${running_dir}"/*.md; do [[ -f "$f" ]] && total_pending=$((total_pending + 1)); done
+	fi
+
+	local total=$((total_done + total_failed + total_pending))
+
+	# Aggregate duration stats from done/ and failed/ task files
+	local total_secs=0
+	local dur_count=0
+	local max_secs=0
+	local longest_name=""
+	local dir secs stored_dur started completed
+
+	for dir in "$done_dir" "$failed_dir"; do
+		[[ -d "$dir" ]] || continue
+		for f in "${dir}"/*.md; do
+			[[ -f "$f" ]] || continue
+			secs=0
+			stored_dur=$(grep -m1 "^duration:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+			if [[ -n "$stored_dur" ]]; then
+				secs=$(_dur_to_secs "$stored_dur")
+			else
+				started=$(grep -m1 "^started:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+				completed=$(grep -m1 "^completed:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+				if [[ -z "$completed" ]]; then
+					completed=$(grep -m1 "^ended:" "$f" 2>/dev/null | cut -d' ' -f2- || true)
+				fi
+				if [[ -z "$started" || -z "$completed" ]]; then
+					continue
+				fi
+				secs=$(_ts_diff_secs "$started" "$completed")
+			fi
+			total_secs=$((total_secs + secs))
+			dur_count=$((dur_count + 1))
+			if [[ $secs -gt $max_secs ]]; then
+				max_secs=$secs
+				longest_name="$(basename "$f" .md)"
+			fi
+		done
+	done
+
+	local sep="─────────────────────────"
+	echo "$sep"
+	printf 'Total tasks:     %s\n' "$total"
+	if [[ $total -gt 0 ]]; then
+		printf 'Completed:       %s (%s%%)\n' "$total_done" "$((total_done * 100 / total))"
+		printf 'Failed:          %s (%s%%)\n' "$total_failed" "$((total_failed * 100 / total))"
+	else
+		printf 'Completed:       %s\n' "$total_done"
+		printf 'Failed:          %s\n' "$total_failed"
+	fi
+	printf 'Pending:         %s\n' "$total_pending"
+	echo ""
+	if [[ $dur_count -gt 0 ]]; then
+		printf 'Avg duration:    %s\n' "$(_secs_to_dur "$((total_secs / dur_count))")"
+		printf 'Total time:      %s\n' "$(_secs_to_dur "$total_secs")"
+		printf 'Longest:         %s (%s)\n' "$(_secs_to_dur "$max_secs")" "$longest_name"
+	else
+		echo "No duration data available."
+	fi
+	echo "$sep"
 }
 
 # sipag logs <id> — print log for a task
@@ -544,6 +623,10 @@ main() {
 				shift
 			fi
 			;;
+		stats)
+			command="stats"
+			shift
+			;;
 		status)
 			command="status"
 			shift
@@ -618,6 +701,7 @@ main() {
 	logs) cmd_logs "$cmd_name_arg" ;;
 	kill) cmd_kill "$cmd_name_arg" ;;
 	repo) cmd_repo "$repo_subcmd" "$repo_name" "$repo_url_arg" ;;
+	stats) cmd_stats ;;
 	status) cmd_status ;;
 	esac
 }

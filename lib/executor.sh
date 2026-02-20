@@ -1,6 +1,82 @@
 #!/usr/bin/env bash
 # sipag — Docker executor
 
+# --- Time / duration utilities ---
+
+# Convert seconds to a human-readable duration string.
+# e.g. 30 → "30s", 90 → "1m30s", 3661 → "1h1m"
+_secs_to_dur() {
+	local secs="$1"
+	if [[ $secs -lt 60 ]]; then
+		echo "${secs}s"
+	elif [[ $secs -lt 3600 ]]; then
+		echo "$((secs / 60))m$((secs % 60))s"
+	else
+		echo "$((secs / 3600))h$((secs % 3600 / 60))m"
+	fi
+}
+
+# Parse an ISO 8601 UTC timestamp to epoch seconds.
+_ts_to_epoch() {
+	local ts="$1"
+	if [[ "$(uname)" == "Darwin" ]]; then
+		date -j -f "%Y-%m-%dT%H:%M:%SZ" "$ts" +%s 2>/dev/null || echo "0"
+	else
+		date -d "$ts" +%s 2>/dev/null || echo "0"
+	fi
+}
+
+# Compute the difference in seconds between two ISO 8601 timestamps.
+# Returns 0 if the result would be negative (clock skew / bad data).
+_ts_diff_secs() {
+	local start="$1"
+	local end="$2"
+	local se ee diff
+	se=$(_ts_to_epoch "$start")
+	ee=$(_ts_to_epoch "$end")
+	diff=$((ee - se))
+	[[ $diff -lt 0 ]] && diff=0
+	echo "$diff"
+}
+
+# Parse a human-readable duration string (as produced by _secs_to_dur) back to seconds.
+# Handles: "30s", "5m30s", "1m0s", "2h30m"
+_dur_to_secs() {
+	local dur="$1"
+	local secs=0
+	if [[ "$dur" =~ ^([0-9]+)h([0-9]+)m$ ]]; then
+		secs=$(( BASH_REMATCH[1] * 3600 + BASH_REMATCH[2] * 60 ))
+	elif [[ "$dur" =~ ^([0-9]+)m([0-9]+)s$ ]]; then
+		secs=$(( BASH_REMATCH[1] * 60 + BASH_REMATCH[2] ))
+	elif [[ "$dur" =~ ^([0-9]+)m$ ]]; then
+		secs=$(( BASH_REMATCH[1] * 60 ))
+	elif [[ "$dur" =~ ^([0-9]+)s$ ]]; then
+		secs="${BASH_REMATCH[1]}"
+	fi
+	echo "$secs"
+}
+
+# Update a task tracking file in-place to add completed: and duration: fields
+# to the YAML frontmatter (inserted just before the closing ---).
+# Args: file completed_timestamp duration_string
+_tracking_file_complete() {
+	local file="$1"
+	local completed_ts="$2"
+	local duration="$3"
+	local tmp
+	tmp="$(mktemp)"
+	awk -v comp="$completed_ts" -v dur="$duration" '
+		NR==1 { print; in_front=1; next }
+		in_front && /^---$/ {
+			print "completed: " comp
+			print "duration: " dur
+			in_front=0
+		}
+		{ print }
+	' "$file" >"$tmp"
+	mv "$tmp" "$file"
+}
+
 # Build the Claude prompt for a task.
 # Arguments: title body [issue]
 # issue: optional GitHub issue number (e.g. "142") to include in the draft PR body
@@ -147,19 +223,30 @@ git config user.name "sipag"
 git config user.email "sipag@localhost"
 claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 				>"${log_file}" 2>&1; then
-				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
-				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${done_dir}/${task_id}.md"
+				if [[ -f "${tracking_file}" ]]; then
+					_cts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+					_sts="$(grep -m1 '^started:' "${tracking_file}" | cut -d' ' -f2-)"
+					_dur="$(_secs_to_dur "$(_ts_diff_secs "${_sts}" "${_cts}")")"
+					_tracking_file_complete "${tracking_file}" "${_cts}" "${_dur}"
+					mv "${tracking_file}" "${done_dir}/${task_id}.md"
+				fi
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 				echo "==> Done: ${task_id}"
 			else
-				[[ -f "${tracking_file}" ]] && printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
-				[[ -f "${tracking_file}" ]] && mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+				if [[ -f "${tracking_file}" ]]; then
+					_cts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+					_sts="$(grep -m1 '^started:' "${tracking_file}" | cut -d' ' -f2-)"
+					_dur="$(_secs_to_dur "$(_ts_diff_secs "${_sts}" "${_cts}")")"
+					_tracking_file_complete "${tracking_file}" "${_cts}" "${_dur}"
+					mv "${tracking_file}" "${failed_dir}/${task_id}.md"
+				fi
 				[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 				echo "==> Failed: ${task_id}"
 			fi
 		) &
 		disown
 	else
+		local completed_ts started_ts dur
 		if timeout "${timeout_val}" docker run --rm --name "${container_name}" \
 			-e CLAUDE_CODE_OAUTH_TOKEN \
 			-e GH_TOKEN \
@@ -171,12 +258,18 @@ git config user.name "sipag"
 git config user.email "sipag@localhost"
 claude --print --dangerously-skip-permissions -p "$PROMPT"' \
 			>"${log_file}" 2>&1; then
-			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			completed_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+			started_ts="$(grep -m1 '^started:' "${tracking_file}" | cut -d' ' -f2-)"
+			dur="$(_secs_to_dur "$(_ts_diff_secs "${started_ts}" "${completed_ts}")")"
+			_tracking_file_complete "${tracking_file}" "${completed_ts}" "${dur}"
 			mv "${tracking_file}" "${done_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${done_dir}/${task_id}.log"
 			echo "==> Done: ${task_id}"
 		else
-			printf 'ended: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"${tracking_file}"
+			completed_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+			started_ts="$(grep -m1 '^started:' "${tracking_file}" | cut -d' ' -f2-)"
+			dur="$(_secs_to_dur "$(_ts_diff_secs "${started_ts}" "${completed_ts}")")"
+			_tracking_file_complete "${tracking_file}" "${completed_ts}" "${dur}"
 			mv "${tracking_file}" "${failed_dir}/${task_id}.md"
 			[[ -f "${log_file}" ]] && mv "${log_file}" "${failed_dir}/${task_id}.log"
 			echo "==> Failed: ${task_id}"
