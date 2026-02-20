@@ -17,6 +17,7 @@ executor_build_prompt() {
 	fi
 	printf '\nInstructions:\n'
 	printf '%s\n' \
+		'- Read and follow any CLAUDE.md or .claude/CLAUDE.md project-specific instructions in the repository' \
 		'- Create a new branch with a descriptive name' \
 		'- Before writing any code, open a draft pull request with this body:'
 	printf '%s\n' \

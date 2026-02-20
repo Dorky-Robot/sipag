@@ -119,6 +119,29 @@ ended: 2024-01-01T13:15:00Z
 Simplify sipag to sandbox launcher
 ```
 
+## Customizing behavior via CLAUDE.md
+
+sipag runs `claude` inside the cloned repository, so Claude Code automatically picks up any `CLAUDE.md` or `.claude/CLAUDE.md` file present in the repo root. Use these files to give project-specific instructions to Claude.
+
+Common uses:
+
+- Coding style and conventions (`use 2-space indentation`, `prefer functional style`)
+- Test commands (`run tests with: make test`)
+- Architecture notes (`API handlers live in src/routes/`)
+- Off-limits files or directories
+
+Example `.claude/CLAUDE.md`:
+
+```markdown
+## Project conventions
+
+- Run tests with: make test
+- All new files must have a corresponding test
+- Follow the existing error handling patterns in lib/
+```
+
+sipag's executor prompt already tells Claude to read and follow any `CLAUDE.md` it finds, so no additional configuration is needed.
+
 ## Configuration
 
 | Variable | Default | Purpose |
