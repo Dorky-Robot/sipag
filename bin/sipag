@@ -16,6 +16,8 @@ SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 source "${SIPAG_ROOT}/lib/task.sh"
 # shellcheck source=../lib/run.sh
 source "${SIPAG_ROOT}/lib/run.sh"
+# shellcheck source=../lib/repo.sh
+source "${SIPAG_ROOT}/lib/repo.sh"
 
 # --- Defaults ---
 
@@ -33,17 +35,20 @@ usage() {
 sipag — task queue feeder for Claude Code
 
 Usage:
-  sipag                        Run next unchecked task (same as sipag next)
-  sipag init                   Create ~/.sipag/{queue,running,done,failed}
-  sipag next [-c] [-n] [-f]   Find first - [ ], run claude, mark - [x]
-  sipag list [-f path]         Print all tasks with status
+  sipag                           Run next unchecked task (same as sipag next)
+  sipag init                      Create ~/.sipag/{queue,running,done,failed}
+  sipag next [-c] [-n] [-f]      Find first - [ ], run claude, mark - [x]
+  sipag list [-f path]            Print all tasks with status
   sipag add "task" [--repo <name>] [--priority <level>]
-                               Queue a task (writes YAML frontmatter to queue/)
-  sipag show <name>            Print task file and log (searches all dirs)
-  sipag retry <name>           Move task from failed/ back to queue/
-  sipag start                  Start the executor (auto-inits if needed)
-  sipag version                Print version
-  sipag help                   Show this help
+                                Queue a task (writes YAML frontmatter to queue/)
+  sipag show <name>               Print task file and log (searches all dirs)
+  sipag retry <name>              Move task from failed/ back to queue/
+  sipag start                     Start the executor (auto-inits if needed)
+  sipag repo add <name> <url>     Register a repo
+  sipag repo list                 List registered repos
+  sipag status                    Show queue state across all directories
+  sipag version                   Print version
+  sipag help                      Show this help
 
 Flags:
   -c, --continue            After completing, loop to the next task
@@ -141,6 +146,71 @@ cmd_add() {
 	fi
 }
 
+cmd_repo() {
+	local subcmd="${1:-}"
+	local name="${2:-}"
+	local url="${3:-}"
+	local conf="${SIPAG_DIR}/repos.conf"
+
+	case "$subcmd" in
+	add)
+		if [[ -z "$name" ]]; then
+			echo "Usage: sipag repo add <name> <url>" >&2
+			return 1
+		fi
+		if [[ -z "$url" ]]; then
+			echo "Usage: sipag repo add <name> <url>" >&2
+			return 1
+		fi
+		if [[ -f "$conf" ]] && grep -q "^${name}=" "$conf"; then
+			echo "Error: repo '${name}' already exists" >&2
+			return 1
+		fi
+		echo "${name}=${url}" >>"$conf"
+		echo "Registered: ${name}=${url}"
+		;;
+	list)
+		if [[ ! -f "$conf" ]]; then
+			echo "No repos registered. Use: sipag repo add <name> <url>"
+			return 0
+		fi
+		cat "$conf"
+		;;
+	*)
+		echo "Usage: sipag repo add <name> <url>" >&2
+		echo "       sipag repo list" >&2
+		return 1
+		;;
+	esac
+}
+
+cmd_status() {
+	local -a labels=("Queue" "Running" "Done" "Failed")
+	local -a subdirs=("queue" "running" "done" "failed")
+	local i
+
+	for ((i = 0; i < ${#labels[@]}; i++)); do
+		local label="${labels[$i]}"
+		local dir="${SIPAG_DIR}/${subdirs[$i]}"
+		local -a items=()
+
+		if [[ -d "$dir" ]]; then
+			local f
+			for f in "${dir}/"*; do
+				[[ -e "$f" ]] && items+=("$(basename "$f")")
+			done
+		fi
+
+		local count="${#items[@]}"
+		if [[ $count -gt 0 ]]; then
+			echo "${label} (${count}):"
+			printf '%s\n' "${items[@]}" | sort | while IFS= read -r item; do
+				echo "  ${item}"
+			done
+		fi
+	done
+}
+
 cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
@@ -200,6 +270,9 @@ main() {
 	local command=""
 	local add_text=""
 	local cmd_name_arg=""
+	local repo_subcmd=""
+	local repo_name=""
+	local repo_url_arg=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -237,6 +310,26 @@ main() {
 			;;
 		start)
 			command="start"
+			shift
+			;;
+		repo)
+			command="repo"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				repo_subcmd="$1"
+				shift
+			fi
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				repo_name="$1"
+				shift
+			fi
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				repo_url_arg="$1"
+				shift
+			fi
+			;;
+		status)
+			command="status"
 			shift
 			;;
 		version | --version)
@@ -304,6 +397,8 @@ main() {
 	show) cmd_show "$cmd_name_arg" ;;
 	retry) cmd_retry "$cmd_name_arg" ;;
 	start) cmd_start ;;
+	repo) cmd_repo "$repo_subcmd" "$repo_name" "$repo_url_arg" ;;
+	status) cmd_status ;;
 	esac
 }
 
