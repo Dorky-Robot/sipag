@@ -71,33 +71,36 @@ worker_has_pr() {
     echo "$candidates" | jq -e ".[] | select(.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\"))" &>/dev/null
 }
 
-# Close open issues whose work is already done (merged PR exists)
+# Close in-progress issues whose worker-created PR has since been merged.
+#
+# Only examines issues labeled "in-progress" (set by worker_run_issue), not all
+# open issues. Uses GitHub's timeline API to find an exact cross-reference from
+# a merged PR — avoids the false positives produced by "gh pr list --search"
+# fuzzy matching (e.g. searching for #66 returning PRs that mention #6).
 worker_reconcile() {
     local repo="$1"
-    mapfile -t open_issues < <(gh issue list --repo "$repo" --state open --json number -q '.[].number' | sort -n)
+    mapfile -t inprogress < <(gh issue list --repo "$repo" --state open \
+        --label "in-progress" --json number -q '.[].number' 2>/dev/null | sort -n)
 
-    for issue in "${open_issues[@]}"; do
-        # Check for merged PRs that reference this issue (exact word boundary match)
-        local candidates pr_num=""
-        candidates=$(gh pr list --repo "$repo" --state merged --search "closes #${issue}" \
-            --json number,title,body -q '.[]')
+    [[ ${#inprogress[@]} -eq 0 ]] && return 0
 
-        # Verify the PR body actually contains an exact reference to this issue number
-        echo "$candidates" | jq -c '.' 2>/dev/null | while read -r pr; do
-            [[ -z "$pr" ]] && continue
-            local body
-            body=$(echo "$pr" | jq -r '.body // ""')
-            # Match exact issue ref: "closes #66" but not "closes #6"
-            if echo "$body" | grep -qwE "(closes|fixes|resolves) #${issue}\\b"; then
-                pr_num=$(echo "$pr" | jq -r '.number')
-                local pr_title
-                pr_title=$(echo "$pr" | jq -r '.title')
-                echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${pr_num} (${pr_title})"
-                gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${pr_num}" 2>/dev/null
-                worker_mark_seen "$issue"
-                break
-            fi
-        done
+    for issue in "${inprogress[@]}"; do
+        # Use the timeline API: look for a cross-referenced event from a merged PR.
+        # This is an exact link — GitHub sets this when a PR body contains
+        # "Closes #N" and that PR is merged. No fuzzy matching involved.
+        local merged_pr
+        merged_pr=$(gh api "repos/${repo}/issues/${issue}/timeline" \
+            --jq '.[] | select(.event == "cross-referenced") |
+                  select(.source.issue.pull_request.merged_at != null) |
+                  .source.issue.number' 2>/dev/null | head -1)
+
+        [[ -z "$merged_pr" ]] && continue
+
+        local pr_title
+        pr_title=$(gh pr view "$merged_pr" --repo "$repo" --json title -q '.title' 2>/dev/null)
+        echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${merged_pr} (${pr_title})"
+        gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${merged_pr}" 2>/dev/null
+        worker_mark_seen "$issue"
     done
 }
 
