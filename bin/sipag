@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# sipag — review open pull requests using Claude
+set -euo pipefail
+
+SIPAG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Source libraries
+source "${SIPAG_ROOT}/lib/review.sh"
+
+usage() {
+	cat <<EOF
+Usage: sipag <command> [options]
+
+Commands:
+  review <owner/repo>   Review open pull requests in a GitHub repo using Claude
+
+Options:
+  -h, --help            Show this help message
+
+Environment:
+  ANTHROPIC_API_KEY     Required for Claude
+  GH_TOKEN              Required for gh CLI
+
+Examples:
+  sipag review owner/repo
+EOF
+}
+
+cmd_review() {
+	local repo="${1:-}"
+	if [[ -z "$repo" ]]; then
+		echo "Error: missing <owner/repo>" >&2
+		echo "" >&2
+		usage >&2
+		exit 1
+	fi
+	review_run "$repo"
+}
+
+# Argument parser
+main() {
+	if [[ $# -eq 0 ]]; then
+		usage
+		exit 0
+	fi
+
+	case "$1" in
+		review)
+			shift
+			cmd_review "${1:-}"
+			;;
+		-h | --help | help)
+			usage
+			;;
+		*)
+			echo "Error: unknown command '$1'" >&2
+			echo "" >&2
+			usage >&2
+			exit 1
+			;;
+	esac
+}
+
+main "$@"
