@@ -9,12 +9,12 @@ test-integ:
 	bats test/integration/
 
 lint:
-	shellcheck -x -S warning bin/sipag lib/*.sh extras/safety-gate.sh
+	shellcheck -x -S warning bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
 
 fmt-check:
-	shfmt -d bin/sipag lib/*.sh extras/safety-gate.sh
+	shfmt -d bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
 
 fmt:
-	shfmt -w bin/sipag lib/*.sh extras/safety-gate.sh
+	shfmt -w bin/sipag lib/*.sh .claude/hooks/safety-gate.sh
 
 dev: lint fmt-check test
