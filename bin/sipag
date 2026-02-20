@@ -18,6 +18,8 @@ source "${SIPAG_ROOT}/lib/task.sh"
 source "${SIPAG_ROOT}/lib/run.sh"
 # shellcheck source=../lib/repo.sh
 source "${SIPAG_ROOT}/lib/repo.sh"
+# shellcheck source=../lib/executor.sh
+source "${SIPAG_ROOT}/lib/executor.sh"
 
 # --- Defaults ---
 
@@ -77,7 +79,7 @@ cmd_init() {
 cmd_start() {
 	sipag_init_dirs "${SIPAG_DIR}" >/dev/null
 	echo "sipag executor starting (queue: ${SIPAG_DIR}/queue)"
-	echo "No tasks in queue — use 'sipag add' to queue a task"
+	executor_run
 }
 
 cmd_next() {

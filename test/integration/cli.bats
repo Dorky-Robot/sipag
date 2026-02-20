@@ -417,7 +417,8 @@ EOF
   run "${SIPAG_ROOT}/bin/sipag" retry nonexistent-task
   [[ "$status" -ne 0 ]]
   assert_output_contains "Error"
-  assert_output_contains "nonexistent-task"}
+  assert_output_contains "nonexistent-task"
+}
 
 # --- sipag repo add ---
 
