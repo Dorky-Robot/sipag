@@ -104,6 +104,14 @@ To also use the bash helper commands (`sipag start`, `sipag work`, `sipag merge`
 export PATH="$(brew --prefix sipag)/libexec/bin:$PATH"
 ```
 
+### One-line install (macOS and Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
+```
+
+Supports macOS (Intel and Apple Silicon) and Linux (x86\_64 and ARM64). Installs the binary to `/usr/local/bin/sipag`.
+
 ### From source (Rust + Cargo required)
 
 ```bash

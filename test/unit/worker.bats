@@ -186,3 +186,99 @@ EOF
 11
 20" ]]
 }
+
+# --- worker_slugify ---
+
+@test "worker_slugify lowercases title" {
+  result=$(worker_slugify "Hello World")
+  [[ "$result" == "hello-world" ]]
+}
+
+@test "worker_slugify replaces spaces and punctuation with dashes" {
+  result=$(worker_slugify "Fix: auth bug!")
+  [[ "$result" == "fix-auth-bug" ]]
+}
+
+@test "worker_slugify squeezes consecutive dashes" {
+  result=$(worker_slugify "foo  --  bar")
+  [[ "$result" == "foo-bar" ]]
+}
+
+@test "worker_slugify strips leading and trailing dashes" {
+  result=$(worker_slugify "  leading and trailing  ")
+  [[ "$result" == "leading-and-trailing" ]]
+}
+
+@test "worker_slugify truncates to 50 chars" {
+  long="this is a very long issue title that exceeds fifty characters easily"
+  result=$(worker_slugify "$long")
+  [[ "${#result}" -le 50 ]]
+}
+
+@test "worker_slugify preserves alphanumeric characters" {
+  result=$(worker_slugify "Add OAuth2 support v3")
+  [[ "$result" == "add-oauth2-support-v3" ]]
+}
+
+# --- worker_unsee ---
+
+@test "worker_unsee removes an issue from the seen file" {
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  printf '10\n20\n30\n' > "$WORKER_SEEN_FILE"
+  worker_unsee 20
+  run grep -cx '20' "$WORKER_SEEN_FILE"
+  [[ "$output" == "0" ]]
+}
+
+@test "worker_unsee leaves other entries intact" {
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  printf '10\n20\n30\n' > "$WORKER_SEEN_FILE"
+  worker_unsee 20
+  run grep -cx '10' "$WORKER_SEEN_FILE"
+  [[ "$output" == "1" ]]
+  run grep -cx '30' "$WORKER_SEEN_FILE"
+  [[ "$output" == "1" ]]
+}
+
+@test "worker_unsee is idempotent when issue is not in seen file" {
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  printf '10\n30\n' > "$WORKER_SEEN_FILE"
+  run worker_unsee 99
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_unsee is safe when seen file does not exist" {
+  WORKER_SEEN_FILE="${SIPAG_DIR}/no-such-seen"
+  run worker_unsee 42
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_unsee + worker_is_seen: issue is not seen after unsee" {
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  printf '7\n' > "$WORKER_SEEN_FILE"
+  worker_unsee 7
+  run worker_is_seen 7
+  [[ "$status" -ne 0 ]]
+}
+
+# --- worker_has_open_pr ---
+
+@test "worker_has_open_pr returns true when open PR body references issue" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[{"number":42,"body":"Closes #5"}]'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_has_open_pr "owner/repo" 5
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_has_open_pr returns false when no open PR exists" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo '[]'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_has_open_pr "owner/repo" 5
+  [[ "$status" -ne 0 ]]
+}

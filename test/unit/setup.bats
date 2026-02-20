@@ -15,6 +15,13 @@ setup() {
   # Mock gh and claude as present and working by default
   create_mock "gh" 0
   create_mock "claude" 0
+
+  # Mock docker: all subcommands succeed (info=running, image inspect=exists)
+  cat >"${TEST_TMPDIR}/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/docker"
 }
 
 teardown() {
@@ -48,9 +55,32 @@ teardown() {
   assert_output_contains "gh not authenticated"
 }
 
+@test "setup_run: fails when docker is missing" {
+  rm -f "${TEST_TMPDIR}/bin/docker"
+  PATH="${TEST_TMPDIR}/bin" run setup_run
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Docker not installed"
+}
+
+@test "setup_run: fails when docker is not running" {
+  # docker info returns non-zero (daemon not running)
+  cat >"${TEST_TMPDIR}/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "info" ]]; then
+  exit 1
+fi
+exit 0
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run setup_run
+  [[ "$status" -ne 0 ]]
+  assert_output_contains "Docker not running"
+}
+
 # --- ~/.sipag/ directory creation ---
 
-@test "setup_run: creates ~/.sipag/ directory" {
+@test "setup_run: creates ~/.sipag/ subdirectories" {
   # gh auth status succeeds only for 'auth status'
   cat >"${TEST_TMPDIR}/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
@@ -61,9 +91,119 @@ exit 0
 MOCK
   chmod +x "${TEST_TMPDIR}/bin/gh"
 
+  # Pre-create token so auth check passes cleanly
+  mkdir -p "$HOME/.sipag"
+  echo "test-token" >"$HOME/.sipag/token"
+
   run setup_run
   [[ "$status" -eq 0 ]]
-  [[ -d "$HOME/.sipag" ]]
+  [[ -d "$HOME/.sipag/queue" ]]
+  [[ -d "$HOME/.sipag/running" ]]
+  [[ -d "$HOME/.sipag/done" ]]
+  [[ -d "$HOME/.sipag/failed" ]]
+}
+
+# --- _setup_dirs ---
+
+@test "_setup_dirs: creates all four subdirectories" {
+  run _setup_dirs
+  [[ "$status" -eq 0 ]]
+  [[ -d "$HOME/.sipag/queue" ]]
+  [[ -d "$HOME/.sipag/running" ]]
+  [[ -d "$HOME/.sipag/done" ]]
+  [[ -d "$HOME/.sipag/failed" ]]
+}
+
+@test "_setup_dirs: is idempotent" {
+  _setup_dirs
+  run _setup_dirs
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "already exist"
+}
+
+# --- _setup_auth ---
+
+@test "_setup_auth: reports OK when token already exists" {
+  mkdir -p "$HOME/.sipag"
+  echo "existing-token" >"$HOME/.sipag/token"
+
+  run _setup_auth
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "OAuth token configured"
+}
+
+@test "_setup_auth: copies token when claude setup-token creates it" {
+  # claude mock creates ~/.claude/token when called with setup-token
+  cat >"${TEST_TMPDIR}/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "setup-token" ]]; then
+  mkdir -p "$HOME/.claude"
+  echo "fresh-oauth-token" >"$HOME/.claude/token"
+  exit 0
+fi
+exit 0
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/claude"
+
+  run _setup_auth
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "OAuth token configured"
+  [[ -f "$HOME/.sipag/token" ]]
+  grep -q "fresh-oauth-token" "$HOME/.sipag/token"
+}
+
+@test "_setup_auth: reports error when claude setup-token produces no token" {
+  # claude mock succeeds but does not create ~/.claude/token
+  create_mock "claude" 0
+
+  run _setup_auth
+  [[ "$status" -eq 0 ]]  # auth is non-fatal — setup continues
+  assert_output_contains "OAuth token missing"
+}
+
+@test "_setup_auth: reports ANTHROPIC_API_KEY when set" {
+  mkdir -p "$HOME/.sipag"
+  echo "test-token" >"$HOME/.sipag/token"
+
+  ANTHROPIC_API_KEY="sk-test" run _setup_auth
+  assert_output_contains "ANTHROPIC_API_KEY set"
+}
+
+@test "_setup_auth: mentions ANTHROPIC_API_KEY as optional when not set" {
+  mkdir -p "$HOME/.sipag"
+  echo "test-token" >"$HOME/.sipag/token"
+
+  unset ANTHROPIC_API_KEY
+  run _setup_auth
+  assert_output_contains "ANTHROPIC_API_KEY not set"
+  assert_output_contains "optional"
+}
+
+# --- _setup_docker_image ---
+
+@test "_setup_docker_image: reports OK when image already exists" {
+  # Default docker mock returns 0 for all subcommands (image inspect = exists)
+  run _setup_docker_image
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "exists"
+}
+
+@test "_setup_docker_image: fails when image missing and build fails" {
+  # docker: image inspect fails, build also fails
+  cat >"${TEST_TMPDIR}/bin/docker" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "$1" == "image" ]]; then
+  exit 1  # image not found
+fi
+if [[ "$1" == "build" ]]; then
+  exit 1  # build failed
+fi
+exit 0
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run _setup_docker_image
+  [[ "$status" -ne 0 ]]
 }
 
 # --- ~/.claude/settings.json creation and merging ---

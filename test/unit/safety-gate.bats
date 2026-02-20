@@ -493,6 +493,70 @@ EOF
   assert_decision "allow"
 }
 
+# ─── sipag commands ───────────────────────────────────────────────────────────
+
+@test "allows sipag work (bare command)" {
+  run_gate "$(tool_json "Bash" '{"command":"sipag work Dorky-Robot/sipag"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows sipag work (full path)" {
+  run_gate "$(tool_json "Bash" '{"command":"/usr/local/bin/sipag work Dorky-Robot/sipag"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows sipag ps" {
+  run_gate "$(tool_json "Bash" '{"command":"sipag ps"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows sipag logs" {
+  run_gate "$(tool_json "Bash" '{"command":"sipag logs abc123"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows sipag status" {
+  run_gate "$(tool_json "Bash" '{"command":"sipag status"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+# ─── Additional safe tools ────────────────────────────────────────────────────
+
+@test "allows TaskOutput tool" {
+  run_gate "$(tool_json "TaskOutput" '{"task_id":"abc123"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows TaskStop tool" {
+  run_gate "$(tool_json "TaskStop" '{"task_id":"abc123"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows AskUserQuestion tool" {
+  run_gate "$(tool_json "AskUserQuestion" '{"questions":[]}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows Skill tool" {
+  run_gate "$(tool_json "Skill" '{"skill":"commit"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
+@test "allows NotebookEdit tool" {
+  run_gate "$(tool_json "NotebookEdit" '{"notebook_path":"/project/nb.ipynb"}')"
+  [ "$status" -eq 0 ]
+  assert_decision "allow"
+}
+
 # ─── Edge cases ──────────────────────────────────────────────────────────────
 
 @test "empty input exits cleanly" {

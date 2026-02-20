@@ -16,18 +16,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            archive: sipag-aarch64-apple-darwin.tar.gz
-          - os: macos-13
-            target: x86_64-apple-darwin
-            archive: sipag-x86_64-apple-darwin.tar.gz
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            archive: sipag-x86_64-unknown-linux-gnu.tar.gz
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            archive: sipag-aarch64-unknown-linux-gnu.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            use_cross: true
 
     steps:
       - name: Checkout
@@ -38,68 +38,90 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
 
-      - name: Create release archive
+      - name: Build binary
         run: |
-          staging="sipag-${{ matrix.target }}"
-          mkdir -p "$staging/bin" "$staging/lib/prompts"
-          cp "target/${{ matrix.target }}/release/sipag" "$staging/"
-          cp bin/sipag "$staging/bin/"
-          cp lib/*.sh "$staging/lib/"
-          cp lib/prompts/*.md "$staging/lib/prompts/"
-          tar czf "${{ matrix.archive }}" "$staging"
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --manifest-path sipag/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.target }} --manifest-path sipag/Cargo.toml
+          fi
 
-      - name: Compute SHA-256
-        id: sha256
-        run: echo "hash=$(shasum -a 256 ${{ matrix.archive }} | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Package tarball
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          TARGET=${{ matrix.target }}
+          ARCHIVE="sipag-${VERSION}-${TARGET}.tar.gz"
+
+          # Staging directory
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/bin"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/prompts"
+
+          # Binary
+          cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
+
+          # Bash scripts
+          cp bin/sipag "dist/sipag-${VERSION}-${TARGET}/bin/"
+          cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
+          cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
+
+          # Create tarball
+          cd dist
+          tar czf "../${ARCHIVE}" "sipag-${VERSION}-${TARGET}"
+          cd ..
+
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive }}
-          path: ${{ matrix.archive }}
+          name: sipag-${{ github.ref_name }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
           retention-days: 1
 
   release:
     name: Publish GitHub Release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download all archives
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          path: dist/
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: "*.tar.gz"
+          draft: false
           generate_release_notes: true
+          files: dist/*.tar.gz
 
   update-formula:
     name: Update Homebrew formula
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
-      - name: Download all archives
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          path: dist/
           merge-multiple: true
 
       - name: Compute SHA-256 for each archive
         id: hashes
         run: |
-          echo "macos_arm64=$(shasum -a 256 sipag-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "macos_x86_64=$(shasum -a 256 sipag-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "linux_x86_64=$(shasum -a 256 sipag-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(shasum -a 256 sipag-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          VERSION=${{ github.ref_name }}
+          echo "macos_arm64=$(shasum -a 256 dist/sipag-${VERSION}-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "macos_x86_64=$(shasum -a 256 dist/sipag-${VERSION}-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$(shasum -a 256 dist/sipag-${VERSION}-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(shasum -a 256 dist/sipag-${VERSION}-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew tap
         uses: actions/checkout@v4
@@ -116,32 +138,32 @@ jobs:
           LINUX_X86_64: ${{ steps.hashes.outputs.linux_x86_64 }}
           LINUX_ARM64: ${{ steps.hashes.outputs.linux_arm64 }}
         run: |
-          VERSION="${VERSION#v}"  # strip leading 'v'
+          VERSION_CLEAN="${VERSION#v}"  # strip leading 'v' for formula version field
           cat > homebrew-tap/Formula/sipag.rb << FORMULA
           class Sipag < Formula
             desc "Conversational agile for Claude Code — you talk, workers ship PRs"
             homepage "https://github.com/Dorky-Robot/sipag"
-            version "${VERSION}"
+            version "${VERSION_CLEAN}"
             license "MIT"
 
             on_macos do
               on_arm do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-aarch64-apple-darwin.tar.gz"
                 sha256 "${MACOS_ARM64}"
               end
               on_intel do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-x86_64-apple-darwin.tar.gz"
                 sha256 "${MACOS_X86_64}"
               end
             end
 
             on_linux do
               on_arm do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-aarch64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${LINUX_ARM64}"
               end
               on_intel do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "${LINUX_X86_64}"
               end
             end
