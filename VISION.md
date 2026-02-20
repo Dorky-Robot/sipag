@@ -332,12 +332,16 @@ Your task:
 
 Instructions:
 - Create a new branch with a descriptive name
-- Implement the changes
-- Run any existing tests and make sure they pass
-- Commit your changes with a clear commit message
-- Push the branch and open a draft pull request
+- Before writing any code, open a draft pull request with this body:
+    > This PR is being worked on by sipag. Commits will appear as work progresses.
+    Task: <title>
+    Issue: #<number>   ← only if the task has a GitHub issue source
 - The PR title should match the task title
-- The PR body should summarize what you changed and why
+- Commit after each logical unit of work (not just at the end)
+- Push after each commit so GitHub reflects progress in real time
+- Run any existing tests and make sure they pass
+- When all work is complete, update the PR body with a summary of what changed and why
+- When all work is complete, mark the pull request as ready for review
 ```
 
 ## Configuration

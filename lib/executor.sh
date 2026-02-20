@@ -2,10 +2,12 @@
 # sipag — Docker executor
 
 # Build the Claude prompt for a task.
-# Arguments: title body
+# Arguments: title body [issue]
+# issue: optional GitHub issue number (e.g. "142") to include in the draft PR body
 executor_build_prompt() {
 	local title="$1"
 	local body="${2:-}"
+	local issue="${3:-}"
 
 	printf 'You are working on the repository at /work.\n'
 	printf '\nYour task:\n'
@@ -16,12 +18,19 @@ executor_build_prompt() {
 	printf '\nInstructions:\n'
 	printf '%s\n' \
 		'- Create a new branch with a descriptive name' \
-		'- Implement the changes' \
-		'- Run any existing tests and make sure they pass' \
-		'- Commit your changes with a clear commit message' \
-		'- Push the branch and open a draft pull request early so progress is visible' \
+		'- Before writing any code, open a draft pull request with this body:'
+	printf '%s\n' \
+		'    > This PR is being worked on by sipag. Commits will appear as work progresses.' \
+		"    Task: ${title}"
+	if [[ -n "$issue" ]]; then
+		printf '%s\n' "    Issue: #${issue}"
+	fi
+	printf '%s\n' \
 		'- The PR title should match the task title' \
-		'- The PR body should summarize what you changed and why' \
+		'- Commit after each logical unit of work (not just at the end)' \
+		'- Push after each commit so GitHub reflects progress in real time' \
+		'- Run any existing tests and make sure they pass' \
+		'- When all work is complete, update the PR body with a summary of what changed and why' \
 		'- When all work is complete, mark the pull request as ready for review'
 }
 
@@ -46,9 +55,15 @@ executor_run_task() {
 		return 1
 	fi
 
+	# Extract issue number from TASK_SOURCE (e.g. "github#142" -> "142")
+	local issue_num=""
+	if [[ "$TASK_SOURCE" =~ \#([0-9]+)$ ]]; then
+		issue_num="${BASH_REMATCH[1]}"
+	fi
+
 	# Build Claude prompt
 	local prompt
-	prompt=$(executor_build_prompt "$TASK_TITLE" "$TASK_BODY")
+	prompt=$(executor_build_prompt "$TASK_TITLE" "$TASK_BODY" "$issue_num")
 
 	# Resolve OAuth token from file if not already in environment
 	local token_file="${SIPAG_TOKEN_FILE:-${HOME}/.sipag/token}"
@@ -107,7 +122,7 @@ executor_run_impl() {
 
 	# Build Claude prompt
 	local prompt
-	prompt=$(executor_build_prompt "${description}" "")
+	prompt=$(executor_build_prompt "${description}" "" "${issue}")
 
 	# Resolve OAuth token from file if not already in environment
 	local token_file="${SIPAG_TOKEN_FILE:-${HOME}/.sipag/token}"
@@ -220,8 +235,14 @@ executor_run() {
 		# Move task to running/ — executor_run_impl will overwrite it with tracking metadata
 		mv "$task_file" "${running_dir}/${task_name}.md"
 
+		# Extract issue number from TASK_SOURCE (e.g. "github#142" -> "142")
+		local issue_num=""
+		if [[ "$TASK_SOURCE" =~ \#([0-9]+)$ ]]; then
+			issue_num="${BASH_REMATCH[1]}"
+		fi
+
 		# Run the task in foreground via executor_run_impl
-		executor_run_impl "${task_name}" "${url}" "${TASK_TITLE}" "" 0 || true
+		executor_run_impl "${task_name}" "${url}" "${TASK_TITLE}" "${issue_num}" 0 || true
 
 		processed=$((processed + 1))
 	done
