@@ -10,10 +10,17 @@ setup() {
   export SIPAG_DIR="${TEST_TMPDIR}/sipag"
   mkdir -p "$SIPAG_DIR"
 
+  # Isolated log dir for PR state tracking
+  export WORKER_LOG_DIR="${TEST_TMPDIR}/worker-logs"
+  mkdir -p "$WORKER_LOG_DIR"
+
   # Clear env var so we test defaults from scratch
   unset SIPAG_WORK_LABEL
 
   source "${SIPAG_ROOT}/lib/worker.sh"
+
+  # Override WORKER_LOG_DIR after sourcing (sourcing resets the default)
+  WORKER_LOG_DIR="${TEST_TMPDIR}/worker-logs"
 }
 
 teardown() {
@@ -93,4 +100,89 @@ EOF
   echo "work_label=config-label" > "${SIPAG_DIR}/config"
   worker_load_config
   [[ "$WORKER_WORK_LABEL" == "config-label" ]]
+}
+
+# --- PR iteration state tracking ---
+
+@test "worker_pr_is_running returns false when PR is not running" {
+  run worker_pr_is_running 42
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_pr_mark_running creates the running marker file" {
+  worker_pr_mark_running 42
+  [[ -f "${WORKER_LOG_DIR}/pr-42-running" ]]
+}
+
+@test "worker_pr_is_running returns true after marking running" {
+  worker_pr_mark_running 99
+  run worker_pr_is_running 99
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_pr_mark_done removes the running marker file" {
+  worker_pr_mark_running 7
+  worker_pr_mark_done 7
+  [[ ! -f "${WORKER_LOG_DIR}/pr-7-running" ]]
+}
+
+@test "worker_pr_mark_done is idempotent when file does not exist" {
+  run worker_pr_mark_done 999
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_pr_is_running tracks multiple PRs independently" {
+  worker_pr_mark_running 1
+  worker_pr_mark_running 2
+  run worker_pr_is_running 1
+  [[ "$status" -eq 0 ]]
+  run worker_pr_is_running 2
+  [[ "$status" -eq 0 ]]
+  worker_pr_mark_done 1
+  run worker_pr_is_running 1
+  [[ "$status" -ne 0 ]]
+  run worker_pr_is_running 2
+  [[ "$status" -eq 0 ]]
+}
+
+# --- worker_find_prs_needing_iteration ---
+
+@test "worker_find_prs_needing_iteration returns numbers from gh output" {
+  # Mock gh to simulate output of `gh pr list --json ... -q '...'`
+  # (the jq filtering is done inside gh; mock returns pre-filtered output)
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '5\n12\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_prs_needing_iteration "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == "5
+12" ]]
+}
+
+@test "worker_find_prs_needing_iteration returns empty when no PRs need changes" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf ''
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_prs_needing_iteration "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ -z "$output" ]]
+}
+
+@test "worker_find_prs_needing_iteration sorts output numerically" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '20\n3\n11\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_prs_needing_iteration "owner/repo"
+  [[ "$output" == "3
+11
+20" ]]
 }
