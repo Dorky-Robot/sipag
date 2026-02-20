@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# sipag — shell entry point
+#
+# Provides shell-native commands that complement the Rust sipag binary.
+# Currently supported:
+#   triage <owner/repo>   — triage open GitHub issues via Claude
+#
+# Environment variables:
+#   SIPAG_ROOT            — repo root (auto-detected if not set)
+#   SIPAG_MODEL           — Claude model to use (optional)
+#   SIPAG_TIMEOUT         — Claude timeout in seconds (default: 600)
+#   SIPAG_SKIP_PERMISSIONS — pass --dangerously-skip-permissions (default: 1)
+#   SIPAG_CLAUDE_ARGS     — extra whitespace-separated args for claude (optional)
+
+set -euo pipefail
+
+SIPAG_ROOT="${SIPAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+source "${SIPAG_ROOT}/lib/run.sh"
+source "${SIPAG_ROOT}/lib/triage.sh"
+
+usage() {
+	cat <<EOF
+Usage: sipag <command> [args]
+
+Commands:
+  triage <owner/repo>   Triage open GitHub issues using Claude
+
+Options:
+  -h, --help            Show this help message
+
+Environment:
+  SIPAG_MODEL           Claude model to use (default: system default)
+  SIPAG_TIMEOUT         Timeout in seconds for Claude (default: 600)
+  SIPAG_SKIP_PERMISSIONS  Skip Claude permission prompts, 1=yes (default: 1)
+  SIPAG_CLAUDE_ARGS     Additional arguments forwarded to claude
+EOF
+}
+
+cmd_triage() {
+	local repo="${1:-}"
+	if [[ -z "$repo" ]]; then
+		echo "Error: repository required (format: owner/repo)" >&2
+		echo "" >&2
+		usage >&2
+		exit 1
+	fi
+	triage_run "$repo"
+}
+
+case "${1:-}" in
+triage)
+	shift
+	cmd_triage "$@"
+	;;
+help | --help | -h)
+	usage
+	;;
+"")
+	usage
+	exit 1
+	;;
+*)
+	echo "Error: unknown command '${1}'" >&2
+	echo "" >&2
+	usage >&2
+	exit 1
+	;;
+esac
