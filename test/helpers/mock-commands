@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# sipag — BATS mock-command helpers
+#
+# create_mock <name> <exit_code> <stdout>
+#   Installs a fake executable in TEST_TMPDIR/bin/ that:
+#     - prints its arguments (one per line) to a call-log file
+#     - prints <stdout> to stdout
+#     - exits with <exit_code>
+#
+# mock_call_count <name>
+#   Prints the number of times the mock was invoked.
+#
+# get_mock_calls <name>
+#   Prints all recorded argument lines for the mock.
+
+create_mock() {
+    local name="$1"
+    local exit_code="${2:-0}"
+    local output="${3:-}"
+    local mock_dir="${TEST_TMPDIR}/bin"
+    local calls_dir="${TEST_TMPDIR}/calls"
+    local call_log="${calls_dir}/${name}"
+
+    mkdir -p "${mock_dir}" "${calls_dir}"
+
+    # Each invocation appends one line containing all args (space-joined).
+    # For commands whose args may contain spaces (like --system-prompt "..."),
+    # callers should use get_mock_calls and grep for flag names.
+    cat > "${mock_dir}/${name}" <<MOCK_SCRIPT
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${call_log}"
+printf '%s' "${output}"
+exit ${exit_code}
+MOCK_SCRIPT
+
+    chmod +x "${mock_dir}/${name}"
+}
+
+mock_call_count() {
+    local name="$1"
+    local call_log="${TEST_TMPDIR}/calls/${name}"
+    if [[ ! -f "${call_log}" ]]; then
+        echo 0
+        return
+    fi
+    wc -l < "${call_log}" | tr -d ' '
+}
+
+get_mock_calls() {
+    local name="$1"
+    local call_log="${TEST_TMPDIR}/calls/${name}"
+    if [[ -f "${call_log}" ]]; then
+        cat "${call_log}"
+    fi
+}

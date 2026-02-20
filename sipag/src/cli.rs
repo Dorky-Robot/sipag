@@ -60,8 +60,25 @@ pub enum Commands {
         id: String,
     },
 
-    /// Process queue/ serially (uses sipag run internally)
-    Start,
+    /// Process queue/ serially, or launch an interactive Claude session
+    ///
+    /// Without arguments, processes all tasks in queue/ serially.
+    ///
+    /// With <mode> and <repo>, gathers GitHub context and starts an interactive
+    /// Claude Code session (triage, refinement, or review).
+    ///
+    /// Examples:
+    ///   sipag start
+    ///   sipag start triage owner/repo
+    ///   sipag start refinement owner/repo
+    ///   sipag start review owner/repo
+    Start {
+        /// Session mode: triage, refinement, or review
+        mode: Option<String>,
+
+        /// Repository in owner/repo format (required when mode is set)
+        repo: Option<String>,
+    },
 
     /// Create ~/.sipag/{queue,running,done,failed}
     Init,
@@ -163,7 +180,7 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
-        Some(Commands::Start) => cmd_start(),
+        Some(Commands::Start { mode, repo }) => cmd_start(mode.as_deref(), repo.as_deref()),
         Some(Commands::Run {
             repo,
             issue,
@@ -214,7 +231,72 @@ fn cmd_init() -> Result<()> {
     task::init_dirs(&sipag_dir())
 }
 
-fn cmd_start() -> Result<()> {
+fn cmd_start(mode: Option<&str>, repo: Option<&str>) -> Result<()> {
+    match mode {
+        Some(m) => {
+            let r = repo.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Usage: sipag start <mode> <owner/repo>\nAvailable modes: triage, refinement, review"
+                )
+            })?;
+            cmd_start_session(m, r)
+        }
+        None => cmd_start_queue(),
+    }
+}
+
+fn find_lib_start_sh() -> Result<std::path::PathBuf> {
+    // 1. Explicit override via SIPAG_LIB_DIR
+    if let Ok(dir) = std::env::var("SIPAG_LIB_DIR") {
+        let candidate = std::path::PathBuf::from(&dir).join("start.sh");
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+        bail!("SIPAG_LIB_DIR is set to '{}' but start.sh was not found there", dir);
+    }
+
+    // 2. Relative to current working directory (useful during development)
+    let cwd_candidate = std::path::PathBuf::from("lib/start.sh");
+    if cwd_candidate.exists() {
+        return Ok(cwd_candidate);
+    }
+
+    // 3. Relative to the running binary (e.g. ~/.cargo/bin/../lib/start.sh)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            let candidate = bin_dir.join("../lib/start.sh");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    bail!(
+        "Could not find lib/start.sh.\n\
+         Options:\n\
+         - Run sipag from the repository root, or\n\
+         - Set SIPAG_LIB_DIR to the directory that contains start.sh"
+    )
+}
+
+fn cmd_start_session(mode: &str, repo: &str) -> Result<()> {
+    let script = find_lib_start_sh()?;
+
+    let status = std::process::Command::new("bash")
+        .arg(&script)
+        .arg(mode)
+        .arg(repo)
+        .status()
+        .with_context(|| format!("Failed to execute {}", script.display()))?;
+
+    if !status.success() {
+        bail!("sipag start {} exited with a non-zero status", mode);
+    }
+
+    Ok(())
+}
+
+fn cmd_start_queue() -> Result<()> {
     let dir = sipag_dir();
     task::init_dirs(&dir).ok();
     println!("sipag executor starting (queue: {}/queue)", dir.display());

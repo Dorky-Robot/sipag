@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# sipag — common BATS test helpers
+
+# Absolute path to the repository root (two levels up from test/helpers/)
+SIPAG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export SIPAG_ROOT
+
+# Per-test isolated temporary directory
+export TEST_TMPDIR
+
+setup_common() {
+    TEST_TMPDIR="$(mktemp -d)"
+    mkdir -p "${TEST_TMPDIR}/bin"
+    # Prepend our mock bin dir so mocked commands shadow real ones
+    export PATH="${TEST_TMPDIR}/bin:${PATH}"
+}
+
+teardown_common() {
+    rm -rf "${TEST_TMPDIR}"
+}
