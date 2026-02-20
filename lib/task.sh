@@ -98,6 +98,28 @@ task_list() {
 	echo "${done}/${total} done"
 }
 
+# Create the sipag directory structure (idempotent).
+# Uses SIPAG_DIR env var if no argument is given (default: ~/.sipag).
+# Prints a confirmation line for each directory created, then a summary.
+sipag_init_dirs() {
+	local dir="${1:-${SIPAG_DIR:-${HOME}/.sipag}}"
+	local created=0
+
+	for subdir in queue running done failed; do
+		if [[ ! -d "${dir}/${subdir}" ]]; then
+			mkdir -p "${dir}/${subdir}"
+			echo "Created: ${dir}/${subdir}"
+			created=1
+		fi
+	done
+
+	if [[ $created -eq 0 ]]; then
+		echo "Already initialized: ${dir}"
+	else
+		echo "Initialized: ${dir}"
+	fi
+}
+
 # Append a new pending task. Creates the file if missing.
 task_add() {
 	local file="$1"
