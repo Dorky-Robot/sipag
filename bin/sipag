@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# sipag — GitHub issue refinement (local, no Docker)
+#
+# Provides the `refine` command which runs Claude locally to analyse and
+# break down open GitHub issues.  All other sipag commands are handled
+# by the compiled Rust binary (see: cargo install --path sipag).
+
+set -euo pipefail
+
+SIPAG_VERSION="2.0.0"
+
+# Resolve project root relative to this script so the libraries can be
+# sourced regardless of the working directory.
+SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# shellcheck source=../lib/run.sh
+source "${SIPAG_ROOT}/lib/run.sh"
+# shellcheck source=../lib/refine.sh
+source "${SIPAG_ROOT}/lib/refine.sh"
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+usage() {
+	cat <<'EOF'
+sipag — GitHub issue refinement via Claude (local / no Docker)
+
+Usage:
+  sipag refine <owner/repo>    Analyse open issues and apply refinement actions
+  sipag version                Print version
+  sipag help                   Show this help
+
+Commands:
+  refine <owner/repo>
+    Fetch up to 50 open issues, prompt Claude to classify and break them
+    down, then apply each action via the gh CLI:
+      ready   — add "ready" label
+      split   — create sub-issues, close the parent with a comment
+      clarify — post a clarifying-question comment
+      update  — rewrite title and/or body
+
+Environment:
+  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_MODEL             Model override (e.g. claude-opus-4-5)
+  SIPAG_SKIP_PERMISSIONS  Set to 0 for interactive mode (default: 1)
+  SIPAG_CLAUDE_ARGS       Extra raw args appended to the claude invocation
+
+Requirements:
+  gh      GitHub CLI (authenticated)
+  claude  Anthropic Claude CLI
+  jq      JSON processor
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_refine() {
+	local repo="${1:-}"
+	if [[ -z "$repo" ]]; then
+		echo "Usage: sipag refine <owner/repo>" >&2
+		return 1
+	fi
+	refine_run "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+main() {
+	local cmd="${1:-help}"
+	shift || true
+
+	case "$cmd" in
+	refine)             cmd_refine "$@" ;;
+	version | -v | --version) printf 'sipag %s\n' "$SIPAG_VERSION" ;;
+	help | -h | --help) usage ;;
+	*)
+		printf 'Unknown command: %s\n\n' "$cmd" >&2
+		usage >&2
+		exit 1
+		;;
+	esac
+}
+
+main "$@"
