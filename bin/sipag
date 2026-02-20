@@ -1,591 +1,186 @@
 #!/usr/bin/env bash
+# sipag — task queue feeder for Claude Code
+#
+# Reads a markdown checklist, feeds the next unchecked item to claude,
+# marks it done, moves on.
+
 set -euo pipefail
 
-SIPAG_VERSION="0.2.0"
+SIPAG_VERSION="2.0.0"
 
-# Resolve the real location of this script (follow symlinks)
-_sipag_resolve() {
-  local src="${BASH_SOURCE[0]}"
-  while [[ -L "$src" ]]; do
-    local dir
-    dir="$(cd "$(dirname "$src")" && pwd)"
-    src="$(readlink "$src")"
-    [[ "$src" != /* ]] && src="$dir/$src"
-  done
-  echo "$(cd "$(dirname "$src")" && pwd)"
-}
-SIPAG_BIN="$(_sipag_resolve)"
-SIPAG_ROOT="${SIPAG_ROOT:-$(dirname "$SIPAG_BIN")}"
+# Resolve project root
+SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Load libraries
-source "${SIPAG_ROOT}/lib/core/log.sh"
-source "${SIPAG_ROOT}/lib/core/config.sh"
-source "${SIPAG_ROOT}/lib/core/worker.sh"
-source "${SIPAG_ROOT}/lib/core/pool.sh"
-source "${SIPAG_ROOT}/lib/core/project.sh"
+# Source libraries
+# shellcheck source=../lib/task.sh
+source "${SIPAG_ROOT}/lib/task.sh"
+# shellcheck source=../lib/run.sh
+source "${SIPAG_ROOT}/lib/run.sh"
 
-# Load source plugin (after config is loaded)
-_load_source_plugin() {
-  local plugin="${SIPAG_ROOT}/lib/sources/${SIPAG_SOURCE}.sh"
-  if [[ ! -f "$plugin" ]]; then
-    die "Unknown source plugin: ${SIPAG_SOURCE} (expected ${plugin})"
-  fi
-  # shellcheck disable=SC1090
-  source "$plugin"
-}
+# --- Defaults ---
 
-# --- Daemon commands ---
+SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
+CONTINUE=0
+DRY_RUN=0
 
-cmd_daemon_start() {
-  local foreground="false"
+# --- Help ---
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -f | --foreground)
-        foreground="true"
-        shift
-        ;;
-      *) die "Unknown option: $1" ;;
-    esac
-  done
+usage() {
+	cat <<'EOF'
+sipag — task queue feeder for Claude Code
 
-  local home
-  home="$(config_ensure_home)"
+Usage:
+  sipag                        Run next unchecked task (same as sipag next)
+  sipag next [-c] [-n] [-f]   Find first - [ ], run claude, mark - [x]
+  sipag list [-f path]         Print all tasks with status
+  sipag add "task" [-f path]   Append - [ ] task to file
+  sipag version                Print version
+  sipag help                   Show this help
 
-  config_load_global
+Flags:
+  -c, --continue     After completing, loop to the next task
+  -n, --dry-run      Show what would run, don't invoke claude
+  -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
 
-  local pid_file="${home}/sipag.pid"
-
-  # Check if already running
-  if [[ -f "$pid_file" ]]; then
-    local existing_pid
-    existing_pid=$(cat "$pid_file")
-    if kill -0 "$existing_pid" 2>/dev/null; then
-      die "sipag daemon is already running (PID ${existing_pid}). Use 'sipag daemon stop' first."
-    else
-      log_warn "Stale PID file found, removing"
-      rm -f "$pid_file"
-    fi
-  fi
-
-  # Verify at least one project is registered
-  local projects
-  projects=$(config_list_projects)
-  if [[ -z "$projects" ]]; then
-    die "No projects registered. Use 'sipag project add <slug>' first."
-  fi
-
-  pool_start "$home" "$foreground"
+Environment:
+  SIPAG_FILE              Task file path (default: ./tasks.md)
+  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_MODEL             Model override
+  SIPAG_PROMPT_PREFIX     Prepended to every prompt
+  SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
+  SIPAG_CLAUDE_ARGS       Extra raw args to claude
+EOF
 }
 
-cmd_daemon_stop() {
-  local home
-  home="$(config_get_home)"
-  pool_stop "$home"
+# --- Commands ---
+
+cmd_next() {
+	while true; do
+		if ! task_parse_next "$SIPAG_FILE"; then
+			echo "No pending tasks in ${SIPAG_FILE}"
+			return 0
+		fi
+
+		echo "==> Task ${TASK_LINE}: ${TASK_TITLE}"
+
+		if [[ $DRY_RUN -eq 1 ]]; then
+			if [[ -n "$TASK_BODY" ]]; then
+				echo ""
+				echo "$TASK_BODY"
+			fi
+			echo ""
+			echo "(dry run — skipping claude)"
+			return 0
+		fi
+
+		if run_claude "$TASK_TITLE" "$TASK_BODY"; then
+			task_mark_done "$SIPAG_FILE" "$TASK_LINE"
+			echo "==> Done: ${TASK_TITLE}"
+		else
+			local rc=$?
+			echo "==> Failed (exit ${rc}): ${TASK_TITLE}"
+			return $rc
+		fi
+
+		if [[ $CONTINUE -eq 0 ]]; then
+			return 0
+		fi
+
+		echo ""
+	done
 }
 
-cmd_daemon_status() {
-  local home
-  home="$(config_get_home)"
-  config_load_global
-  pool_status "$home"
+cmd_list() {
+	task_list "$SIPAG_FILE"
 }
 
-# --- Project commands ---
-
-cmd_project_add() {
-  if [[ $# -lt 1 ]]; then
-    die "Usage: sipag project add <slug> [--repo=owner/repo] [--source=github|adhoc|tao] ..."
-  fi
-
-  config_load_global
-  project_add "$@"
-}
-
-cmd_project_remove() {
-  if [[ $# -lt 1 ]]; then
-    die "Usage: sipag project remove <slug>"
-  fi
-
-  project_remove "$1"
-}
-
-cmd_project_list() {
-  project_list
-}
-
-cmd_project_show() {
-  if [[ $# -lt 1 ]]; then
-    die "Usage: sipag project show <slug>"
-  fi
-
-  project_show "$1"
-}
-
-# --- Task commands ---
-
-cmd_task_add() {
-  if [[ $# -lt 1 ]]; then
-    die "Usage: sipag task add <slug> <prompt> or echo 'prompt' | sipag task add <slug> -"
-  fi
-
-  local slug="$1"
-  shift
-
-  config_load_global
-
-  local project_dir
-  project_dir="$(config_get_project_dir "$slug")"
-  if [[ ! -f "${project_dir}/config" ]]; then
-    die "Project '${slug}' does not exist. Register it with 'sipag project add ${slug}' first."
-  fi
-
-  local prompt=""
-  if [[ "${1:-}" == "-" ]]; then
-    # Read from stdin
-    prompt=$(cat)
-  elif [[ $# -gt 0 ]]; then
-    prompt="$*"
-  else
-    die "Usage: sipag task add <slug> <prompt>"
-  fi
-
-  if [[ -z "$prompt" ]]; then
-    die "Empty prompt. Provide a task description."
-  fi
-
-  # Load the adhoc source to create the task
-  local home
-  home="$(config_get_home)"
-  local adhoc_dir="${home}/adhoc/pending"
-  mkdir -p "$adhoc_dir"
-
-  local task_id
-  task_id=$(openssl rand -hex 4)
-  local now
-  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-
-  # Escape prompt for JSON
-  local escaped_prompt
-  escaped_prompt=$(printf '%s' "$prompt" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g' | tr '\n' ' ')
-
-  cat >"${adhoc_dir}/${task_id}.json" <<JSONEOF
-{"id":"${task_id}","slug":"${slug}","prompt":"${escaped_prompt}","created_at":"${now}"}
-JSONEOF
-
-  echo "Task ${task_id} created for project '${slug}'"
-}
-
-cmd_task_list() {
-  local slug="${1:-}"
-  local home
-  home="$(config_get_home)"
-
-  echo "--- Pending ---"
-  _task_list_dir "${home}/adhoc/pending" "$slug"
-
-  echo ""
-  echo "--- In Progress ---"
-  _task_list_dir "${home}/adhoc/claimed" "$slug"
-
-  echo ""
-  echo "--- Done ---"
-  _task_list_dir "${home}/adhoc/done" "$slug"
-}
-
-_task_list_dir() {
-  local dir="$1"
-  local filter_slug="$2"
-
-  if [[ ! -d "$dir" ]]; then
-    echo "  (none)"
-    return 0
-  fi
-
-  local found=0
-  for f in "${dir}"/*.json; do
-    [[ -f "$f" ]] || continue
-    local task_slug task_id task_prompt
-    task_slug=$(jq -r '.slug // ""' "$f" 2>/dev/null)
-    task_id=$(jq -r '.id // ""' "$f" 2>/dev/null)
-    task_prompt=$(jq -r '.prompt // ""' "$f" 2>/dev/null)
-
-    if [[ -n "$filter_slug" && "$task_slug" != "$filter_slug" ]]; then
-      continue
-    fi
-
-    local short_prompt="${task_prompt:0:60}"
-    [[ ${#task_prompt} -gt 60 ]] && short_prompt="${short_prompt}..."
-    printf "  %-12s %-15s %s\n" "$task_id" "$task_slug" "$short_prompt"
-    found=$((found + 1))
-  done
-
-  if [[ "$found" -eq 0 ]]; then
-    echo "  (none)"
-  fi
-}
-
-cmd_task_show() {
-  if [[ $# -lt 1 ]]; then
-    die "Usage: sipag task show <id>"
-  fi
-
-  local task_id="$1"
-  local home
-  home="$(config_get_home)"
-
-  local dirs=("pending" "claimed" "done" "failed")
-  for dir in "${dirs[@]}"; do
-    local path="${home}/adhoc/${dir}/${task_id}.json"
-    if [[ -f "$path" ]]; then
-      echo "Status: ${dir}"
-      jq . "$path"
-      return 0
-    fi
-  done
-
-  die "Task '${task_id}' not found"
-}
-
-# --- Legacy compat commands ---
-
-cmd_init() {
-  local target_dir="${1:-.}"
-
-  # Check for legacy .sipag file
-  if [[ -f "${target_dir}/.sipag" ]]; then
-    echo ".sipag already exists in ${target_dir}"
-    read -rp "Overwrite? [y/N] " answer
-    [[ "$answer" =~ ^[Yy] ]] || {
-      echo "Aborted."
-      exit 0
-    }
-  fi
-
-  echo "Setting up sipag config..."
-  echo ""
-
-  local repo="" base_branch="main" concurrency="2"
-  local label_ready="sipag" label_wip="sipag-wip" label_done="sipag-done"
-  local timeout="600" poll_interval="60" safety_mode="strict" allowed_tools="" prompt_prefix=""
-  local source_type="github"
-
-  # Try to detect repo from git remote
-  local detected_repo
-  detected_repo=$(git -C "$target_dir" remote get-url origin 2>/dev/null | sed -E 's|.*github\.com[:/]||;s|\.git$||' || true)
-
-  if [[ -n "$detected_repo" ]]; then
-    read -rp "GitHub repo [${detected_repo}]: " repo
-    repo="${repo:-$detected_repo}"
-  else
-    read -rp "GitHub repo (owner/repo): " repo
-  fi
-
-  if [[ -z "$repo" ]]; then
-    echo "Error: repo is required"
-    exit 1
-  fi
-
-  read -rp "Base branch [${base_branch}]: " input
-  base_branch="${input:-$base_branch}"
-
-  read -rp "Concurrency [${concurrency}]: " input
-  concurrency="${input:-$concurrency}"
-
-  read -rp "Ready label [${label_ready}]: " input
-  label_ready="${input:-$label_ready}"
-
-  read -rp "WIP label [${label_wip}]: " input
-  label_wip="${input:-$label_wip}"
-
-  read -rp "Done label [${label_done}]: " input
-  label_done="${input:-$label_done}"
-
-  read -rp "Timeout in seconds [${timeout}]: " input
-  timeout="${input:-$timeout}"
-
-  read -rp "Poll interval in seconds [${poll_interval}]: " input
-  poll_interval="${input:-$poll_interval}"
-
-  echo ""
-  echo "Safety mode:"
-  echo "  strict   — rule-based only; deny anything ambiguous (safest)"
-  echo "  balanced — rules first, then LLM evaluates ambiguous commands"
-  echo "  yolo     — skip all permission checks (use with caution)"
-  read -rp "Safety mode [${safety_mode}]: " input
-  safety_mode="${input:-$safety_mode}"
-
-  read -rp "Allowed tools (comma-separated, blank for none): " allowed_tools
-
-  read -rp "Prompt prefix (blank for none): " prompt_prefix
-
-  # Derive a slug from the repo name
-  local slug
-  slug=$(echo "$repo" | sed 's|.*/||; s/[^a-zA-Z0-9._-]/-/g')
-
-  # Set config vars and save to project registry
-  SIPAG_SOURCE="$source_type"
-  SIPAG_REPO="$repo"
-  SIPAG_BASE_BRANCH="$base_branch"
-  SIPAG_CONCURRENCY="$concurrency"
-  SIPAG_LABEL_READY="$label_ready"
-  SIPAG_LABEL_WIP="$label_wip"
-  SIPAG_LABEL_DONE="$label_done"
-  SIPAG_TIMEOUT="$timeout"
-  SIPAG_POLL_INTERVAL="$poll_interval"
-  SIPAG_SAFETY_MODE="$safety_mode"
-  SIPAG_ALLOWED_TOOLS="$allowed_tools"
-  SIPAG_PROMPT_PREFIX="$prompt_prefix"
-  SIPAG_CLONE_URL=""
-
-  config_save_project "$slug"
-  config_ensure_project_dir "$slug" >/dev/null
-
-  # Also write legacy .sipag for backward compat
-  cat >"${target_dir}/.sipag" <<CONF
-SIPAG_SOURCE=${source_type}
-SIPAG_REPO=${repo}
-SIPAG_BASE_BRANCH=${base_branch}
-SIPAG_CONCURRENCY=${concurrency}
-SIPAG_LABEL_READY=${label_ready}
-SIPAG_LABEL_WIP=${label_wip}
-SIPAG_LABEL_DONE=${label_done}
-SIPAG_TIMEOUT=${timeout}
-SIPAG_POLL_INTERVAL=${poll_interval}
-SIPAG_SAFETY_MODE=${safety_mode}
-SIPAG_ALLOWED_TOOLS="${allowed_tools}"
-SIPAG_PROMPT_PREFIX="${prompt_prefix}"
-CONF
-
-  echo ""
-  echo "Config written to $(config_get_project_dir "$slug")/config"
-  echo "Legacy config also written to ${target_dir}/.sipag"
-}
-
-# Legacy: sipag start in a project dir auto-registers and starts daemon
-cmd_start_legacy() {
-  local project_dir="."
-  local foreground="false"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -f | --foreground)
-        foreground="true"
-        shift
-        ;;
-      -d | --dir)
-        project_dir="$2"
-        shift 2
-        ;;
-      *) die "Unknown option: $1" ;;
-    esac
-  done
-
-  project_dir="$(cd "$project_dir" && pwd)"
-
-  if [[ ! -f "${project_dir}/.sipag" ]]; then
-    die "No .sipag found in ${project_dir}. Run 'sipag init' first or use 'sipag daemon start'."
-  fi
-
-  # Auto-register this project if not already registered
-  config_load "$project_dir"
-  local slug
-  slug=$(echo "$SIPAG_REPO" | sed 's|.*/||; s/[^a-zA-Z0-9._-]/-/g')
-
-  local pdir
-  pdir="$(config_get_project_dir "$slug")"
-  if [[ ! -f "${pdir}/config" ]]; then
-    config_save_project "$slug"
-    config_ensure_project_dir "$slug" >/dev/null
-    log_info "Auto-registered project '${slug}' from ${project_dir}/.sipag"
-  fi
-
-  # Start the daemon
-  if [[ "$foreground" == "true" ]]; then
-    cmd_daemon_start -f
-  else
-    cmd_daemon_start
-  fi
-}
-
-# Legacy: sipag stop in a project dir
-cmd_stop_legacy() {
-  local project_dir="${1:-.}"
-  project_dir="$(cd "$project_dir" && pwd)"
-
-  # Try the new daemon stop first
-  local home
-  home="$(config_get_home)"
-  if [[ -f "${home}/sipag.pid" ]]; then
-    pool_stop "$home"
-    return
-  fi
-
-  # Fall back to old-style per-project stop
-  config_load "$project_dir"
-  local run_dir
-  run_dir=$(config_get_run_dir "$project_dir")
-
-  if [[ ! -d "$run_dir" ]]; then
-    echo "sipag has not been started in this directory"
-    return 1
-  fi
-
-  _load_source_plugin
-  pool_stop "$run_dir"
-}
-
-cmd_status_legacy() {
-  local project_dir="${1:-.}"
-
-  # If TUI is available and we have the new layout, launch TUI
-  if [[ -t 1 ]] && command -v sipag-tui &>/dev/null; then
-    exec sipag-tui
-  fi
-
-  # Try new daemon status
-  local home
-  home="$(config_get_home)"
-  if [[ -f "${home}/sipag.pid" ]]; then
-    config_load_global
-    pool_status "$home"
-    return
-  fi
-
-  # Fall back to old-style per-project status
-  project_dir="$(cd "$project_dir" && pwd)"
-  config_load "$project_dir"
-  local run_dir
-  run_dir=$(config_get_run_dir "$project_dir")
-
-  if [[ ! -d "$run_dir" ]]; then
-    echo "sipag has not been started in this directory"
-    return 1
-  fi
-
-  pool_status "$run_dir"
+cmd_add() {
+	if [[ $# -eq 0 ]]; then
+		echo "Usage: sipag add \"task text\" [-f path]"
+		return 1
+	fi
+
+	local text="$1"
+	task_add "$SIPAG_FILE" "$text"
+	echo "Added: ${text}"
 }
 
 cmd_version() {
-  echo "sipag v${SIPAG_VERSION}"
+	echo "sipag ${SIPAG_VERSION}"
 }
 
-cmd_help() {
-  cat <<'HELP'
-sipag — sleep while Claude writes your PRs
+# --- Argument parsing ---
 
-Usage:
-  sipag daemon start [-f]           Start the daemon (manages all projects)
-  sipag daemon stop                 Stop the daemon and all workers
-  sipag daemon status               Show daemon PID, uptime, active workers
+main() {
+	local command=""
+	local add_text=""
 
-  sipag project add <slug> [opts]   Register a project
-                                    --repo=owner/repo  --source=github|adhoc|tao
-                                    --concurrency=N    --branch=main
-                                    --clone-url=URL    --safety=strict|balanced|yolo
-  sipag project remove <slug>       Unregister a project
-  sipag project list                List registered projects
-  sipag project show <slug>         Show project config + workers
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		next)
+			command="next"
+			shift
+			;;
+		list)
+			command="list"
+			shift
+			;;
+		add)
+			command="add"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				add_text="$1"
+				shift
+			fi
+			;;
+		version | --version)
+			cmd_version
+			return 0
+			;;
+		help | --help | -h)
+			usage
+			return 0
+			;;
+		-c | --continue)
+			CONTINUE=1
+			shift
+			;;
+		-n | --dry-run)
+			DRY_RUN=1
+			shift
+			;;
+		-f | --file)
+			shift
+			SIPAG_FILE="${1:?--file requires a path}"
+			shift
+			;;
+		-*)
+			echo "Unknown flag: $1"
+			usage
+			return 1
+			;;
+		*)
+			# If no command yet, treat as command
+			if [[ -z "$command" ]]; then
+				echo "Unknown command: $1"
+				usage
+				return 1
+			fi
+			shift
+			;;
+		esac
+	done
 
-  sipag task add <slug> <prompt>    Submit ad-hoc task for a project
-  sipag task list [slug]            List tasks across all or one project
-  sipag task show <id>              Show task detail
+	# Default command
+	if [[ -z "$command" ]]; then
+		command="next"
+	fi
 
-  sipag init                        Interactive setup (writes to ~/.sipag/projects/)
-  sipag start [-f]                  (Compat) Auto-register project, start daemon
-  sipag status                      (Compat) Show daemon status or launch TUI
-  sipag stop                        (Compat) Stop the daemon
-  sipag version                     Print version
-  sipag help                        Show this help
-
-How it works:
-  1. Register a project:  sipag project add my-app --repo=org/repo --source=github
-  2. Start the daemon:    sipag daemon start
-  3. sipag polls for issues, runs Claude Code on each, and opens PRs
-  4. Submit ad-hoc tasks: sipag task add my-app "implement dark mode"
-  5. Wake up to PRs
-
-Safety modes (SIPAG_SAFETY_MODE):
-  strict     Rule-based allow/deny; ambiguous commands are denied (default)
-  balanced   Rules first, then Haiku LLM evaluates ambiguous commands
-  yolo       Skip all permission checks (--dangerously-skip-permissions)
-HELP
+	case "$command" in
+	next) cmd_next ;;
+	list) cmd_list ;;
+	add) cmd_add "$add_text" ;;
+	esac
 }
 
-# --- Main ---
-
-case "${1:-help}" in
-  daemon)
-    shift
-    case "${1:-}" in
-      start)
-        shift
-        cmd_daemon_start "$@"
-        ;;
-      stop) cmd_daemon_stop ;;
-      status) cmd_daemon_status ;;
-      *) die "Usage: sipag daemon {start|stop|status}" ;;
-    esac
-    ;;
-  project)
-    shift
-    case "${1:-}" in
-      add)
-        shift
-        cmd_project_add "$@"
-        ;;
-      remove)
-        shift
-        cmd_project_remove "$@"
-        ;;
-      list) cmd_project_list ;;
-      show)
-        shift
-        cmd_project_show "$@"
-        ;;
-      *) die "Usage: sipag project {add|remove|list|show}" ;;
-    esac
-    ;;
-  task)
-    shift
-    case "${1:-}" in
-      add)
-        shift
-        cmd_task_add "$@"
-        ;;
-      list)
-        shift
-        cmd_task_list "$@"
-        ;;
-      show)
-        shift
-        cmd_task_show "$@"
-        ;;
-      *) die "Usage: sipag task {add|list|show}" ;;
-    esac
-    ;;
-  init)
-    shift
-    cmd_init "$@"
-    ;;
-  start)
-    shift
-    cmd_start_legacy "$@"
-    ;;
-  stop)
-    shift
-    cmd_stop_legacy "$@"
-    ;;
-  status)
-    shift
-    cmd_status_legacy "$@"
-    ;;
-  version) cmd_version ;;
-  help | --help | -h) cmd_help ;;
-  *)
-    echo "Unknown command: $1"
-    echo ""
-    cmd_help
-    exit 1
-    ;;
-esac
+main "$@"

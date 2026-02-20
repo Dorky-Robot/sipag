@@ -1,170 +1,231 @@
 #!/usr/bin/env bats
-# sipag — CLI integration tests
+# sipag v2 — integration tests for bin/sipag
 
 load ../helpers/test-helpers
+load ../helpers/mock-commands
 
 setup() {
   setup_common
-  export SIPAG_CLI="${SIPAG_ROOT}/bin/sipag"
+  # Mock timeout to just run the command directly
+  create_mock "timeout" 0
+  export SIPAG_FILE="${TEST_TMPDIR}/tasks.md"
 }
 
 teardown() {
   teardown_common
 }
 
-# --- Help & version ---
-
-@test "sipag help: shows usage" {
-  run bash "$SIPAG_CLI" help
-  [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-  [[ "$output" == *"sipag daemon"* ]]
-  [[ "$output" == *"sipag project"* ]]
-  [[ "$output" == *"sipag task"* ]]
+# Helper: create a simple task file
+create_tasks() {
+  cat >"${SIPAG_FILE}" <<'EOF'
+- [ ] First task
+- [ ] Second task
+- [ ] Third task
+EOF
 }
 
-@test "sipag --help: shows usage" {
-  run bash "$SIPAG_CLI" --help
+# --- sipag next ---
+
+@test "next: invokes claude and marks done on success" {
+  create_tasks
+  create_mock "claude" 0 "Task completed"
+
+  # We need timeout to actually run claude, not just log
+  # Override timeout mock to pass through
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+# Skip the timeout value and command name
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag" next
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Usage:"* ]]
+  assert_output_contains "Task 1: First task"
+  assert_output_contains "Done: First task"
+
+  # First task should be marked done
+  assert_file_contains "${SIPAG_FILE}" "- [x] First task"
+  # Second should still be pending
+  assert_file_contains "${SIPAG_FILE}" "- [ ] Second task"
 }
 
-@test "sipag -h: shows usage" {
-  run bash "$SIPAG_CLI" -h
-  [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-}
+@test "next: does not mark done on failure" {
+  create_tasks
+  create_mock "claude" 1 "Error"
 
-@test "sipag version: returns version string" {
-  run bash "$SIPAG_CLI" version
-  [[ "$status" -eq 0 ]]
-  [[ "$output" == "sipag v"* ]]
-}
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
 
-@test "sipag (no args): shows help" {
-  run bash "$SIPAG_CLI"
-  [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-}
-
-@test "unknown command: shows help + exits non-zero" {
-  run bash "$SIPAG_CLI" foobar
+  run "${SIPAG_ROOT}/bin/sipag" next
   [[ "$status" -ne 0 ]]
-  [[ "$output" == *"Unknown command: foobar"* ]]
-  [[ "$output" == *"Usage:"* ]]
+  assert_output_contains "Failed"
+
+  # Task should NOT be marked done
+  assert_file_contains "${SIPAG_FILE}" "- [ ] First task"
 }
 
-# --- Daemon commands ---
+@test "next --continue: processes multiple tasks, stops at end" {
+  cat >"${SIPAG_FILE}" <<'EOF'
+- [ ] Task A
+- [ ] Task B
+EOF
 
-@test "sipag daemon: missing subcommand → error" {
-  run bash "$SIPAG_CLI" daemon
-  [[ "$status" -ne 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-}
+  create_mock "claude" 0 "Done"
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
 
-@test "sipag daemon start: without projects exits with error" {
-  run bash "$SIPAG_CLI" daemon start -f
-  [[ "$status" -ne 0 ]]
-  [[ "$output" == *"No projects"* ]]
-}
-
-@test "sipag daemon status: without daemon exits with error" {
-  run bash "$SIPAG_CLI" daemon status
-  [[ "$status" -ne 0 ]]
-}
-
-# --- Project commands ---
-
-@test "sipag project: missing subcommand → error" {
-  run bash "$SIPAG_CLI" project
-  [[ "$status" -ne 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-}
-
-@test "sipag project add: creates project" {
-  run bash "$SIPAG_CLI" project add my-app --repo=org/my-app --source=github
+  run "${SIPAG_ROOT}/bin/sipag" next --continue
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"registered"* ]]
-  [[ -f "${SIPAG_HOME}/projects/my-app/config" ]]
+  assert_output_contains "Done: Task A"
+  assert_output_contains "Done: Task B"
+  assert_output_contains "No pending tasks"
+
+  # Both marked done
+  assert_file_contains "${SIPAG_FILE}" "- [x] Task A"
+  assert_file_contains "${SIPAG_FILE}" "- [x] Task B"
 }
 
-@test "sipag project add: missing slug → error" {
-  run bash "$SIPAG_CLI" project add
+@test "next --continue: stops on failure" {
+  cat >"${SIPAG_FILE}" <<'EOF'
+- [ ] Task A
+- [ ] Task B
+EOF
+
+  # Claude fails
+  create_mock "claude" 1 "Error"
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag" next --continue
   [[ "$status" -ne 0 ]]
+  assert_output_contains "Failed"
+
+  # First task not marked done, second untouched
+  assert_file_contains "${SIPAG_FILE}" "- [ ] Task A"
+  assert_file_contains "${SIPAG_FILE}" "- [ ] Task B"
 }
 
-@test "sipag project list: shows projects" {
-  # Add a project first
-  bash "$SIPAG_CLI" project add test-app --repo=org/test-app --source=github
-  run bash "$SIPAG_CLI" project list
+@test "next --dry-run: shows task without invoking claude" {
+  create_tasks
+  create_mock "claude" 0 "Should not see this"
+
+  run "${SIPAG_ROOT}/bin/sipag" next --dry-run
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"test-app"* ]]
+  assert_output_contains "Task 1: First task"
+  assert_output_contains "dry run"
+
+  # Claude should not have been called
+  [[ "$(mock_call_count "claude")" -eq 0 ]]
+
+  # Task should NOT be marked done
+  assert_file_contains "${SIPAG_FILE}" "- [ ] First task"
 }
 
-@test "sipag project show: displays project config" {
-  bash "$SIPAG_CLI" project add test-app --repo=org/test-app
-  run bash "$SIPAG_CLI" project show test-app
+@test "next: prints message when no tasks pending" {
+  cat >"${SIPAG_FILE}" <<'EOF'
+- [x] Done task
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" next
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Project: test-app"* ]]
+  assert_output_contains "No pending tasks"
 }
 
-@test "sipag project remove: removes project" {
-  bash "$SIPAG_CLI" project add test-app --repo=org/test-app
-  run bash "$SIPAG_CLI" project remove test-app
+# --- sipag list ---
+
+@test "list: shows task status" {
+  cat >"${SIPAG_FILE}" <<'EOF'
+- [x] Done task
+- [ ] Pending task
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" list
   [[ "$status" -eq 0 ]]
-  [[ ! -d "${SIPAG_HOME}/projects/test-app" ]]
+  assert_output_contains "[x] Done task"
+  assert_output_contains "[ ] Pending task"
+  assert_output_contains "1/2 done"
 }
 
-# --- Task commands ---
+# --- sipag add ---
 
-@test "sipag task: missing subcommand → error" {
-  run bash "$SIPAG_CLI" task
-  [[ "$status" -ne 0 ]]
-  [[ "$output" == *"Usage:"* ]]
-}
+@test "add: appends task to file" {
+  create_tasks
 
-@test "sipag task add: creates ad-hoc task" {
-  bash "$SIPAG_CLI" project add my-app --repo=org/my-app
-  run bash "$SIPAG_CLI" task add my-app "implement dark mode"
+  run "${SIPAG_ROOT}/bin/sipag" add "New task here"
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Task"* ]]
-  [[ "$output" == *"created"* ]]
-
-  # Verify task file exists
-  local count
-  count=$(ls "${SIPAG_HOME}/adhoc/pending/"*.json 2>/dev/null | wc -l | tr -d ' ')
-  [[ "$count" -eq 1 ]]
+  assert_output_contains "Added: New task here"
+  assert_file_contains "${SIPAG_FILE}" "- [ ] New task here"
 }
 
-@test "sipag task add: stdin mode" {
-  bash "$SIPAG_CLI" project add my-app --repo=org/my-app
-  run bash -c "echo 'fix the login bug' | bash '$SIPAG_CLI' task add my-app -"
+@test "add: creates file if missing" {
+  export SIPAG_FILE="${TEST_TMPDIR}/new-tasks.md"
+
+  run "${SIPAG_ROOT}/bin/sipag" add "First task ever"
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"Task"* ]]
+  assert_file_exists "${SIPAG_FILE}"
+  assert_file_contains "${SIPAG_FILE}" "- [ ] First task ever"
 }
 
-@test "sipag task add: missing project → error" {
-  run bash "$SIPAG_CLI" task add nonexistent "do something"
-  [[ "$status" -ne 0 ]]
-}
+# --- sipag version ---
 
-@test "sipag task list: shows tasks" {
-  bash "$SIPAG_CLI" project add my-app --repo=org/my-app
-  bash "$SIPAG_CLI" task add my-app "task one"
-  run bash "$SIPAG_CLI" task list
+@test "version: prints version" {
+  run "${SIPAG_ROOT}/bin/sipag" version
   [[ "$status" -eq 0 ]]
-  [[ "$output" == *"task one"* ]]
+  assert_output_contains "sipag 2.0.0"
 }
 
-# --- Legacy compat ---
+# --- sipag help ---
 
-@test "sipag start: without config exits with error" {
-  run bash "$SIPAG_CLI" start -d "$PROJECT_DIR"
-  [[ "$status" -ne 0 ]]
-  [[ "$output" == *".sipag"* ]]
+@test "help: prints usage" {
+  run "${SIPAG_ROOT}/bin/sipag" help
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "task queue feeder"
+  assert_output_contains "SIPAG_FILE"
 }
 
-@test "sipag status: without daemon or run dir shows message" {
-  run bash -c "cd '$PROJECT_DIR' && SIPAG_HOME='$SIPAG_HOME' bash '$SIPAG_CLI' status ."
-  [[ "$status" -ne 0 ]]
+# --- -f flag ---
+
+@test "-f flag: uses custom file path" {
+  local custom="${TEST_TMPDIR}/custom.md"
+  cat >"${custom}" <<'EOF'
+- [ ] Custom task
+- [x] Done custom
+EOF
+
+  run "${SIPAG_ROOT}/bin/sipag" list -f "${custom}"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "[ ] Custom task"
+  assert_output_contains "1/2 done"
+}
+
+# --- default command ---
+
+@test "bare sipag: defaults to next" {
+  create_tasks
+  create_mock "claude" 0 "Done"
+  cat >"${TEST_TMPDIR}/bin/timeout" <<'MOCK'
+#!/usr/bin/env bash
+shift
+"$@"
+MOCK
+  chmod +x "${TEST_TMPDIR}/bin/timeout"
+
+  run "${SIPAG_ROOT}/bin/sipag"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Task 1: First task"
+  assert_output_contains "Done: First task"
 }
