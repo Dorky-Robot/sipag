@@ -1,111 +1,121 @@
 # sipag
 
-Sleep while Claude writes your PRs.
+<div align="center">
 
-**sipag** polls for GitHub issues labeled `sipag`, runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code) on each one, and opens pull requests. You create issues, go to sleep, wake up to PRs.
+<video src="sipag.mp4" width="600" controls></video>
 
-## Requirements
+</div>
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude`)
-- [GitHub CLI](https://cli.github.com/) (`gh`) — authenticated
-- `git`, `jq`, `bash` 4+
-
-## Install
-
-```bash
-git clone https://github.com/dorky-robot/sipag.git
-cd sipag
-make install
-```
-
-Or run directly from the repo:
-
-```bash
-./bin/sipag help
-```
+Task queue feeder for Claude Code. Reads a markdown checklist, feeds the next unchecked item to `claude`, marks it done, moves on.
 
 ## Quick start
 
 ```bash
-cd your-project
-
-# Generate config
-sipag init
-
-# Create a GitHub issue with the 'sipag' label
-gh issue create --title "Add input validation to signup form" --label sipag
-
-# Start sipag
-sipag start
-
-# Check status
-sipag status
-
-# Stop
-sipag stop
+echo "- [ ] Add dark mode support" > tasks.md
+sipag           # runs the task
+sipag list      # shows [x] done
 ```
 
-## How it works
+## Install
 
-1. sipag polls your repo for open issues with the configured label (default: `sipag`)
-2. For each issue, it spins up a worker that:
-   - Claims the issue (swaps the label to `sipag-wip`)
-   - Creates a fresh git clone and branch
-   - Runs Claude Code with the issue title + body as the prompt
-   - Pushes the branch and opens a PR
-   - Marks the issue as done (`sipag-done`) and closes it
-3. Workers run in parallel (configurable concurrency)
+Clone this repo and add `bin/` to your PATH:
 
-## Config
+```bash
+git clone https://github.com/anthropics/sipag.git
+export PATH="$PWD/sipag/bin:$PATH"
+```
 
-Place a `.sipag` file in your project root. Run `sipag init` to generate one interactively, or copy from `.sipag.example`:
+## Usage
 
-| Variable | Default | Description |
-|---|---|---|
-| `SIPAG_SOURCE` | `github` | Source plugin |
-| `SIPAG_REPO` | — | GitHub repo (`owner/repo`) |
-| `SIPAG_BASE_BRANCH` | `main` | Base branch for PRs |
-| `SIPAG_CONCURRENCY` | `2` | Max parallel workers |
-| `SIPAG_LABEL_READY` | `sipag` | Label for ready issues |
-| `SIPAG_LABEL_WIP` | `sipag-wip` | Label for in-progress issues |
-| `SIPAG_LABEL_DONE` | `sipag-done` | Label for completed issues |
-| `SIPAG_TIMEOUT` | `600` | Claude Code timeout (seconds) |
-| `SIPAG_POLL_INTERVAL` | `60` | Polling interval (seconds) |
-| `SIPAG_SAFETY_MODE` | `strict` | Safety mode: `strict`, `balanced`, or `yolo` |
-| `SIPAG_ALLOWED_TOOLS` | — | Comma-separated allowed tools for Claude |
-| `SIPAG_PROMPT_PREFIX` | — | Prepended to every Claude prompt |
+```
+sipag                        Run next unchecked task (same as sipag next)
+sipag next [-c] [-n] [-f]   Find first - [ ], run claude, mark - [x]
+sipag list [-f path]         Print all tasks with status
+sipag add "task" [-f path]   Append - [ ] task to file
+sipag version                Print version
+sipag help                   Show help
+```
 
-Add `.sipag.d/` to your `.gitignore` — that's where sipag stores runtime state.
+### Flags
 
-## Safety modes
-
-Workers run Claude Code unattended, so sipag uses a **PreToolUse hook** to auto-approve safe actions and auto-deny dangerous ones — no human prompts needed.
-
-Set `SIPAG_SAFETY_MODE` in your `.sipag` config:
-
-| Mode | Behavior |
+| Flag | Description |
 |---|---|
-| `strict` (default) | Rule-based only. Read-only tools are allowed. File writes must target the project directory. Bash commands are checked against allow/deny regex patterns. Anything ambiguous is denied. |
-| `balanced` | Same rules as strict, but ambiguous commands that don't match any pattern are sent to Claude Haiku for a quick safety evaluation. Requires `ANTHROPIC_API_KEY`. |
-| `yolo` | Uses `--dangerously-skip-permissions` — no restrictions at all. Use at your own risk. |
+| `-c, --continue` | After completing, loop to the next task |
+| `-n, --dry-run` | Show what would run, don't invoke claude |
+| `-f, --file <path>` | Task file (default: `./tasks.md` or `$SIPAG_FILE`) |
 
-**How it works:** sipag writes a `.claude/settings.local.json` in each worker's clone directory, configuring a PreToolUse hook that points to `lib/hooks/safety-gate.sh`. Every tool call Claude makes is intercepted and evaluated before execution.
+## Task file format
 
-**Bash allow list** (partial): `git` (standard operations), `npm/yarn/pnpm test|run|install`, `cargo/go/python/pytest test|build`, read-only shell commands (`ls`, `cat`, `wc`, etc.), `mkdir`, `cp`, `mv`.
+Standard markdown checklist:
 
-**Bash deny list** (partial): `sudo`, `rm -rf /`, `git push --force`, `git reset --hard`, writing to `/etc/` or `~/`, `chmod 777`, network writes (`curl -X POST`, `wget`), `ssh`, `eval`, global installs.
+```markdown
+# My Project Tasks
 
-## CLI
+- [ ] Implement user authentication
+- [x] Set up project scaffolding
+- [ ] Add input validation to signup form
 
+  The form at /signup needs server-side validation.
+  Check email format and password strength.
+
+- [ ] Fix the memory leak in the WebSocket handler
 ```
-sipag init              Generate .sipag config interactively
-sipag start [-f]        Start polling (-f for foreground)
-sipag status            Show active workers
-sipag stop              Graceful shutdown
-sipag version           Print version
-sipag help              Show help
+
+- `- [ ] text` = pending task
+- `- [x] text` = done
+- First unchecked item (top to bottom) is "next"
+- Indented lines (2+ spaces) after a task = body/context sent to Claude
+- Headings, blank lines, non-checklist text = preserved but ignored
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SIPAG_FILE` | `./tasks.md` | Task file path |
+| `SIPAG_TIMEOUT` | `600` | Claude timeout (seconds) |
+| `SIPAG_MODEL` | _(claude default)_ | Model override |
+| `SIPAG_PROMPT_PREFIX` | _(none)_ | Prepended to every prompt |
+| `SIPAG_SKIP_PERMISSIONS` | `1` | Set `0` for interactive mode |
+| `SIPAG_CLAUDE_ARGS` | _(none)_ | Extra raw args to claude |
+
+## Safety gate (optional)
+
+`extras/safety-gate.sh` is a PreToolUse hook that auto-approves safe actions and auto-denies dangerous ones. To enable it, add to `.claude/settings.local.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/path/to/sipag/extras/safety-gate.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
 ```
 
-## License
+Set `SIPAG_SAFETY_MODE=balanced` and provide `ANTHROPIC_API_KEY` for LLM-assisted evaluation of ambiguous commands. Default is `strict` (deny anything not on the allow list).
 
-MIT
+## Development
+
+```bash
+brew install bats-core shellcheck shfmt
+make dev     # lint + fmt-check + test
+make test    # all tests
+make lint    # shellcheck
+```
+
+## Works with kubo
+
+kubo can export chains as markdown checklists. sipag doesn't need to know about kubo — it just reads the file:
+
+```bash
+kubo show plan-dinner --export >> tasks.md
+sipag next --continue
+```
