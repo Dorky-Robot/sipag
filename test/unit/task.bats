@@ -155,3 +155,58 @@ EOF
   assert_file_contains "${TEST_TMPDIR}/tasks.md" "- [ ] Existing task"
   assert_file_contains "${TEST_TMPDIR}/tasks.md" "- [ ] Another task"
 }
+
+# --- sipag_init_dirs ---
+
+@test "init_dirs: creates all four subdirectories" {
+  local dir="${TEST_TMPDIR}/sipag"
+
+  sipag_init_dirs "$dir"
+
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
+}
+
+@test "init_dirs: prints created directories and summary" {
+  local dir="${TEST_TMPDIR}/sipag"
+
+  run sipag_init_dirs "$dir"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Created: ${dir}/queue"
+  assert_output_contains "Created: ${dir}/running"
+  assert_output_contains "Created: ${dir}/done"
+  assert_output_contains "Created: ${dir}/failed"
+  assert_output_contains "Initialized: ${dir}"
+}
+
+@test "init_dirs: idempotent — safe to run twice" {
+  local dir="${TEST_TMPDIR}/sipag"
+
+  sipag_init_dirs "$dir"
+  run sipag_init_dirs "$dir"
+
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Already initialized: ${dir}"
+}
+
+@test "init_dirs: respects SIPAG_DIR env var when no arg given" {
+  local dir="${TEST_TMPDIR}/custom-sipag"
+  export SIPAG_DIR="$dir"
+
+  sipag_init_dirs
+
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
+}
+
+@test "init_dirs: creates nested dirs with mkdir -p" {
+  local dir="${TEST_TMPDIR}/deep/nested/sipag"
+
+  run sipag_init_dirs "$dir"
+  [[ "$status" -eq 0 ]]
+  [[ -d "${dir}/queue" ]]
+}

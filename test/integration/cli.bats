@@ -9,6 +9,7 @@ setup() {
   # Mock timeout to just run the command directly
   create_mock "timeout" 0
   export SIPAG_FILE="${TEST_TMPDIR}/tasks.md"
+  export SIPAG_DIR="${TEST_TMPDIR}/sipag-dirs"
 }
 
 teardown() {
@@ -210,6 +211,73 @@ EOF
   [[ "$status" -eq 0 ]]
   assert_output_contains "[ ] Custom task"
   assert_output_contains "1/2 done"
+}
+
+# --- sipag init ---
+
+@test "init: creates queue/running/done/failed directories" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" init
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Initialized"
+
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
+}
+
+@test "init: idempotent — safe to run twice" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  "${SIPAG_ROOT}/bin/sipag" init
+  run "${SIPAG_ROOT}/bin/sipag" init
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Already initialized"
+}
+
+@test "init: respects SIPAG_DIR env var" {
+  local dir="${TEST_TMPDIR}/custom-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" init
+  [[ "$status" -eq 0 ]]
+  [[ -d "${dir}/queue" ]]
+}
+
+# --- sipag start ---
+
+@test "start: auto-inits directory structure" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" start
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "sipag executor starting"
+
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
+}
+
+# --- sipag add auto-init ---
+
+@test "add: auto-inits directory structure on fresh install" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" add "My first task"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Added: My first task"
+
+  [[ -d "${dir}/queue" ]]
+  [[ -d "${dir}/running" ]]
+  [[ -d "${dir}/done" ]]
+  [[ -d "${dir}/failed" ]]
 }
 
 # --- default command ---

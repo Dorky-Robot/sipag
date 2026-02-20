@@ -19,6 +19,7 @@ source "${SIPAG_ROOT}/lib/run.sh"
 
 # --- Defaults ---
 
+SIPAG_DIR="${SIPAG_DIR:-${HOME}/.sipag}"
 SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
 CONTINUE=0
 DRY_RUN=0
@@ -31,9 +32,11 @@ sipag — task queue feeder for Claude Code
 
 Usage:
   sipag                        Run next unchecked task (same as sipag next)
+  sipag init                   Create ~/.sipag/{queue,running,done,failed}
   sipag next [-c] [-n] [-f]   Find first - [ ], run claude, mark - [x]
   sipag list [-f path]         Print all tasks with status
   sipag add "task" [-f path]   Append - [ ] task to file
+  sipag start                  Start the executor (auto-inits if needed)
   sipag version                Print version
   sipag help                   Show this help
 
@@ -43,6 +46,7 @@ Flags:
   -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
 
 Environment:
+  SIPAG_DIR               Base directory (default: ~/.sipag)
   SIPAG_FILE              Task file path (default: ./tasks.md)
   SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
   SIPAG_MODEL             Model override
@@ -53,6 +57,16 @@ EOF
 }
 
 # --- Commands ---
+
+cmd_init() {
+	sipag_init_dirs "${SIPAG_DIR}"
+}
+
+cmd_start() {
+	sipag_init_dirs "${SIPAG_DIR}" >/dev/null
+	echo "sipag executor starting (queue: ${SIPAG_DIR}/queue)"
+	echo "No tasks in queue — use 'sipag add' to queue a task"
+}
 
 cmd_next() {
 	while true; do
@@ -100,6 +114,11 @@ cmd_add() {
 		return 1
 	fi
 
+	# Auto-init directory structure if it doesn't exist yet
+	if [[ ! -d "${SIPAG_DIR}/queue" ]]; then
+		sipag_init_dirs "${SIPAG_DIR}" >/dev/null
+	fi
+
 	local text="$1"
 	task_add "$SIPAG_FILE" "$text"
 	echo "Added: ${text}"
@@ -117,6 +136,10 @@ main() {
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
+		init)
+			command="init"
+			shift
+			;;
 		next)
 			command="next"
 			shift
@@ -132,6 +155,10 @@ main() {
 				add_text="$1"
 				shift
 			fi
+			;;
+		start)
+			command="start"
+			shift
 			;;
 		version | --version)
 			cmd_version
@@ -177,9 +204,11 @@ main() {
 	fi
 
 	case "$command" in
+	init) cmd_init ;;
 	next) cmd_next ;;
 	list) cmd_list ;;
 	add) cmd_add "$add_text" ;;
+	start) cmd_start ;;
 	esac
 }
 
