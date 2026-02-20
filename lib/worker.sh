@@ -134,11 +134,23 @@ worker_transition_label() {
     [[ -n "$to_label" ]]   && gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null
 }
 
+# Convert an issue title into a URL-safe branch name slug (max 50 chars)
+worker_slugify() {
+    local title="$1"
+    echo "$title" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed 's/[^a-z0-9]/-/g' \
+        | tr -s '-' \
+        | sed 's/^-//' \
+        | sed 's/-$//' \
+        | cut -c1-50
+}
+
 # Run a single issue in a Docker container
 worker_run_issue() {
     local repo="$1"
     local issue_num="$2"
-    local title body prompt
+    local title body branch slug pr_body prompt
 
     # Mark as in-progress so the spec is locked from edits
     worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"
@@ -149,6 +161,17 @@ worker_run_issue() {
 
     echo "[#${issue_num}] Starting: $title"
 
+    # Generate branch name and draft PR body before entering container
+    slug=$(worker_slugify "$title")
+    branch="sipag/issue-${issue_num}-${slug}"
+
+    pr_body="Closes #${issue_num}
+
+${body}
+
+---
+*This PR was opened by a sipag worker. Commits will appear as work progresses.*"
+
     prompt="You are working on the repository at /work.
 
 Your task:
@@ -157,26 +180,39 @@ ${title}
 ${body}
 
 Instructions:
-- Create a new branch with a descriptive name
+- You are on branch ${branch} — do NOT create a new branch
+- A draft PR is already open for this branch — do not open another one
 - Implement the changes
 - Run any existing tests and make sure they pass
-- Commit your changes with a clear commit message
-- Push the branch and open a draft pull request early so progress is visible
-- The PR title should match the task title
-- The PR body should summarize what you changed and why
-- When all work is complete, mark the pull request as ready for review
+- Commit your changes with a clear commit message and push to origin
+- The PR will be marked ready for review automatically when you finish
 - The PR should close issue #${issue_num}"
 
-    PROMPT="$prompt" ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+    PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
+        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
         -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
         -e PROMPT \
+        -e BRANCH \
+        -e ISSUE_TITLE \
+        -e PR_BODY \
         "$WORKER_IMAGE" \
         bash -c '
-            git clone https://github.com/'"${repo}"'.git /work && cd /work
+            git clone "https://github.com/'"${repo}"'.git" /work && cd /work
             git config user.name "sipag"
             git config user.email "sipag@localhost"
-            claude --print --dangerously-skip-permissions -p "$PROMPT"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
+            git checkout -b "$BRANCH"
+            git push -u origin "$BRANCH"
+            gh pr create --repo "'"${repo}"'" \
+                --title "$ISSUE_TITLE" \
+                --body "$PR_BODY" \
+                --draft \
+                --head "$BRANCH"
+            echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
+            claude --print --dangerously-skip-permissions -p "$PROMPT" \
+                && { gh pr ready "$BRANCH" --repo "'"${repo}"'" || true; \
+                     echo "[sipag] PR marked ready for review"; }
         ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
 
     local exit_code=$?
@@ -185,7 +221,7 @@ Instructions:
         worker_transition_label "$repo" "$issue_num" "in-progress" ""
         echo "[#${issue_num}] DONE: $title"
     else
-        # Failure: move back to approved for retry
+        # Failure: move back to approved for retry (draft PR stays open showing progress)
         worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
     fi

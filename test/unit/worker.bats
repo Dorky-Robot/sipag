@@ -186,3 +186,36 @@ EOF
 11
 20" ]]
 }
+
+# --- worker_slugify ---
+
+@test "worker_slugify lowercases title" {
+  result=$(worker_slugify "Hello World")
+  [[ "$result" == "hello-world" ]]
+}
+
+@test "worker_slugify replaces spaces and punctuation with dashes" {
+  result=$(worker_slugify "Fix: auth bug!")
+  [[ "$result" == "fix-auth-bug" ]]
+}
+
+@test "worker_slugify squeezes consecutive dashes" {
+  result=$(worker_slugify "foo  --  bar")
+  [[ "$result" == "foo-bar" ]]
+}
+
+@test "worker_slugify strips leading and trailing dashes" {
+  result=$(worker_slugify "  leading and trailing  ")
+  [[ "$result" == "leading-and-trailing" ]]
+}
+
+@test "worker_slugify truncates to 50 chars" {
+  long="this is a very long issue title that exceeds fifty characters easily"
+  result=$(worker_slugify "$long")
+  [[ "${#result}" -le 50 ]]
+}
+
+@test "worker_slugify preserves alphanumeric characters" {
+  result=$(worker_slugify "Add OAuth2 support v3")
+  [[ "$result" == "add-oauth2-support-v3" ]]
+}
