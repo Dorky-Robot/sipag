@@ -1,0 +1,10 @@
+# sipag safety-gate configuration
+#
+# Extra allow/deny patterns and path deny lists loaded by safety-gate.sh.
+# Patterns are extended regular expressions matched against the full command string.
+
+[allow]
+patterns = [
+    "sipag (work|start|merge|setup|doctor|ps|logs|status|version|help)",
+    "^tail ",
+]
