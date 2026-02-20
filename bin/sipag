@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# sipag — agile workflow dispatcher
+
+set -euo pipefail
+
+SIPAG_ROOT="${SIPAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# shellcheck source=../lib/start.sh
+source "${SIPAG_ROOT}/lib/start.sh"
+# shellcheck source=../lib/merge.sh
+source "${SIPAG_ROOT}/lib/merge.sh"
+
+usage() {
+	cat <<'EOF'
+Usage:
+  sipag start triage <owner/repo>       Interactive issue triage with Claude
+  sipag start refinement <owner/repo>   Interactive issue refinement with Claude
+  sipag start review <owner/repo>       Interactive PR review with Claude
+  sipag work <owner/repo>               Pick up approved issues, code in Docker
+  sipag merge <owner/repo>              Merge approved PRs (no Claude)
+  sipag next [-c] [-n] [-f]             Run next task from markdown checklist
+  sipag list [-f path]                  Print all tasks with status
+  sipag add "task" [-f path]            Append task to checklist
+  sipag setup                           Configure sipag and Claude Code permissions
+
+Agile workflow:
+  start triage → start refinement → work → start review → merge
+EOF
+}
+
+cmd_start() {
+	local mode="${1:?Usage: sipag start <triage|refinement|review> <owner/repo>}"
+	local repo="${2:?Usage: sipag start <triage|refinement|review> <owner/repo>}"
+	start_run "$mode" "$repo"
+}
+
+cmd_merge() {
+	local repo="${1:?Usage: sipag merge <owner/repo>}"
+	merge_run "$repo"
+}
+
+subcmd=""
+start_mode=""
+start_repo=""
+merge_repo=""
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	start)
+		subcmd="start"
+		shift
+		if [[ $# -gt 0 && "$1" != -* ]]; then
+			start_mode="$1"
+			shift
+		fi
+		if [[ $# -gt 0 && "$1" != -* ]]; then
+			start_repo="$1"
+			shift
+		fi
+		;;
+	merge)
+		subcmd="merge"
+		shift
+		if [[ $# -gt 0 && "$1" != -* ]]; then
+			merge_repo="$1"
+			shift
+		fi
+		;;
+	help | --help | -h)
+		usage
+		exit 0
+		;;
+	*)
+		usage >&2
+		exit 1
+		;;
+	esac
+done
+
+case "$subcmd" in
+start) cmd_start "$start_mode" "$start_repo" ;;
+merge) cmd_merge "$merge_repo" ;;
+"")
+	usage
+	exit 0
+	;;
+esac
