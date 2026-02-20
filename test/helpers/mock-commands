@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# sipag — mock command helpers for bats tests
+
+# create_mock <name> <exit_code> <stdout>
+# Creates a mock executable in ${TEST_TMPDIR}/bin that records its invocations
+# and returns the given exit code + stdout.
+create_mock() {
+	local name="$1"
+	local exit_code="${2:-0}"
+	local stdout="${3:-}"
+
+	local mock_file="${TEST_TMPDIR}/bin/${name}"
+	local calls_file="${TEST_TMPDIR}/mock-calls/${name}"
+
+	cat >"${mock_file}" <<MOCK
+#!/usr/bin/env bash
+# Mock: ${name} (exit ${exit_code})
+printf '%s\n' "\$*" >> "${calls_file}"
+printf '%s' "${stdout}"
+exit ${exit_code}
+MOCK
+
+	chmod +x "${mock_file}"
+}
+
+# mock_call_count <name>
+# Prints the number of times the named mock was called.
+mock_call_count() {
+	local name="$1"
+	local calls_file="${TEST_TMPDIR}/mock-calls/${name}"
+	if [[ -f "$calls_file" ]]; then
+		wc -l <"$calls_file" | tr -d ' '
+	else
+		echo 0
+	fi
+}
+
+# get_mock_calls <name>
+# Prints the recorded argument strings for all calls to the named mock.
+get_mock_calls() {
+	local name="$1"
+	local calls_file="${TEST_TMPDIR}/mock-calls/${name}"
+	if [[ -f "$calls_file" ]]; then
+		cat "$calls_file"
+	fi
+}

@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# sipag — shared bats test helpers
+
+# SIPAG_ROOT points at the repository root regardless of where bats is invoked.
+SIPAG_ROOT="${SIPAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+export SIPAG_ROOT
+
+# setup_common
+# Creates a temporary directory and prepends a mock-bin path to PATH so that
+# individual tests can plant mock executables there.
+setup_common() {
+	TEST_TMPDIR="$(mktemp -d)"
+	export TEST_TMPDIR
+
+	# All mock binaries land here
+	mkdir -p "${TEST_TMPDIR}/bin"
+	PATH="${TEST_TMPDIR}/bin:${PATH}"
+	export PATH
+
+	# Call-count directory for mock-commands
+	mkdir -p "${TEST_TMPDIR}/mock-calls"
+}
+
+# teardown_common
+# Removes the temporary directory created by setup_common.
+teardown_common() {
+	if [[ -n "${TEST_TMPDIR:-}" && -d "${TEST_TMPDIR}" ]]; then
+		rm -rf "${TEST_TMPDIR}"
+	fi
+}
+
+# assert_file_exists <path>
+assert_file_exists() {
+	local path="$1"
+	if [[ ! -f "$path" ]]; then
+		echo "Expected file to exist: $path" >&2
+		return 1
+	fi
+}
+
+# assert_output_contains <substring>
+assert_output_contains() {
+	local substring="$1"
+	if [[ "$output" != *"$substring"* ]]; then
+		echo "Expected output to contain: ${substring}" >&2
+		echo "Actual output: ${output}" >&2
+		return 1
+	fi
+}

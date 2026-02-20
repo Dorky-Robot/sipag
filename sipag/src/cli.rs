@@ -123,6 +123,20 @@ pub enum Commands {
     /// Show queue state across all directories
     Status,
 
+    /// Pick up approved GitHub issues and dispatch Docker workers
+    Work {
+        /// GitHub repository slug (owner/repo)
+        repo: String,
+
+        /// Git clone URL (defaults to https://github.com/<owner/repo>)
+        #[arg(long)]
+        repo_url: Option<String>,
+
+        /// Label to filter issues on (default: approved; overrides SIPAG_WORK_LABEL and ~/.sipag/config)
+        #[arg(long)]
+        label: Option<String>,
+    },
+
     /// Print version
     Version,
 
@@ -188,6 +202,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
         Some(Commands::Status) => cmd_status(),
+        Some(Commands::Work { repo, repo_url, label }) => cmd_work(&repo, repo_url.as_deref(), label.as_deref()),
         Some(Commands::BgExec {
             task_id,
             repo_url,
@@ -613,6 +628,153 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Load work_label from ~/.sipag/config (key=value format).
+/// Returns None if the key is not found or the file doesn't exist.
+fn load_work_label_from_config() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let sipag_dir = std::env::var("SIPAG_DIR")
+        .unwrap_or_else(|_| format!("{home}/.sipag"));
+    let config_path = std::path::Path::new(&sipag_dir).join("config");
+
+    let content = fs::read_to_string(&config_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "work_label" {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn cmd_work(gh_repo: &str, repo_url: Option<&str>, label_flag: Option<&str>) -> Result<()> {
+    // Resolve the label to filter by, in priority order:
+    //   1. --label flag (highest priority)
+    //   2. SIPAG_WORK_LABEL env var
+    //   3. work_label key in ~/.sipag/config
+    //   4. "approved" (default)
+    let work_label = if let Some(l) = label_flag {
+        l.to_string()
+    } else if let Ok(env_label) = std::env::var("SIPAG_WORK_LABEL") {
+        env_label
+    } else if let Some(cfg_label) = load_work_label_from_config() {
+        cfg_label
+    } else {
+        "approved".to_string()
+    };
+
+    // Derive clone URL from the GitHub slug if not provided
+    let clone_url = repo_url
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("https://github.com/{gh_repo}"));
+
+    if !work_label.is_empty() {
+        println!("==> Fetching open issues labelled '{work_label}' from {gh_repo}…");
+    } else {
+        println!("==> Fetching ALL open issues from {gh_repo} (no label filter)…");
+    }
+
+    // Build gh issue list arguments
+    let mut gh_args = vec![
+        "issue".to_string(),
+        "list".to_string(),
+        "--repo".to_string(),
+        gh_repo.to_string(),
+        "--state".to_string(),
+        "open".to_string(),
+        "--json".to_string(),
+        "number,title".to_string(),
+        "--limit".to_string(),
+        "50".to_string(),
+    ];
+
+    if !work_label.is_empty() {
+        gh_args.push("--label".to_string());
+        gh_args.push(work_label.clone());
+    }
+
+    let output = std::process::Command::new("gh")
+        .args(&gh_args)
+        .output()
+        .context("Failed to run 'gh issue list' — is the GitHub CLI installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh issue list failed: {stderr}");
+    }
+
+    let issues_json = String::from_utf8_lossy(&output.stdout);
+    let issues: serde_json::Value = serde_json::from_str(&issues_json)
+        .context("Failed to parse gh issue list JSON output")?;
+
+    let issues_arr = issues
+        .as_array()
+        .context("Expected JSON array from gh issue list")?;
+
+    println!("==> Found {} issue(s)", issues_arr.len());
+
+    if issues_arr.is_empty() {
+        println!("==> Nothing to work on.");
+        return Ok(());
+    }
+
+    let dir = sipag_dir();
+    task::init_dirs(&dir).ok();
+
+    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "sipag-worker:latest".to_string());
+    let timeout = std::env::var("SIPAG_TIMEOUT")
+        .unwrap_or_else(|_| "1800".to_string())
+        .parse::<u64>()
+        .unwrap_or(1800);
+
+    let mut dispatched = 0usize;
+    let mut failed = 0usize;
+
+    for issue in issues_arr {
+        let number = issue["number"]
+            .as_u64()
+            .context("Issue missing 'number' field")?;
+        let title = issue["title"]
+            .as_str()
+            .unwrap_or("(no title)")
+            .to_string();
+
+        println!("==> Working on #{number}: {title}");
+
+        let issue_str = number.to_string();
+        let task_id = executor::generate_task_id(&title);
+
+        match executor::run_impl(
+            &dir,
+            RunConfig {
+                task_id: &task_id,
+                repo_url: &clone_url,
+                description: &title,
+                issue: Some(&issue_str),
+                background: true,
+                image: &image,
+                timeout_secs: timeout,
+            },
+        ) {
+            Ok(_) => {
+                println!("==> Dispatched #{number}");
+                dispatched += 1;
+            }
+            Err(e) => {
+                eprintln!("==> Failed to dispatch #{number}: {e}");
+                failed += 1;
+            }
+        }
+    }
+
+    println!("==> work complete (dispatched={dispatched} failed={failed})");
+    Ok(())
 }
 
 fn cmd_status() -> Result<()> {
