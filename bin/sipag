@@ -22,6 +22,8 @@ source "${SIPAG_ROOT}/lib/worker.sh"
 source "${SIPAG_ROOT}/lib/setup.sh"
 # shellcheck source=../lib/start.sh
 source "${SIPAG_ROOT}/lib/start.sh"
+# shellcheck source=../lib/merge.sh
+source "${SIPAG_ROOT}/lib/merge.sh"
 
 # --- Defaults ---
 
@@ -39,6 +41,7 @@ Usage:
   sipag start <owner/repo>     Prime a Claude Code session with GitHub context
   sipag setup                  Configure Claude Code permissions for sipag
   sipag work <owner/repo>      Poll repo for issues, spin up Docker workers
+  sipag merge <owner/repo>     Output PR context for a conversational merge session
   sipag next [-c] [-n] [-f]   Run next task from a markdown checklist
   sipag list [-f path]         Print all tasks with status
   sipag add "task" [-f path]   Append task to checklist
@@ -49,6 +52,11 @@ sipag work:
   Continuously polls a GitHub repo for open issues, launches isolated
   Docker containers running Claude Code, and creates PRs. Runs until
   killed (Ctrl+C). Configure via ~/.sipag/config.
+
+sipag merge:
+  Gathers open PR context (titles, review status, CI, merge state) and
+  outputs it to stdout along with workflow instructions. Pipe to claude
+  or use within a sipag start session to facilitate a merge conversation.
 
 Flags:
   -c, --continue     After completing, loop to the next task
@@ -140,6 +148,11 @@ cmd_work() {
 	worker_loop "$repo"
 }
 
+cmd_merge() {
+	local repo="${1:?Usage: sipag merge <owner/repo>}"
+	merge_run "$repo"
+}
+
 cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
@@ -152,6 +165,7 @@ main() {
 
 	local work_repo=""
 	local start_repo=""
+	local merge_repo=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -172,6 +186,14 @@ main() {
 			shift
 			if [[ $# -gt 0 && "$1" != -* ]]; then
 				work_repo="$1"
+				shift
+			fi
+			;;
+		merge)
+			command="merge"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				merge_repo="$1"
 				shift
 			fi
 			;;
@@ -238,6 +260,7 @@ main() {
 	start) cmd_start "$start_repo" ;;
 	setup) cmd_setup ;;
 	work) cmd_work "$work_repo" ;;
+	merge) cmd_merge "$merge_repo" ;;
 	next) cmd_next ;;
 	list) cmd_list ;;
 	add) cmd_add "$add_text" ;;
