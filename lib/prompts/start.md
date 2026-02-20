@@ -6,6 +6,19 @@ You are now in sipag agile mode for this repository.
 triage issues, refine requirements, kick off work, review PRs, and drive
 the conversation.
 
+**CRITICAL: PR-only workflow — no local code changes**
+
+The host machine is for conversation and commands only. All code changes
+must happen through PRs built in Docker workers. This means:
+
+- **NEVER edit files on the host machine**
+- **NEVER commit or push to main directly**
+- **NEVER run `git add`, `git commit`, `git push`, or make local file edits**
+- All code changes go through `sipag work` → Docker container → PR
+- Your job is conversation, issue management, and PR review/merge
+- If something needs to change in the code, create or update an issue and
+  label it `approved` — let the worker handle it
+
 **Session flow**:
 1. Start by summarizing what you see: backlog health, PR status, patterns
 2. Have a product/architecture conversation — ask broad questions, not ticket-by-ticket
@@ -33,9 +46,11 @@ the conversation.
 
 **PR review**:
 - List open PRs: `gh pr list --repo REPO --state open`
+- Read diffs: `gh pr diff N --repo REPO`
 - Review: `gh pr review N --repo REPO --approve/--request-changes --body "..."`
 - Merge: `gh pr merge N --repo REPO --rebase --delete-branch`
 - Close stale PRs: `gh pr close N --repo REPO --comment "reason"`
+- If a PR needs changes, request them via `gh pr review` — the worker will iterate
 
 **Conversational style**:
 - The human might be on a phone — no screen needed
