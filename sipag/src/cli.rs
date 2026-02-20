@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
+    config::Config,
     executor::{self, generate_task_id, RunConfig},
     repo,
     task::{self, default_sipag_dir, default_sipag_file, TaskStatus},
@@ -630,44 +631,17 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
     }
 }
 
-/// Load work_label from ~/.sipag/config (key=value format).
-/// Returns None if the key is not found or the file doesn't exist.
-fn load_work_label_from_config() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let sipag_dir = std::env::var("SIPAG_DIR")
-        .unwrap_or_else(|_| format!("{home}/.sipag"));
-    let config_path = std::path::Path::new(&sipag_dir).join("config");
-
-    let content = fs::read_to_string(&config_path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "work_label" {
-                return Some(value.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
 fn cmd_work(gh_repo: &str, repo_url: Option<&str>, label_flag: Option<&str>) -> Result<()> {
     // Resolve the label to filter by, in priority order:
     //   1. --label flag (highest priority)
-    //   2. SIPAG_WORK_LABEL env var
-    //   3. work_label key in ~/.sipag/config
-    //   4. "approved" (default)
-    let work_label = if let Some(l) = label_flag {
-        l.to_string()
-    } else if let Ok(env_label) = std::env::var("SIPAG_WORK_LABEL") {
-        env_label
-    } else if let Some(cfg_label) = load_work_label_from_config() {
-        cfg_label
-    } else {
-        "approved".to_string()
-    };
+    //   2. SIPAG_WORK_LABEL env var  }  via Config::default()
+    //   3. work_label in ~/.sipag/config  }
+    //   4. "approved" (built-in default)
+    // An explicitly-empty label disables label filtering (picks up ALL open issues).
+    let cfg = Config::default();
+    let work_label = label_flag
+        .map(|s| s.to_string())
+        .unwrap_or(cfg.work_label);
 
     // Derive clone URL from the GitHub slug if not provided
     let clone_url = repo_url
@@ -680,7 +654,7 @@ fn cmd_work(gh_repo: &str, repo_url: Option<&str>, label_flag: Option<&str>) -> 
         println!("==> Fetching ALL open issues from {gh_repo} (no label filter)…");
     }
 
-    // Build gh issue list arguments
+    // Build gh issue list arguments; omit --label when work_label is empty
     let mut gh_args = vec![
         "issue".to_string(),
         "list".to_string(),
@@ -717,21 +691,22 @@ fn cmd_work(gh_repo: &str, repo_url: Option<&str>, label_flag: Option<&str>) -> 
         .as_array()
         .context("Expected JSON array from gh issue list")?;
 
-    println!("==> Found {} issue(s)", issues_arr.len());
-
     if issues_arr.is_empty() {
-        println!("==> Nothing to work on.");
+        if work_label.is_empty() {
+            println!("==> No open issues found.");
+        } else {
+            println!("==> No issues found with label '{work_label}'.");
+        }
         return Ok(());
     }
+
+    println!("==> Found {} issue(s) — dispatching…", issues_arr.len());
 
     let dir = sipag_dir();
     task::init_dirs(&dir).ok();
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "sipag-worker:latest".to_string());
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "1800".to_string())
-        .parse::<u64>()
-        .unwrap_or(1800);
+    let image = cfg.image;
+    let timeout = cfg.timeout;
 
     let mut dispatched = 0usize;
     let mut failed = 0usize;
@@ -745,10 +720,10 @@ fn cmd_work(gh_repo: &str, repo_url: Option<&str>, label_flag: Option<&str>) -> 
             .unwrap_or("(no title)")
             .to_string();
 
-        println!("==> Working on #{number}: {title}");
+        println!("==> Issue #{number}: {title}");
 
         let issue_str = number.to_string();
-        let task_id = executor::generate_task_id(&title);
+        let task_id = generate_task_id(&title);
 
         match executor::run_impl(
             &dir,

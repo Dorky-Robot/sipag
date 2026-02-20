@@ -9,7 +9,7 @@ create_mock() {
 	local exit_code="${2:-0}"
 	local stdout="${3:-}"
 
-	local mock_file="${TEST_TMPDIR}/bin/${name}"
+	local mock_file="${MOCK_BIN_DIR:-${TEST_TMPDIR}/mock-bin}/${name}"
 	local calls_file="${TEST_TMPDIR}/mock-calls/${name}"
 
 	cat >"${mock_file}" <<MOCK

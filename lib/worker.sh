@@ -1,81 +1,70 @@
 #!/usr/bin/env bash
 # sipag — GitHub-issue-driven worker loop
 #
-# Provides:
-#   worker_load_config()  — load ~/.sipag/config into shell variables
-#   worker_loop()         — fetch approved issues and run sipag for each
+# Fetches open issues from a GitHub repo filtered by a configurable label
+# and dispatches each one to `sipag run`.
 #
-# Requires: gh (GitHub CLI), jq
+# Usage (standalone):
+#   lib/worker.sh <owner/repo>
 #
 # Environment variables:
-#   SIPAG_WORK_LABEL  — label to filter issues on (default: approved)
-#   SIPAG_DIR         — sipag state directory (default: ~/.sipag)
-#   SIPAG_IMAGE       — Docker image for workers (default: sipag-worker:latest)
-#   SIPAG_TIMEOUT     — per-task timeout in seconds (default: 1800)
+#   SIPAG_WORK_LABEL   Label to filter issues (default: "approved").
+#                      Set to empty string to pick up ALL open issues.
+#   SIPAG_DIR          sipag state directory (default: ~/.sipag)
+#
+# Requires: gh (GitHub CLI), jq
 
 # worker_load_config
-# Reads ~/.sipag/config (key=value format) and exports recognised variables.
-# Supported keys: work_label, image, timeout
-# Environment variables take precedence over config-file values.
+# Reads ~/.sipag/config (key=value format) and sets SIPAG_WORK_LABEL from the
+# work_label key when the env var is not already set.
+# Environment variables always take precedence over config file values.
 worker_load_config() {
-	local sipag_dir="${SIPAG_DIR:-${HOME}/.sipag}"
-	local config_file="${sipag_dir}/config"
+	local config_file="${SIPAG_DIR:-${HOME}/.sipag}/config"
+	[[ -f "$config_file" ]] || return 0
 
-	# Variables default values (used only when neither env nor config sets them)
-	local _cfg_work_label="approved"
-	local _cfg_image="sipag-worker:latest"
-	local _cfg_timeout="1800"
+	while IFS='=' read -r key value; do
+		# Skip blank lines and comments
+		[[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+		# Trim surrounding whitespace
+		key="${key#"${key%%[! ]*}"}"
+		key="${key%"${key##*[! ]}"}"
+		value="${value#"${value%%[! ]*}"}"
+		value="${value%"${value##*[! ]}"}"
+		[[ -z "$key" ]] && continue
 
-	if [[ -f "$config_file" ]]; then
-		while IFS='=' read -r key value || [[ -n "$key" ]]; do
-			# Strip leading/trailing whitespace and skip comments/blank lines
-			key="${key#"${key%%[![:space:]]*}"}"
-			key="${key%"${key##*[![:space:]]}"}"
-			[[ -z "$key" || "$key" == \#* ]] && continue
-
-			value="${value#"${value%%[![:space:]]*}"}"
-			value="${value%"${value##*[![:space:]]}"}"
-
-			case "$key" in
-			work_label) _cfg_work_label="$value" ;;
-			image)      _cfg_image="$value" ;;
-			timeout)    _cfg_timeout="$value" ;;
-			esac
-		done <"$config_file"
-	fi
-
-	# Env vars take precedence over config file values
-	SIPAG_WORK_LABEL="${SIPAG_WORK_LABEL:-$_cfg_work_label}"
-	SIPAG_IMAGE="${SIPAG_IMAGE:-$_cfg_image}"
-	SIPAG_TIMEOUT="${SIPAG_TIMEOUT:-$_cfg_timeout}"
-
-	export SIPAG_WORK_LABEL SIPAG_IMAGE SIPAG_TIMEOUT
+		case "$key" in
+		work_label)
+			# Only set from config file when SIPAG_WORK_LABEL is not already exported.
+			# Use indirect assignment so that an explicit export SIPAG_WORK_LABEL=""
+			# (empty string) still wins over the config file value.
+			if [[ -z "${SIPAG_WORK_LABEL+set}" ]]; then
+				SIPAG_WORK_LABEL="$value"
+				export SIPAG_WORK_LABEL
+			fi
+			;;
+		esac
+	done <"$config_file"
 }
 
-# worker_loop <owner/repo> [<repo-url>]
+# worker_loop <owner/repo>
 #
-# Fetches open GitHub issues labelled with SIPAG_WORK_LABEL (default:
-# "approved") from <owner/repo>, then dispatches each to `sipag run`.
+# Fetches open GitHub issues labelled with SIPAG_WORK_LABEL (default: "approved")
+# from <owner/repo>, then dispatches each to `sipag run`.
 #
-# Arguments:
-#   $1  owner/repo  — GitHub repository slug (required)
-#   $2  repo-url    — git clone URL; defaults to https://github.com/<owner/repo>
-#
-# When SIPAG_WORK_LABEL is empty the label filter is omitted and ALL open
-# issues are picked up (preserving previous behaviour when explicitly opted in).
+# When SIPAG_WORK_LABEL is set to an empty string the label filter is omitted
+# and ALL open issues are picked up (preserving pre-feature behaviour).
 worker_loop() {
-	local repo="${1:?worker_loop: owner/repo argument required}"
-	local repo_url="${2:-https://github.com/${repo}}"
+	local repo="$1"
 
+	if [[ -z "$repo" ]]; then
+		echo "Error: repo argument is required (owner/name)" >&2
+		return 1
+	fi
+
+	# Populate SIPAG_WORK_LABEL from config if not set by env
 	worker_load_config
 
-	local work_label="${SIPAG_WORK_LABEL}"
-
-	if [[ -n "$work_label" ]]; then
-		echo "==> Fetching open issues labelled '${work_label}' from ${repo}…"
-	else
-		echo "==> Fetching ALL open issues from ${repo} (no label filter)…"
-	fi
+	local work_label="${SIPAG_WORK_LABEL:-approved}"
 
 	local gh_args=(
 		issue list
@@ -87,42 +76,34 @@ worker_loop() {
 
 	if [[ -n "$work_label" ]]; then
 		gh_args+=(--label "$work_label")
+		echo "sipag worker: fetching '$work_label' issues from $repo"
+	else
+		echo "sipag worker: fetching ALL open issues from $repo (no label filter)"
 	fi
 
 	local issues
-	issues=$(gh "${gh_args[@]}")
+	issues="$(gh "${gh_args[@]}")"
 
-	local issue_count
-	issue_count=$(printf '%s' "$issues" | jq 'length')
-	echo "==> Found ${issue_count} issue(s)"
-
-	if [[ "$issue_count" -eq 0 ]]; then
-		echo "==> Nothing to work on."
+	if [[ -z "$issues" || "$issues" == "[]" ]]; then
+		echo "No issues found${work_label:+ with label '$work_label'}"
 		return 0
 	fi
 
-	local processed=0
-	local failed=0
+	local count
+	count="$(printf '%s' "$issues" | jq 'length')"
+	echo "Found $count issue(s) — dispatching..."
 
-	printf '%s' "$issues" | jq -c '.[]' | while IFS= read -r issue; do
+	while IFS= read -r issue_json; do
 		local number title
-		number=$(printf '%s' "$issue" | jq -r '.number')
-		title=$(printf '%s' "$issue" | jq -r '.title')
+		number="$(printf '%s' "$issue_json" | jq -r '.number')"
+		title="$(printf '%s' "$issue_json" | jq -r '.title')"
 
-		echo "==> Working on #${number}: ${title}"
-
-		if sipag run \
-			--repo "$repo_url" \
-			--issue "$number" \
-			--background \
-			"$title"; then
-			echo "==> Dispatched #${number}"
-			processed=$((processed + 1))
-		else
-			echo "==> Failed to dispatch #${number}" >&2
-			failed=$((failed + 1))
-		fi
-	done
-
-	echo "==> worker_loop complete (dispatched=${processed} failed=${failed})"
+		echo "==> Issue #$number: $title"
+		sipag run --repo "https://github.com/$repo" --issue "$number" "$title"
+	done < <(printf '%s' "$issues" | jq -c '.[]')
 }
+
+# Allow the script to be invoked directly as well as sourced.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	worker_loop "$@"
+fi

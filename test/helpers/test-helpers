@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# sipag — shared bats test helpers
+# sipag test helpers — common setup/teardown for bats test suites
 
-# SIPAG_ROOT points at the repository root regardless of where bats is invoked.
-SIPAG_ROOT="${SIPAG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+# Resolve the repository root regardless of where tests are run from.
+SIPAG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export SIPAG_ROOT
 
 # setup_common
@@ -13,11 +13,13 @@ setup_common() {
 	export TEST_TMPDIR
 
 	# All mock binaries land here
-	mkdir -p "${TEST_TMPDIR}/bin"
-	PATH="${TEST_TMPDIR}/bin:${PATH}"
+	MOCK_BIN_DIR="${TEST_TMPDIR}/mock-bin"
+	export MOCK_BIN_DIR
+	mkdir -p "$MOCK_BIN_DIR"
+	PATH="${MOCK_BIN_DIR}:${PATH}"
 	export PATH
 
-	# Call-count directory for mock-commands
+	# Call-log directory for mock-commands helper
 	mkdir -p "${TEST_TMPDIR}/mock-calls"
 }
 
