@@ -44,10 +44,11 @@ jobs:
       - name: Create release archive
         run: |
           staging="sipag-${{ matrix.target }}"
-          mkdir -p "$staging/bin" "$staging/lib"
+          mkdir -p "$staging/bin" "$staging/lib/prompts"
           cp "target/${{ matrix.target }}/release/sipag" "$staging/"
           cp bin/sipag "$staging/bin/"
           cp lib/*.sh "$staging/lib/"
+          cp lib/prompts/*.md "$staging/lib/prompts/"
           tar czf "${{ matrix.archive }}" "$staging"
 
       - name: Compute SHA-256
@@ -148,7 +149,8 @@ jobs:
             def install
               bin.install "sipag"
               (libexec/"bin").install "bin/sipag" => "sipag"
-              (libexec/"lib").install Dir["lib/*"]
+              (libexec/"lib").install Dir["lib/*.sh"]
+              (libexec/"lib/prompts").install Dir["lib/prompts/*.md"]
             end
 
             def caveats
