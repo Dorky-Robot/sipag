@@ -193,7 +193,7 @@ EOF
 @test "help: prints usage" {
   run "${SIPAG_ROOT}/bin/sipag" help
   [[ "$status" -eq 0 ]]
-  assert_output_contains "task queue feeder"
+  assert_output_contains "autonomous dev agent"
   assert_output_contains "SIPAG_FILE"
 }
 
