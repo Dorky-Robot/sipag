@@ -62,6 +62,15 @@ worker_mark_seen() {
     echo "$1" >> "$WORKER_SEEN_FILE"
 }
 
+# Remove an issue from the seen file so it can be re-dispatched
+worker_unsee() {
+    local issue="$1"
+    [[ -f "$WORKER_SEEN_FILE" ]] || return 0
+    grep -vx "$issue" "$WORKER_SEEN_FILE" > "${WORKER_SEEN_FILE}.tmp" \
+        && mv "${WORKER_SEEN_FILE}.tmp" "$WORKER_SEEN_FILE" \
+        || rm -f "${WORKER_SEEN_FILE}.tmp"
+}
+
 # Track PR iteration state using temp files (reset on process restart)
 worker_pr_is_running() {
     [[ -f "${WORKER_LOG_DIR}/pr-${1}-running" ]]
@@ -75,21 +84,52 @@ worker_pr_mark_done() {
     rm -f "${WORKER_LOG_DIR}/pr-${1}-running"
 }
 
-# Check if an issue already has a linked PR (open or merged)
-# Verifies exact issue reference in PR body to avoid false positives
+# Check if an issue already has a linked open or merged PR.
+# Does NOT return true for PRs that were closed without merging, so that
+# issues with abandoned PRs can be re-dispatched after re-approval.
 worker_has_pr() {
     local repo="$1" issue_num="$2"
     local candidates
-    candidates=$(gh pr list --repo "$repo" --state all --search "closes #${issue_num}" --json number,body 2>/dev/null)
+    candidates=$(gh pr list --repo "$repo" --state all --search "closes #${issue_num}" \
+        --json number,body,state,mergedAt 2>/dev/null)
+    echo "$candidates" | jq -e ".[] | select(
+        (.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\")) and
+        (.state == \"OPEN\" or .mergedAt != null)
+    )" &>/dev/null
+}
+
+# Check if an issue has an open (not yet merged or closed) PR.
+worker_has_open_pr() {
+    local repo="$1" issue_num="$2"
+    local candidates
+    candidates=$(gh pr list --repo "$repo" --state open --search "closes #${issue_num}" \
+        --json number,body 2>/dev/null)
     echo "$candidates" | jq -e ".[] | select(.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\"))" &>/dev/null
 }
 
-# Find open PRs that have review feedback requesting changes
+# Find open PRs that need another worker pass:
+#   - formal CHANGES_REQUESTED review, OR
+#   - any PR comment posted after the most recent commit
+# This covers the common case where the PR author cannot request changes on
+# their own PR, so feedback arrives as plain comments rather than reviews.
 worker_find_prs_needing_iteration() {
     local repo="$1"
     gh pr list --repo "$repo" --state open \
-        --json number,reviewDecision \
-        -q '.[] | select(.reviewDecision == "CHANGES_REQUESTED") | .number' 2>/dev/null | sort -n
+        --json number,reviewDecision,commits,comments \
+        --jq '
+            .[] |
+            (
+                if (.commits | length) > 0
+                then .commits[-1].committedDate
+                else "1970-01-01T00:00:00Z"
+                end
+            ) as $last_push |
+            select(
+                (.reviewDecision == "CHANGES_REQUESTED") or
+                ((.comments // []) | map(select(.createdAt > $last_push)) | length > 0)
+            ) |
+            .number
+        ' 2>/dev/null | sort -n
 }
 
 # Close in-progress issues whose worker-created PR has since been merged.
@@ -287,6 +327,7 @@ Instructions:
             git clone https://github.com/'"${repo}"'.git /work && cd /work
             git config user.name "sipag"
             git config user.email "sipag@localhost"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
             git checkout "$BRANCH"
             claude --print --dangerously-skip-permissions -p "$PROMPT"
         ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
@@ -317,7 +358,7 @@ worker_loop() {
         # Reconcile: close issues that already have merged PRs
         worker_reconcile "$repo"
 
-        # Fetch open issues, filter out already-seen
+        # Fetch open issues with the work label
         local -a label_args=()
         [[ -n "$WORKER_WORK_LABEL" ]] && label_args=(--label "$WORKER_WORK_LABEL")
         mapfile -t all_issues < <(gh issue list --repo "$repo" --state open "${label_args[@]}" --json number -q '.[].number' | sort -n)
@@ -325,9 +366,15 @@ worker_loop() {
         local new_issues=()
         for issue in "${all_issues[@]}"; do
             if worker_is_seen "$issue"; then
-                continue
-            fi
-            if worker_has_pr "$repo" "$issue"; then
+                # Seen issues: skip only while an open PR is still in progress.
+                # If re-labeled approved after a closed/failed PR, re-queue.
+                if worker_has_open_pr "$repo" "$issue"; then
+                    continue
+                fi
+                echo "[$(date +%H:%M:%S)] Re-queuing #${issue} (re-approved, no open PR)"
+                worker_unsee "$issue"
+            elif worker_has_pr "$repo" "$issue"; then
+                # Never seen but already has an open or merged PR (e.g. from another session)
                 echo "[$(date +%H:%M:%S)] Skipping #${issue} (already has a PR)"
                 worker_mark_seen "$issue"
                 continue
@@ -347,7 +394,10 @@ worker_loop() {
         done
 
         if [[ ${#new_issues[@]} -eq 0 && ${#prs_to_iterate[@]} -eq 0 ]]; then
-            echo "[$(date +%H:%M:%S)] No new issues or PRs to iterate. ${#all_issues[@]} open (all picked up). Next poll in ${WORKER_POLL_INTERVAL}s..."
+            local total_open open_prs
+            total_open=$(gh issue list --repo "$repo" --state open --limit 500 --json number --jq 'length' 2>/dev/null || echo "?")
+            open_prs=$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo "?")
+            echo "[$(date +%H:%M:%S)] ${#all_issues[@]} approved, ${total_open} open total, ${open_prs} PRs open. Next poll in ${WORKER_POLL_INTERVAL}s..."
             sleep "$WORKER_POLL_INTERVAL"
             continue
         fi
