@@ -1,0 +1,3 @@
+[workspace]
+members = ["sipag-core", "sipag-cli"]
+resolver = "2"
