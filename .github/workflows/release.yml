@@ -59,7 +59,7 @@ jobs:
 
           # Staging directory
           mkdir -p "dist/sipag-${VERSION}-${TARGET}/bin"
-          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/prompts"
 
           # Binary
           cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
@@ -67,6 +67,7 @@ jobs:
           # Bash scripts
           cp bin/sipag "dist/sipag-${VERSION}-${TARGET}/bin/"
           cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
+          cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
 
           # Create tarball
           cd dist

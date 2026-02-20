@@ -74,10 +74,11 @@ fi
 # ── Install bash scripts ──────────────────────────────────────────────────────
 
 SIPAG_DIR="${HOME}/.sipag"
-mkdir -p "${SIPAG_DIR}/bin" "${SIPAG_DIR}/lib"
+mkdir -p "${SIPAG_DIR}/bin" "${SIPAG_DIR}/lib/prompts"
 
 install -m 755 "${extracted_dir}/bin/sipag" "${SIPAG_DIR}/bin/sipag"
 install -m 644 "${extracted_dir}"/lib/*.sh "${SIPAG_DIR}/lib/"
+install -m 644 "${extracted_dir}"/lib/prompts/*.md "${SIPAG_DIR}/lib/prompts/"
 
 # ── PATH reminder ─────────────────────────────────────────────────────────────
 
