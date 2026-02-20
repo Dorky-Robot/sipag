@@ -62,6 +62,19 @@ worker_mark_seen() {
     echo "$1" >> "$WORKER_SEEN_FILE"
 }
 
+# Track PR iteration state using temp files (reset on process restart)
+worker_pr_is_running() {
+    [[ -f "${WORKER_LOG_DIR}/pr-${1}-running" ]]
+}
+
+worker_pr_mark_running() {
+    touch "${WORKER_LOG_DIR}/pr-${1}-running"
+}
+
+worker_pr_mark_done() {
+    rm -f "${WORKER_LOG_DIR}/pr-${1}-running"
+}
+
 # Check if an issue already has a linked PR (open or merged)
 # Verifies exact issue reference in PR body to avoid false positives
 worker_has_pr() {
@@ -69,6 +82,14 @@ worker_has_pr() {
     local candidates
     candidates=$(gh pr list --repo "$repo" --state all --search "closes #${issue_num}" --json number,body 2>/dev/null)
     echo "$candidates" | jq -e ".[] | select(.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\"))" &>/dev/null
+}
+
+# Find open PRs that have review feedback requesting changes
+worker_find_prs_needing_iteration() {
+    local repo="$1"
+    gh pr list --repo "$repo" --state open \
+        --json number,reviewDecision \
+        -q '.[] | select(.reviewDecision == "CHANGES_REQUESTED") | .number' 2>/dev/null | sort -n
 }
 
 # Close in-progress issues whose worker-created PR has since been merged.
@@ -170,6 +191,79 @@ Instructions:
     fi
 }
 
+# Run a PR iteration: checkout existing branch, read review feedback, push fixes
+worker_run_pr_iteration() {
+    local repo="$1"
+    local pr_num="$2"
+    local title branch_name issue_num issue_body review_feedback pr_diff prompt
+
+    worker_pr_mark_running "$pr_num"
+
+    title=$(gh pr view "$pr_num" --repo "$repo" --json title -q '.title' 2>/dev/null)
+    branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
+
+    echo "[PR #${pr_num}] Iterating: $title (branch: $branch_name)"
+
+    # Extract linked issue number from PR body (e.g. "Closes #42")
+    issue_num=$(gh pr view "$pr_num" --repo "$repo" --json body -q '.body' 2>/dev/null \
+        | grep -oiE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+
+    issue_body=""
+    if [[ -n "$issue_num" ]]; then
+        issue_body=$(gh issue view "$issue_num" --repo "$repo" --json body -q '.body' 2>/dev/null || true)
+    fi
+
+    # Collect review feedback: CHANGES_REQUESTED reviews + all PR comments
+    review_feedback=$(gh pr view "$pr_num" --repo "$repo" --json reviews,comments \
+        --jq '([.reviews[] | select(.state == "CHANGES_REQUESTED") | "Review by \(.author.login):\n\(.body)"] +
+               [.comments[] | "Comment by \(.author.login):\n\(.body)"]) | join("\n---\n")' 2>/dev/null || true)
+
+    # Capture current diff (capped to avoid overwhelming the prompt)
+    pr_diff=$(gh pr diff "$pr_num" --repo "$repo" 2>/dev/null | head -c 50000 || true)
+
+    prompt="You are iterating on PR #${pr_num} in ${repo}.
+
+Original issue:
+${issue_body:-<not found>}
+
+Current PR diff:
+${pr_diff}
+
+Review feedback:
+${review_feedback}
+
+Instructions:
+- You are on branch ${branch_name} which already has work in progress
+- Read the review feedback carefully
+- Make targeted changes that address the feedback
+- Do NOT rewrite the PR from scratch — make surgical fixes
+- Commit with a message that references the feedback
+- Push to the same branch (git push origin ${branch_name})"
+
+    PROMPT="$prompt" BRANCH="$branch_name" \
+        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
+        -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e PROMPT \
+        -e BRANCH \
+        "$WORKER_IMAGE" \
+        bash -c '
+            git clone https://github.com/'"${repo}"'.git /work && cd /work
+            git config user.name "sipag"
+            git config user.email "sipag@localhost"
+            git checkout "$BRANCH"
+            claude --print --dangerously-skip-permissions -p "$PROMPT"
+        ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
+
+    local exit_code=$?
+    worker_pr_mark_done "$pr_num"
+    if [[ $exit_code -eq 0 ]]; then
+        echo "[PR #${pr_num}] DONE iterating: $title"
+    else
+        echo "[PR #${pr_num}] FAILED iteration (exit ${exit_code}): $title"
+    fi
+}
+
 # Main polling loop
 worker_loop() {
     local repo="$1"
@@ -205,36 +299,72 @@ worker_loop() {
             new_issues+=("$issue")
         done
 
-        if [[ ${#new_issues[@]} -eq 0 ]]; then
-            echo "[$(date +%H:%M:%S)] No new issues. ${#all_issues[@]} open (all picked up). Next poll in ${WORKER_POLL_INTERVAL}s..."
+        # Find open PRs with review feedback requesting changes
+        local prs_to_iterate=()
+        mapfile -t prs_needing_changes < <(worker_find_prs_needing_iteration "$repo")
+        for pr_num in "${prs_needing_changes[@]}"; do
+            if worker_pr_is_running "$pr_num"; then
+                echo "[$(date +%H:%M:%S)] Skipping PR #${pr_num} iteration (already in progress)"
+                continue
+            fi
+            prs_to_iterate+=("$pr_num")
+        done
+
+        if [[ ${#new_issues[@]} -eq 0 && ${#prs_to_iterate[@]} -eq 0 ]]; then
+            echo "[$(date +%H:%M:%S)] No new issues or PRs to iterate. ${#all_issues[@]} open (all picked up). Next poll in ${WORKER_POLL_INTERVAL}s..."
             sleep "$WORKER_POLL_INTERVAL"
             continue
         fi
 
-        echo "[$(date +%H:%M:%S)] Found ${#new_issues[@]} new issues: ${new_issues[*]}"
+        # Process new issues in batches
+        if [[ ${#new_issues[@]} -gt 0 ]]; then
+            echo "[$(date +%H:%M:%S)] Found ${#new_issues[@]} new issues: ${new_issues[*]}"
 
-        # Process in batches
-        for ((i = 0; i < ${#new_issues[@]}; i += WORKER_BATCH_SIZE)); do
-            local batch=("${new_issues[@]:i:WORKER_BATCH_SIZE}")
-            echo "--- Batch: ${batch[*]} ---"
+            for ((i = 0; i < ${#new_issues[@]}; i += WORKER_BATCH_SIZE)); do
+                local batch=("${new_issues[@]:i:WORKER_BATCH_SIZE}")
+                echo "--- Issue batch: ${batch[*]} ---"
 
-            for issue in "${batch[@]}"; do
-                worker_mark_seen "$issue"
+                for issue in "${batch[@]}"; do
+                    worker_mark_seen "$issue"
+                done
+
+                local pids=()
+                for issue in "${batch[@]}"; do
+                    worker_run_issue "$repo" "$issue" &
+                    pids+=($!)
+                done
+
+                for pid in "${pids[@]}"; do
+                    wait "$pid" 2>/dev/null || true
+                done
+
+                echo "--- Batch complete ---"
+                echo ""
             done
+        fi
 
-            local pids=()
-            for issue in "${batch[@]}"; do
-                worker_run_issue "$repo" "$issue" &
-                pids+=($!)
+        # Process PR iterations in batches
+        if [[ ${#prs_to_iterate[@]} -gt 0 ]]; then
+            echo "[$(date +%H:%M:%S)] Found ${#prs_to_iterate[@]} PRs needing iteration: ${prs_to_iterate[*]}"
+
+            for ((i = 0; i < ${#prs_to_iterate[@]}; i += WORKER_BATCH_SIZE)); do
+                local iter_batch=("${prs_to_iterate[@]:i:WORKER_BATCH_SIZE}")
+                echo "--- PR iteration batch: ${iter_batch[*]} ---"
+
+                local pids=()
+                for pr_num in "${iter_batch[@]}"; do
+                    worker_run_pr_iteration "$repo" "$pr_num" &
+                    pids+=($!)
+                done
+
+                for pid in "${pids[@]}"; do
+                    wait "$pid" 2>/dev/null || true
+                done
+
+                echo "--- PR iteration batch complete ---"
+                echo ""
             done
-
-            for pid in "${pids[@]}"; do
-                wait "$pid" 2>/dev/null || true
-            done
-
-            echo "--- Batch complete ---"
-            echo ""
-        done
+        fi
 
         echo "[$(date +%H:%M:%S)] Cycle done. Open PRs:"
         gh pr list --repo "$repo" --state open --json number,title \
