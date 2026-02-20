@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-13
+            use_cross: false
+          - target: aarch64-apple-darwin
+            os: macos-14
+            use_cross: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            use_cross: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --manifest-path sipag/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.target }} --manifest-path sipag/Cargo.toml
+          fi
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          TARGET=${{ matrix.target }}
+          ARCHIVE="sipag-${VERSION}-${TARGET}.tar.gz"
+
+          # Staging directory
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/bin"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib"
+
+          # Binary
+          cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
+
+          # Bash scripts
+          cp bin/sipag "dist/sipag-${VERSION}-${TARGET}/bin/"
+          cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
+
+          # Create tarball
+          cd dist
+          tar czf "../${ARCHIVE}" "sipag-${VERSION}-${TARGET}"
+          cd ..
+
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sipag-${{ github.ref_name }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: dist/*.tar.gz
