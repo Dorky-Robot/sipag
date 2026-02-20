@@ -280,6 +280,71 @@ EOF
   [[ -d "${dir}/failed" ]]
 }
 
+# --- sipag add --repo / --priority ---
+
+@test "add --repo: writes task file with frontmatter to queue/" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" add --repo salita --priority high "implement login"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Added: implement login"
+
+  # File should exist in queue/
+  local queuefile="${dir}/queue/001-implement-login.md"
+  assert_file_exists "$queuefile"
+  assert_file_contains "$queuefile" "repo: salita"
+  assert_file_contains "$queuefile" "priority: high"
+  assert_file_contains "$queuefile" "implement login"
+}
+
+@test "add --repo: defaults priority to medium when not specified" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" add --repo myrepo "fix the bug"
+  [[ "$status" -eq 0 ]]
+
+  local queuefile="${dir}/queue/001-fix-the-bug.md"
+  assert_file_exists "$queuefile"
+  assert_file_contains "$queuefile" "priority: medium"
+}
+
+@test "add --repo: sequences filenames correctly for multiple tasks" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  "${SIPAG_ROOT}/bin/sipag" add --repo acme "first task"
+  "${SIPAG_ROOT}/bin/sipag" add --repo acme "second task"
+
+  assert_file_exists "${dir}/queue/001-first-task.md"
+  assert_file_exists "${dir}/queue/002-second-task.md"
+}
+
+@test "add --repo: frontmatter contains added timestamp" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" add --repo acme "timestamped task"
+  [[ "$status" -eq 0 ]]
+
+  local queuefile="${dir}/queue/001-timestamped-task.md"
+  assert_file_contains "$queuefile" "added:"
+}
+
+@test "add --repo: flags may appear after the task text" {
+  local dir="${TEST_TMPDIR}/fresh-sipag"
+  export SIPAG_DIR="$dir"
+
+  run "${SIPAG_ROOT}/bin/sipag" add "my task" --repo salita --priority low
+  [[ "$status" -eq 0 ]]
+
+  local queuefile="${dir}/queue/001-my-task.md"
+  assert_file_exists "$queuefile"
+  assert_file_contains "$queuefile" "repo: salita"
+  assert_file_contains "$queuefile" "priority: low"
+}
+
 # --- default command ---
 
 @test "bare sipag: defaults to next" {

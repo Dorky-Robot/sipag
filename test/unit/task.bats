@@ -210,3 +210,176 @@ EOF
   [[ "$status" -eq 0 ]]
   [[ -d "${dir}/queue" ]]
 }
+
+# --- task_parse_file ---
+
+@test "parse_file: parses all frontmatter fields correctly" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+---
+repo: salita
+priority: high
+source: github#142
+added: 2026-02-19T22:30:00Z
+---
+Implement password reset flow
+
+The user should receive an email with a one-time reset link.
+Token expires after 1 hour.
+EOF
+
+  run task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ "$status" -eq 0 ]]
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ "$TASK_REPO" == "salita" ]]
+  [[ "$TASK_PRIORITY" == "high" ]]
+  [[ "$TASK_SOURCE" == "github#142" ]]
+  [[ "$TASK_ADDED" == "2026-02-19T22:30:00Z" ]]
+  [[ "$TASK_TITLE" == "Implement password reset flow" ]]
+  [[ "$TASK_BODY" == *"The user should receive an email"* ]]
+  [[ "$TASK_BODY" == *"Token expires after 1 hour."* ]]
+}
+
+@test "parse_file: defaults priority to medium when not set" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+---
+repo: myrepo
+---
+Do something
+EOF
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ "$TASK_PRIORITY" == "medium" ]]
+  [[ "$TASK_REPO" == "myrepo" ]]
+  [[ "$TASK_TITLE" == "Do something" ]]
+}
+
+@test "parse_file: handles missing optional fields (source, added)" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+---
+repo: myrepo
+priority: low
+---
+Simple task
+EOF
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ -z "$TASK_SOURCE" ]]
+  [[ -z "$TASK_ADDED" ]]
+  [[ "$TASK_TITLE" == "Simple task" ]]
+  [[ -z "$TASK_BODY" ]]
+}
+
+@test "parse_file: handles files with no frontmatter" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+Add dark mode toggle
+
+Check the design spec before starting.
+EOF
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ -z "$TASK_REPO" ]]
+  [[ "$TASK_PRIORITY" == "medium" ]]
+  [[ "$TASK_TITLE" == "Add dark mode toggle" ]]
+  [[ "$TASK_BODY" == *"Check the design spec"* ]]
+}
+
+@test "parse_file: sets TASK_TITLE to first non-empty line after closing ---" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+---
+repo: acme
+priority: medium
+---
+
+Title comes after blank line
+EOF
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ "$TASK_TITLE" == "Title comes after blank line" ]]
+}
+
+@test "parse_file: sets TASK_BODY stripping leading and trailing blank lines" {
+  cat >"${TEST_TMPDIR}/task.md" <<'EOF'
+---
+repo: acme
+---
+The title
+
+Body line one.
+Body line two.
+
+EOF
+
+  task_parse_file "${TEST_TMPDIR}/task.md"
+  [[ "$TASK_TITLE" == "The title" ]]
+  [[ "$TASK_BODY" == "Body line one."$'\n'"Body line two." ]]
+}
+
+@test "parse_file: returns 1 for missing file" {
+  run task_parse_file "${TEST_TMPDIR}/nonexistent.md"
+  [[ "$status" -eq 1 ]]
+}
+
+# --- task_slugify ---
+
+@test "slugify: converts title to lowercase hyphenated slug" {
+  local slug
+  slug=$(task_slugify "Implement Password Reset Flow")
+  [[ "$slug" == "implement-password-reset-flow" ]]
+}
+
+@test "slugify: replaces special characters with hyphens" {
+  local slug
+  slug=$(task_slugify "Fix bug (issue #42)")
+  [[ "$slug" == "fix-bug-issue-42" ]]
+}
+
+@test "slugify: squeezes consecutive non-alphanumeric into single hyphen" {
+  local slug
+  slug=$(task_slugify "hello   world")
+  [[ "$slug" == "hello-world" ]]
+}
+
+@test "slugify: strips leading and trailing hyphens" {
+  local slug
+  slug=$(task_slugify "  padded title  ")
+  [[ "$slug" == "padded-title" ]]
+}
+
+# --- task_next_filename ---
+
+@test "next_filename: generates 001 for empty queue directory" {
+  local qdir="${TEST_TMPDIR}/queue"
+  mkdir -p "$qdir"
+
+  local name
+  name=$(task_next_filename "$qdir" "My first task")
+  [[ "$name" == "001-my-first-task.md" ]]
+}
+
+@test "next_filename: increments sequence number based on existing files" {
+  local qdir="${TEST_TMPDIR}/queue"
+  mkdir -p "$qdir"
+  touch "${qdir}/001-first-task.md"
+  touch "${qdir}/002-second-task.md"
+
+  local name
+  name=$(task_next_filename "$qdir" "Third task")
+  [[ "$name" == "003-third-task.md" ]]
+}
+
+@test "next_filename: works when queue directory does not exist yet" {
+  local name
+  name=$(task_next_filename "${TEST_TMPDIR}/queue" "New task")
+  [[ "$name" == "001-new-task.md" ]]
+}
+
+@test "next_filename: zero-pads sequence numbers to three digits" {
+  local qdir="${TEST_TMPDIR}/queue"
+  mkdir -p "$qdir"
+  touch "${qdir}/009-ninth.md"
+
+  local name
+  name=$(task_next_filename "$qdir" "Tenth task")
+  [[ "$name" == "010-tenth-task.md" ]]
+}
