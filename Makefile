@@ -36,7 +36,11 @@ clean:
 	cargo clean
 
 # ── Hook installation ─────────────────────────────────────────────────────────
-# Run once after cloning to activate pre-push quality gate.
+# Run once after cloning to activate pre-commit and pre-push quality gates.
 install-hooks:
 	git config core.hooksPath .husky
+	chmod +x .husky/pre-commit .husky/pre-push
+	@if command -v npm >/dev/null 2>&1; then npm install; fi
 	@echo "Git hooks installed (core.hooksPath → .husky)"
+	@echo "  pre-commit: gitleaks, typos, cargo deny, fmt, clippy, shellcheck"
+	@echo "  pre-push:   cargo test, cargo machete, gitleaks"

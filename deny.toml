@@ -1,0 +1,61 @@
+# deny.toml — cargo-deny configuration for sipag
+#
+# Enforced by the pre-commit hook: cargo deny check advisories
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Reject crates with known security vulnerabilities (CVEs, RustSec advisories).
+# To accept a specific advisory with documented justification, add it to `ignore`:
+#
+#   ignore = [
+#     { id = "RUSTSEC-2023-0001", reason = "Only affects feature X which we don't use" },
+#   ]
+ignore = []
+
+# Warn (not block) on unmaintained crates.
+unmaintained = "warn"
+
+# Warn on crates yanked from crates.io.
+yanked = "warn"
+
+# Warn on unsound code advisories.
+unsound = "warn"
+
+[licenses]
+# Allow common permissive and weak-copyleft licenses.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+
+# Reject strong copyleft licenses that could affect binary distribution.
+deny = [
+    "GPL-1.0",
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-1.0",
+    "AGPL-3.0",
+]
+
+[bans]
+# Reject multiple versions of the same crate (can be loosened per-crate below).
+multiple-versions = "warn"
+
+# Deny specific crates outright (none currently).
+deny = []
+
+[sources]
+# Only allow crates from crates.io and verified git sources.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
