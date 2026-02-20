@@ -3,7 +3,9 @@
 #
 # create_mock <name> <exit_code> <stdout>
 #   Installs a fake executable in TEST_TMPDIR/bin/ that:
-#     - prints its arguments (one per line) to a call-log file
+#     - increments a per-invocation counter (TEST_TMPDIR/calls/<name>.count)
+#     - appends all arguments (space-joined) to a log file
+#       (TEST_TMPDIR/calls/<name>.args)
 #     - prints <stdout> to stdout
 #     - exits with <exit_code>
 #
@@ -11,7 +13,8 @@
 #   Prints the number of times the mock was invoked.
 #
 # get_mock_calls <name>
-#   Prints all recorded argument lines for the mock.
+#   Prints all recorded argument text for the mock (may span multiple lines
+#   if any argument contains newlines, e.g. a system prompt).
 
 create_mock() {
     local name="$1"
@@ -19,16 +22,17 @@ create_mock() {
     local output="${3:-}"
     local mock_dir="${TEST_TMPDIR}/bin"
     local calls_dir="${TEST_TMPDIR}/calls"
-    local call_log="${calls_dir}/${name}"
+    local count_log="${calls_dir}/${name}.count"
+    local args_log="${calls_dir}/${name}.args"
 
     mkdir -p "${mock_dir}" "${calls_dir}"
 
-    # Each invocation appends one line containing all args (space-joined).
-    # For commands whose args may contain spaces (like --system-prompt "..."),
-    # callers should use get_mock_calls and grep for flag names.
+    # Use a dedicated count file (one line per call) so that multiline
+    # arguments in the args log do not skew the call count.
     cat > "${mock_dir}/${name}" <<MOCK_SCRIPT
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "${call_log}"
+echo "1" >> "${count_log}"
+printf '%s\n' "\$*" >> "${args_log}"
 printf '%s' "${output}"
 exit ${exit_code}
 MOCK_SCRIPT
@@ -38,18 +42,18 @@ MOCK_SCRIPT
 
 mock_call_count() {
     local name="$1"
-    local call_log="${TEST_TMPDIR}/calls/${name}"
-    if [[ ! -f "${call_log}" ]]; then
+    local count_log="${TEST_TMPDIR}/calls/${name}.count"
+    if [[ ! -f "${count_log}" ]]; then
         echo 0
         return
     fi
-    wc -l < "${call_log}" | tr -d ' '
+    wc -l < "${count_log}" | tr -d ' '
 }
 
 get_mock_calls() {
     local name="$1"
-    local call_log="${TEST_TMPDIR}/calls/${name}"
-    if [[ -f "${call_log}" ]]; then
-        cat "${call_log}"
+    local args_log="${TEST_TMPDIR}/calls/${name}.args"
+    if [[ -f "${args_log}" ]]; then
+        cat "${args_log}"
     fi
 }
