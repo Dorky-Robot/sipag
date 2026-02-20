@@ -89,6 +89,21 @@ The container is the safety boundary. Workers have full autonomy inside it.
 
 ## Installation
 
+### Homebrew (macOS and Linux — recommended)
+
+```bash
+brew tap Dorky-Robot/sipag
+brew install sipag
+```
+
+This installs the pre-built binary — no Rust toolchain required.
+
+To also use the bash helper commands (`sipag start`, `sipag work`, `sipag merge`, `sipag setup`), add to your shell profile:
+
+```bash
+export PATH="$(brew --prefix sipag)/libexec/bin:$PATH"
+```
+
 ### From source (Rust + Cargo required)
 
 ```bash

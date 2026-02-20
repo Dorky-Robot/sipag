@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: sipag-aarch64-apple-darwin.tar.gz
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: sipag-x86_64-apple-darwin.tar.gz
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: sipag-x86_64-unknown-linux-gnu.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: sipag-aarch64-unknown-linux-gnu.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create release archive
+        run: |
+          staging="sipag-${{ matrix.target }}"
+          mkdir -p "$staging/bin" "$staging/lib"
+          cp "target/${{ matrix.target }}/release/sipag" "$staging/"
+          cp bin/sipag "$staging/bin/"
+          cp lib/*.sh "$staging/lib/"
+          tar czf "${{ matrix.archive }}" "$staging"
+
+      - name: Compute SHA-256
+        id: sha256
+        run: echo "hash=$(shasum -a 256 ${{ matrix.archive }} | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"
+          generate_release_notes: true
+
+  update-formula:
+    name: Update Homebrew formula
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Compute SHA-256 for each archive
+        id: hashes
+        run: |
+          echo "macos_arm64=$(shasum -a 256 sipag-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "macos_x86_64=$(shasum -a 256 sipag-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64=$(shasum -a 256 sipag-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(shasum -a 256 sipag-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: Dorky-Robot/homebrew-sipag
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula with new version and hashes
+        env:
+          VERSION: ${{ github.ref_name }}
+          MACOS_ARM64: ${{ steps.hashes.outputs.macos_arm64 }}
+          MACOS_X86_64: ${{ steps.hashes.outputs.macos_x86_64 }}
+          LINUX_X86_64: ${{ steps.hashes.outputs.linux_x86_64 }}
+          LINUX_ARM64: ${{ steps.hashes.outputs.linux_arm64 }}
+        run: |
+          VERSION="${VERSION#v}"  # strip leading 'v'
+          cat > homebrew-tap/Formula/sipag.rb << FORMULA
+          class Sipag < Formula
+            desc "Conversational agile for Claude Code — you talk, workers ship PRs"
+            homepage "https://github.com/Dorky-Robot/sipag"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-aarch64-apple-darwin.tar.gz"
+                sha256 "${MACOS_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-x86_64-apple-darwin.tar.gz"
+                sha256 "${MACOS_X86_64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/Dorky-Robot/sipag/releases/download/v${VERSION}/sipag-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${LINUX_X86_64}"
+              end
+            end
+
+            def install
+              bin.install "sipag"
+              (libexec/"bin").install "bin/sipag" => "sipag"
+              (libexec/"lib").install Dir["lib/*"]
+            end
+
+            def caveats
+              <<~EOS
+                The sipag Rust CLI is installed to bin/.
+
+                Bash helper scripts (sipag start, sipag work, sipag merge, sipag setup)
+                are installed to #{opt_libexec}/bin/sipag.
+
+                To use these bash commands directly, add to your shell profile:
+                  export PATH="#{opt_libexec}/bin:\$PATH"
+              EOS
+            end
+
+            test do
+              system bin/"sipag", "version"
+            end
+          end
+          FORMULA
+
+      - name: Commit and push updated formula
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sipag.rb
+          git diff --cached --quiet || git commit -m "chore: update sipag to ${{ github.ref_name }}"
+          git push
