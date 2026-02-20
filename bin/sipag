@@ -20,6 +20,8 @@ source "${SIPAG_ROOT}/lib/run.sh"
 source "${SIPAG_ROOT}/lib/worker.sh"
 # shellcheck source=../lib/setup.sh
 source "${SIPAG_ROOT}/lib/setup.sh"
+# shellcheck source=../lib/start.sh
+source "${SIPAG_ROOT}/lib/start.sh"
 
 # --- Defaults ---
 
@@ -34,6 +36,7 @@ usage() {
 sipag — autonomous dev agent powered by Claude Code
 
 Usage:
+  sipag start <owner/repo>     Prime a Claude Code session with GitHub context
   sipag setup                  Configure Claude Code permissions for sipag
   sipag work <owner/repo>      Poll repo for issues, spin up Docker workers
   sipag next [-c] [-n] [-f]   Run next task from a markdown checklist
@@ -121,6 +124,11 @@ cmd_add() {
 	echo "Added: ${text}"
 }
 
+cmd_start() {
+	local repo="${1:?Usage: sipag start <owner/repo>}"
+	start_run "$repo"
+}
+
 cmd_setup() {
 	setup_run
 }
@@ -143,9 +151,18 @@ main() {
 	local add_text=""
 
 	local work_repo=""
+	local start_repo=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
+		start)
+			command="start"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				start_repo="$1"
+				shift
+			fi
+			;;
 		setup)
 			command="setup"
 			shift
@@ -218,6 +235,7 @@ main() {
 	fi
 
 	case "$command" in
+	start) cmd_start "$start_repo" ;;
 	setup) cmd_setup ;;
 	work) cmd_work "$work_repo" ;;
 	next) cmd_next ;;
