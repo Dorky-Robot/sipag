@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integ lint fmt-check dev tui
+.PHONY: test test-unit test-integ lint fmt-check dev tui build clippy cargo-test
 
 test: test-unit test-integ
 
@@ -19,5 +19,16 @@ fmt:
 
 dev: lint fmt-check test
 
+# ── Rust TUI ──────────────────────────────────────────────────────────────────
+
 tui:
 	cargo build --release --manifest-path tui/Cargo.toml
+
+build:
+	cargo build
+
+clippy:
+	cargo clippy -- -D warnings
+
+cargo-test:
+	cargo test
