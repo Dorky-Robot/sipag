@@ -1,3 +1,3 @@
 [workspace]
-members = ["sipag-core", "sipag-cli"]
+members = ["sipag-core", "sipag-cli", "tui"]
 resolver = "2"
