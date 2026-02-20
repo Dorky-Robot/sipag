@@ -123,6 +123,9 @@ pub enum Commands {
     /// Show queue state across all directories
     Status,
 
+    /// Configure Claude Code permissions and sipag prerequisites
+    Setup,
+
     /// Print version
     Version,
 
@@ -188,6 +191,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
         Some(Commands::Status) => cmd_status(),
+        Some(Commands::Setup) => cmd_setup(),
         Some(Commands::BgExec {
             task_id,
             repo_url,
@@ -643,4 +647,255 @@ fn cmd_status() -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
+
+/// The `gh` permission patterns added to Claude Code's allowlist.
+const GH_PERMISSIONS: &[&str] = &[
+    "Bash(gh issue *)",
+    "Bash(gh pr *)",
+    "Bash(gh label *)",
+];
+
+fn cmd_setup() -> Result<()> {
+    println!("[setup] Configuring sipag...");
+
+    // 1. Check prerequisites
+    check_prereq("gh")?;
+    check_prereq("claude")?;
+    check_gh_auth()?;
+
+    // 2. Configure ~/.claude/settings.json
+    let claude_settings = home_dir().join(".claude").join("settings.json");
+    configure_claude_settings(&claude_settings)?;
+
+    // 3. Create ~/.sipag/ directory
+    let sipag_home = home_dir().join(".sipag");
+    if !sipag_home.exists() {
+        fs::create_dir_all(&sipag_home)
+            .with_context(|| format!("Failed to create {}", sipag_home.display()))?;
+        println!("[setup] Created: {}", sipag_home.display());
+    } else {
+        println!("[setup] Already exists: {}", sipag_home.display());
+    }
+
+    println!("[setup] Done. gh commands are now auto-approved in Claude Code.");
+    Ok(())
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+}
+
+fn check_prereq(cmd: &str) -> Result<()> {
+    let found = std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {cmd}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if found {
+        println!("[setup] Found: {cmd}");
+        Ok(())
+    } else {
+        bail!("Missing prerequisite: '{cmd}' not found in PATH");
+    }
+}
+
+fn check_gh_auth() -> Result<()> {
+    let ok = std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if ok {
+        println!("[setup] gh auth: ok");
+        Ok(())
+    } else {
+        bail!("gh is not authenticated — run 'gh auth login' first");
+    }
+}
+
+/// Merge the required `gh` permission patterns into `~/.claude/settings.json`.
+///
+/// The file is read (or started from `{}` if absent), the permissions.allow
+/// array is extended with any missing entries, and the result is written back.
+/// Existing settings are preserved.
+pub(crate) fn configure_claude_settings(path: &std::path::Path) -> Result<()> {
+    let mut root: serde_json::Value = if path.exists() {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        serde_json::from_str(&raw)
+            .with_context(|| format!("Failed to parse JSON in {}", path.display()))?
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+
+    // Ensure permissions.allow exists as an array
+    let allow = root
+        .pointer_mut("/permissions/allow")
+        .and_then(|v| v.as_array_mut());
+
+    let mut added = Vec::new();
+
+    if let Some(arr) = allow {
+        for &perm in GH_PERMISSIONS {
+            if !arr.iter().any(|v| v.as_str() == Some(perm)) {
+                arr.push(serde_json::Value::String(perm.to_string()));
+                added.push(perm);
+            }
+        }
+    } else {
+        // Build the nested structure from scratch (preserving any existing keys)
+        let perms_allow: Vec<serde_json::Value> = GH_PERMISSIONS
+            .iter()
+            .map(|&p| serde_json::Value::String(p.to_string()))
+            .collect();
+
+        let obj = root.as_object_mut().context("settings.json root is not a JSON object")?;
+        let permissions = obj
+            .entry("permissions")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+
+        if let serde_json::Value::Object(pmap) = permissions {
+            pmap.insert("allow".to_string(), serde_json::Value::Array(perms_allow));
+        }
+
+        added.extend_from_slice(GH_PERMISSIONS);
+    }
+
+    if added.is_empty() {
+        println!("[setup] Claude Code settings: already configured (no changes needed)");
+        return Ok(());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+    }
+
+    let json = serde_json::to_string_pretty(&root).context("Failed to serialise settings")?;
+    fs::write(path, &json)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+
+    for perm in &added {
+        println!("[setup] Allowed: {perm}");
+    }
+    println!("[setup] Wrote: {}", path.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn settings_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path().join(".claude").join("settings.json")
+    }
+
+    #[test]
+    fn creates_settings_when_absent() {
+        let dir = tempdir().unwrap();
+        let path = settings_path(&dir);
+
+        configure_claude_settings(&path).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let allow = val.pointer("/permissions/allow").unwrap().as_array().unwrap();
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh issue *)")));
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh pr *)")));
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh label *)")));
+    }
+
+    #[test]
+    fn merges_into_existing_allow_list() {
+        let dir = tempdir().unwrap();
+        let path = settings_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let initial = serde_json::json!({
+            "permissions": {
+                "allow": ["Bash(git *)"]
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
+
+        configure_claude_settings(&path).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let allow = val.pointer("/permissions/allow").unwrap().as_array().unwrap();
+
+        // Original entry preserved
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(git *)")));
+        // New entries added
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh issue *)")));
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh pr *)")));
+        assert!(allow.iter().any(|v| v.as_str() == Some("Bash(gh label *)")));
+    }
+
+    #[test]
+    fn idempotent_when_permissions_already_present() {
+        let dir = tempdir().unwrap();
+        let path = settings_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let initial = serde_json::json!({
+            "permissions": {
+                "allow": [
+                    "Bash(gh issue *)",
+                    "Bash(gh pr *)",
+                    "Bash(gh label *)"
+                ]
+            }
+        });
+        let original_json = serde_json::to_string_pretty(&initial).unwrap();
+        fs::write(&path, &original_json).unwrap();
+
+        configure_claude_settings(&path).unwrap();
+
+        // File content must be identical (idempotent — but serde may reformat; check values)
+        let content = fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        let allow = val.pointer("/permissions/allow").unwrap().as_array().unwrap();
+        // Exactly 3 entries — no duplicates added
+        let gh_count = allow
+            .iter()
+            .filter(|v| {
+                v.as_str()
+                    .map(|s| s.starts_with("Bash(gh "))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(gh_count, 3);
+    }
+
+    #[test]
+    fn preserves_other_top_level_settings() {
+        let dir = tempdir().unwrap();
+        let path = settings_path(&dir);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let initial = serde_json::json!({
+            "theme": "dark",
+            "permissions": {
+                "allow": []
+            }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&initial).unwrap()).unwrap();
+
+        configure_claude_settings(&path).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(val["theme"], serde_json::json!("dark"));
+    }
 }
