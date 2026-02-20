@@ -8,6 +8,7 @@ setup() {
   setup_common
   source "${SIPAG_ROOT}/lib/task.sh"
   source "${SIPAG_ROOT}/lib/repo.sh"
+  source "${SIPAG_ROOT}/lib/notify.sh"
   source "${SIPAG_ROOT}/lib/executor.sh"
 
   export SIPAG_DIR="${TEST_TMPDIR}/sipag"
@@ -25,6 +26,9 @@ MOCK
   # Ensure token env var is clean
   unset CLAUDE_CODE_OAUTH_TOKEN 2>/dev/null || true
   unset SIPAG_TOKEN_FILE 2>/dev/null || true
+
+  # Disable notifications by default so existing tests are unaffected
+  export SIPAG_NOTIFY=0
 }
 
 teardown() {
@@ -315,4 +319,74 @@ EOF
 
   run executor_run
   [[ "$status" -eq 0 ]]
+}
+
+# --- notify integration ---
+
+@test "executor_run_impl: sends success notification with task title" {
+  create_mock "docker" 0 ""
+  create_mock "uname" 0 "Darwin"
+  create_mock "osascript" 0 ""
+  export SIPAG_NOTIFY=1
+
+  executor_run_impl "test-id" "https://github.com/org/repo" "My important task" "" 0
+
+  local calls
+  calls="$(get_mock_calls "osascript")"
+  [[ "$calls" == *"My important task"* ]]
+  [[ "$calls" == *"PR ready for review"* ]]
+}
+
+@test "executor_run_impl: sends failure notification with task title" {
+  create_mock "docker" 1 ""
+  create_mock "uname" 0 "Darwin"
+  create_mock "osascript" 0 ""
+  export SIPAG_NOTIFY=1
+
+  executor_run_impl "test-id" "https://github.com/org/repo" "My important task" "" 0
+
+  local calls
+  calls="$(get_mock_calls "osascript")"
+  [[ "$calls" == *"My important task"* ]]
+  [[ "$calls" == *"check logs"* ]]
+}
+
+@test "executor_run_impl: sends no notification when SIPAG_NOTIFY=0" {
+  create_mock "docker" 0 ""
+  create_mock "uname" 0 "Darwin"
+  create_mock "osascript" 0 ""
+  export SIPAG_NOTIFY=0
+
+  executor_run_impl "test-id" "https://github.com/org/repo" "My task" "" 0
+  [[ "$(mock_call_count "osascript")" -eq 0 ]]
+}
+
+@test "executor_run: sends success notification via notify-send on Linux" {
+  create_task_file "${SIPAG_DIR}/queue/001-test.md" "Queue task title"
+  create_mock "docker" 0 ""
+  create_mock "uname" 0 "Linux"
+  create_mock "notify-send" 0 ""
+  export SIPAG_NOTIFY=1
+
+  executor_run
+
+  local calls
+  calls="$(get_mock_calls "notify-send")"
+  [[ "$calls" == *"Queue task title"* ]]
+  [[ "$calls" == *"PR ready for review"* ]]
+}
+
+@test "executor_run: sends failure notification via notify-send on Linux" {
+  create_task_file "${SIPAG_DIR}/queue/001-test.md" "Queue task title"
+  create_mock "docker" 1 ""
+  create_mock "uname" 0 "Linux"
+  create_mock "notify-send" 0 ""
+  export SIPAG_NOTIFY=1
+
+  executor_run
+
+  local calls
+  calls="$(get_mock_calls "notify-send")"
+  [[ "$calls" == *"Queue task title"* ]]
+  [[ "$calls" == *"check logs"* ]]
 }

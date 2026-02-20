@@ -18,6 +18,8 @@ source "${SIPAG_ROOT}/lib/task.sh"
 source "${SIPAG_ROOT}/lib/run.sh"
 # shellcheck source=../lib/repo.sh
 source "${SIPAG_ROOT}/lib/repo.sh"
+# shellcheck source=../lib/notify.sh
+source "${SIPAG_ROOT}/lib/notify.sh"
 # shellcheck source=../lib/executor.sh
 source "${SIPAG_ROOT}/lib/executor.sh"
 
@@ -77,6 +79,7 @@ Environment:
   SIPAG_PROMPT_PREFIX     Prepended to every prompt
   SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
   SIPAG_CLAUDE_ARGS       Extra raw args to claude
+  SIPAG_NOTIFY            Set 0 to disable desktop notifications (default: 1)
 EOF
 }
 
