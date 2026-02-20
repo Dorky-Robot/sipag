@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# .husky/pre-push — gate all pushes behind quality checks
+#
+# Hook chain (~2-3 min):
+#   1. Test suite          (BLOCKING)
+#   2. Future-incompat     (warning only — Rust, skipped until migration lands)
+#   3. Unused deps         (warning only — Rust, skipped until migration lands)
+#   4. Secrets scan        (BLOCKING)
+#
+# Install once per clone:
+#   git config core.hooksPath .husky
+#   chmod +x .husky/pre-push          # (already done in the repo)
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Pass stdin (push ref lines) through to the secrets scanner.
+# We read it once here and tee it to the scanner later.
+PUSH_REFS=$(cat)
+
+warn() { echo "  WARN  $*" >&2; }
+fail() { echo "  ERROR $*" >&2; exit 1; }
+step() { echo ""; echo "==> $*"; }
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  pre-push checks"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# ── 1. Test suite (BLOCKING) ──────────────────────────────────────────────────
+step "[1/4] Test suite (make test)"
+if ! make test; then
+    fail "Tests failed — push blocked. Fix failing tests before pushing."
+fi
+echo "      ✓ All tests passed"
+
+# ── 2. Future-incompatible deps (warning only) ────────────────────────────────
+step "[2/4] Future-incompatible dependencies (cargo report future-incompatibilities)"
+if command -v cargo >/dev/null 2>&1; then
+    if ! cargo report future-incompatibilities 2>&1; then
+        warn "Future-incompatible dependency warnings detected (not blocking)."
+    fi
+else
+    echo "      (skipped — cargo not installed; relevant once Rust migration lands)"
+fi
+
+# ── 3. Unused deps check (warning only) ──────────────────────────────────────
+step "[3/4] Unused dependencies (cargo machete)"
+if command -v cargo-machete >/dev/null 2>&1; then
+    if ! cargo machete 2>&1; then
+        warn "Unused dependency warnings detected (not blocking)."
+        warn "Run: cargo machete --fix   to remove them."
+    fi
+else
+    echo "      (skipped — cargo-machete not installed; install with: cargo install cargo-machete)"
+fi
+
+# ── 4. Secrets scan (BLOCKING) ───────────────────────────────────────────────
+step "[4/4] Secrets scan (scripts/secrets-scan.sh)"
+if ! echo "$PUSH_REFS" | bash scripts/secrets-scan.sh; then
+    fail "Secrets scan failed — push blocked. Remove secrets before pushing."
+fi
+echo "      ✓ No secrets detected"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  All pre-push checks passed — proceeding with push."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
