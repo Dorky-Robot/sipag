@@ -4,94 +4,120 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Queue up backlog items, go to sleep, wake up to pull requests.*
+*Spin up isolated Docker sandboxes. Make progress visible.*
 
 </div>
 
 ## What is sipag?
 
-sipag is an autonomous dev agent. It takes items from your backlog, spins up an isolated Docker container, runs Claude Code with full autonomy, and opens a PR when it's done.
-
-You manage the backlog. sipag does the work. You review PRs in the morning.
+sipag is a sandbox launcher for Claude Code. Claude Code is the orchestrator — it decides what to work on, in what order, and handles retries. sipag does one thing well: spinning up isolated Docker sandboxes and making progress visible.
 
 ```bash
-sipag add "Implement password reset flow" --repo salita
-sipag add "Add rate limiting to API endpoints" --repo salita
-sipag add "Fix the flaky WebSocket test" --repo salita
+# Claude Code tells sipag what to run
+sipag run --repo https://github.com/org/repo --issue 21 "Simplify sipag to sandbox launcher"
 
-sipag start
-# Go to bed. Wake up to PRs.
+# Watch what's happening
+sipag ps
+sipag logs <task-id>
+
+# If something goes wrong
+sipag kill <task-id>
 ```
 
 ## How it works
 
 ```
-backlog item → Docker container → clone repo → claude -p → PR
+sipag run → Docker container → clone repo → claude -p → PR
 ```
 
-1. You add items to the backlog (via TUI, CLI, or just drop a `.md` file)
-2. sipag picks the next item, spins up a Docker container
-3. Clones the repo fresh, injects credentials
-4. Runs `claude --dangerously-skip-permissions` — Claude plans, codes, tests, commits, pushes, and opens a PR
-5. Records the result, tears down the container, picks up the next item
+1. Claude Code calls `sipag run` with a repo URL and task description
+2. sipag generates a unique task ID, creates a tracking file in `running/`
+3. Spins up a Docker container: clones the repo, injects credentials
+4. Runs `claude --dangerously-skip-permissions` — Claude plans, codes, tests, commits, pushes, opens a PR
+5. Records the result in `done/` or `failed/` with a log file
 
-The container is the safety boundary. Claude has full autonomy inside it. No approval dialogs, no babysitting.
-
-## The two halves
-
-**TUI** — A terminal task manager (inspired by Taskwarrior, built with ratatui). Manage your backlog: add, edit, prioritize, filter. Sync from GitHub issues and email.
-
-**Executor** — A serial worker loop. Picks up tasks, runs them in Docker, delivers PRs. Launched from the TUI or standalone.
-
-Both operate on the same file-based storage:
-
-```
-~/.sipag/
-  queue/                     # pending items
-    001-password-reset.md
-    002-rate-limiting.md
-  running/                   # currently being worked
-  done/                      # completed (with .log files)
-  failed/                    # needs attention (with .log files)
-  repos.conf                 # registered repos
-```
-
-Directories are statuses. Moving a file is a state transition. Any tool that can write a `.md` file can add work.
-
-## Task file format
-
-```markdown
----
-repo: salita
-priority: medium
----
-Implement password reset flow
-
-The user should receive an email with a one-time reset link.
-Token expires after 1 hour. Use the existing email service.
-```
+The container is the safety boundary. Claude has full autonomy inside it.
 
 ## CLI
 
+### Sandbox commands (primary interface for Claude Code)
+
 ```
-sipag                                            Launch TUI
-sipag add <title> --repo <name> [--body <text>]  Add task to queue
-sipag start                                       Process queue (serial)
-sipag status                                      Show queue state
-sipag show <name>                                 Print task + log
-sipag retry <name>                                Re-queue a failed task
-sipag sync <source>                               Pull from GitHub/email
-sipag repo add <name> <url>                       Register a repo
-sipag repo list                                   List repos
+sipag run --repo <url> [--issue <n>] [-b] "<task>"
+                              Launch a Docker sandbox for a task
+sipag ps                      List running and recent tasks with status
+sipag logs <id>               Print the log for a task
+sipag kill <id>               Kill a running container, move task to failed/
 ```
 
-## Source adapters
+### Queue commands (batch processing)
 
-Sources pull tasks from external systems into the queue.
+```
+sipag start                   Process queue/ serially (uses sipag run internally)
+sipag add <title> --repo <name> [--priority <level>]
+                              Add a task to queue/
+sipag status                  Show queue state across all directories
+sipag show <name>             Print task file and log
+sipag retry <name>            Re-queue a failed task
+sipag repo add <name> <url>   Register a repo name → URL mapping
+sipag repo list               List registered repos
+```
 
-- **GitHub Issues** — label issues with `sipag`, sync pulls them in
-- **Email** — forward tasks to an inbox, sync pulls them in (inspired by [tao](https://github.com/Dorky-Robot/tao))
-- **Manual** — drop a `.md` file in `queue/`, or use the TUI/CLI
+### Utility
+
+```
+sipag init                    Create ~/.sipag/{queue,running,done,failed}
+sipag version                 Print version
+sipag help                    Show help
+```
+
+## sipag run
+
+```bash
+sipag run --repo <url> [--issue <n>] [-b|--background] "<task description>"
+```
+
+- `--repo <url>` — repository URL to clone inside the container (required)
+- `--issue <n>` — GitHub issue number to associate with this task (optional)
+- `-b`, `--background` — run in background; sipag returns immediately (default: foreground)
+
+On launch, sipag:
+
+1. Auto-inits `~/.sipag/` if needed
+2. Generates a task ID: `YYYYMMDDHHMMSS-slug`
+3. Prints the task ID so you can follow up with `sipag logs` or `sipag kill`
+4. Creates a tracking file in `running/` with repo, issue, started timestamp
+5. Streams container output to a log file in `running/`
+6. On completion, moves tracking file + log to `done/` or `failed/`
+
+## File layout
+
+```
+~/.sipag/
+  queue/                     # pending items (for sipag start)
+    001-password-reset.md
+  running/                   # currently executing (tracking files + logs)
+    20240101120000-fix-bug.md
+    20240101120000-fix-bug.log
+  done/                      # completed
+    20240101120000-fix-bug.md
+    20240101120000-fix-bug.log
+  failed/                    # needs attention
+  repos.conf                 # registered repos (name → URL)
+```
+
+Tracking files use YAML frontmatter:
+
+```yaml
+---
+repo: https://github.com/org/repo
+issue: 21
+started: 2024-01-01T12:00:00Z
+container: sipag-20240101120000-fix-bug
+ended: 2024-01-01T13:15:00Z
+---
+Simplify sipag to sandbox launcher
+```
 
 ## Configuration
 
@@ -99,7 +125,7 @@ Sources pull tasks from external systems into the queue.
 |---|---|---|
 | `SIPAG_DIR` | `~/.sipag` | Data directory |
 | `SIPAG_IMAGE` | `sipag-worker:latest` | Docker base image |
-| `SIPAG_TIMEOUT` | `1800` | Per-item timeout (seconds) |
+| `SIPAG_TIMEOUT` | `1800` | Per-container timeout (seconds) |
 | `SIPAG_MODEL` | _(claude default)_ | Model override |
 | `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |
 | `GH_TOKEN` | _(required)_ | Passed into container |
