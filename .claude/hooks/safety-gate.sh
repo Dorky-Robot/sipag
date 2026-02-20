@@ -317,12 +317,12 @@ Bash)
 		deny "Empty bash command"
 	fi
 
-	if check_bash_deny "$cmd"; then
-		deny "Command matches deny pattern: $cmd"
-	fi
-
 	if check_bash_allow "$cmd"; then
 		allow "Command matches allow pattern"
+	fi
+
+	if check_bash_deny "$cmd"; then
+		deny "Command matches deny pattern: $cmd"
 	fi
 
 	if [[ "$SIPAG_SAFETY_MODE" == "balanced" ]]; then
