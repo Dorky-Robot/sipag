@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-integ lint fmt-check dev
+.PHONY: test test-unit test-integ lint fmt-check check fmt dev
 
 test: test-unit test-integ
 
@@ -16,5 +16,7 @@ fmt-check:
 
 fmt:
 	shfmt -w bin/sipag lib/*.sh extras/safety-gate.sh
+
+check: lint fmt-check
 
 dev: lint fmt-check test

@@ -6,6 +6,8 @@
 
 *Spin up isolated Docker sandboxes. Make progress visible.*
 
+[![CI](https://github.com/Dorky-Robot/sipag/actions/workflows/ci.yml/badge.svg)](https://github.com/Dorky-Robot/sipag/actions/workflows/ci.yml)
+
 </div>
 
 ## What is sipag?
