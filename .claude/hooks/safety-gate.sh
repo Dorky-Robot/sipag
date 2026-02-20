@@ -219,6 +219,8 @@ BASH_ALLOW_PATTERNS=(
 	'^bats '
 	'^make (test|check|lint|fmt|dev|build|clean|install|all)( |$)'
 	'^gh (issue|pr|repo|release|workflow|run|auth|api)'
+	# sipag commands (bare or full path)
+	'sipag (work|start|merge|setup|doctor|ps|logs|status|version|help)'
 )
 
 check_bash_deny() {
@@ -287,7 +289,7 @@ llm_evaluate() {
 # --- Main evaluation ---
 
 case "$tool_name" in
-Read | Glob | Grep | Task | WebSearch | WebFetch)
+Read | Glob | Grep | Task | TaskOutput | TaskStop | WebSearch | WebFetch | AskUserQuestion | Skill | NotebookEdit)
 	AUDIT_SUBJECT="$tool_name"
 	allow "Read-only tool: $tool_name"
 	;;
