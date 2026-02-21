@@ -7,24 +7,21 @@ build:
 	cargo build --release
 
 install:
-	@# Rust binaries (sipag-cli for container management, sipag-tui for TUI)
+	@# Rust binaries — sipag is the sole entry point, sipag-tui for the TUI
 	cargo install --path sipag
 	cargo install --path tui
-	@# Bash scripts to share prefix
-	@mkdir -p "$(SHARE_DIR)/bin" "$(SHARE_DIR)/lib/worker" "$(SHARE_DIR)/lib/prompts"
-	@install -m 755 bin/sipag "$(SHARE_DIR)/bin/sipag"
+	@# Bash scripts — kept in share/ for Docker containers (setup, doctor, etc.)
+	@mkdir -p "$(SHARE_DIR)/lib/worker" "$(SHARE_DIR)/lib/prompts"
 	@install -m 644 lib/*.sh "$(SHARE_DIR)/lib/"
 	@install -m 644 lib/worker/*.sh "$(SHARE_DIR)/lib/worker/"
 	@install -m 644 lib/prompts/*.md "$(SHARE_DIR)/lib/prompts/"
-	@# sipag on PATH → bash entry point (the primary command)
-	@ln -sf "$(SHARE_DIR)/bin/sipag" "$(BIN_DIR)/sipag"
 	@echo ""
 	@echo "sipag installed. Try: sipag status"
 
 uninstall:
 	@rm -f "$(BIN_DIR)/sipag"
 	@rm -rf "$(SHARE_DIR)"
-	@cargo uninstall sipag-cli 2>/dev/null || true
+	@cargo uninstall sipag 2>/dev/null || true
 	@cargo uninstall sipag-tui 2>/dev/null || true
 	@echo "sipag uninstalled."
 
@@ -42,7 +39,7 @@ fmt:
 fmt-check:
 	cargo fmt -- --check
 
-# ── Rust (no-op until Rust migration lands) ───────────────────────────────────
+# ── Rust ──────────────────────────────────────────────────────────────────────
 machete:
 	@if command -v cargo-machete >/dev/null 2>&1; then \
 		cargo machete; \
