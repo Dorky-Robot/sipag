@@ -64,13 +64,14 @@ Flags:
       --once         (work) Process one polling cycle and exit (useful for testing)
 
 Config (~/.sipag/config):
-  batch_size=4                 Max parallel Docker containers
+  batch_size=1                 Max parallel Docker containers (default: 1, max: 5)
   image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
 
 Environment:
   SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_BATCH_SIZE        Max parallel Docker containers (default: 1, max: 5)
   SIPAG_MODEL             Model override
   SIPAG_PROMPT_PREFIX     Prepended to every prompt
   SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)

@@ -11,8 +11,11 @@
 SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
 WORKER_LOG_DIR="${SIPAG_DIR}/logs"
 
-# Defaults (overridden by worker_load_config)
-WORKER_BATCH_SIZE=4
+# Defaults (overridden by worker_load_config or env vars)
+WORKER_BATCH_SIZE_MAX=5
+WORKER_BATCH_SIZE="${SIPAG_BATCH_SIZE:-1}"
+# Clamp env-var-supplied value to max
+[[ "${WORKER_BATCH_SIZE}" -gt "${WORKER_BATCH_SIZE_MAX}" ]] && WORKER_BATCH_SIZE="${WORKER_BATCH_SIZE_MAX}"
 WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
@@ -31,7 +34,10 @@ worker_load_config() {
         value=$(echo "$value" | xargs)
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            batch_size) WORKER_BATCH_SIZE="$value" ;;
+            batch_size)
+                WORKER_BATCH_SIZE="$value"
+                [[ "${WORKER_BATCH_SIZE}" -gt "${WORKER_BATCH_SIZE_MAX}" ]] && WORKER_BATCH_SIZE="${WORKER_BATCH_SIZE_MAX}"
+                ;;
             image) WORKER_IMAGE="$value" ;;
             timeout) WORKER_TIMEOUT="$value" ;;
             poll_interval) WORKER_POLL_INTERVAL="$value" ;;
