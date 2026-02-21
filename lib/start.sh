@@ -51,29 +51,46 @@ _start_print_repo_context() {
         --jq '[.tree[].path]' 2>/dev/null | head -200
 }
 
-# Gather context from all repos in repos.conf and combine into one session
-start_run_all() {
-    local conf="${SIPAG_DIR}/repos.conf"
+# Detect owner/repo from the current git directory's origin remote.
+# Returns empty string if not in a git repo or no GitHub origin.
+_start_detect_repo() {
+    local url
+    url=$(git remote get-url origin 2>/dev/null) || return 0
+    url="${url%.git}"
+    url="${url#https://github.com/}"
+    url="${url#git@github.com:}"
+    echo "$url"
+}
 
-    if [[ ! -f "$conf" ]]; then
-        echo "Error: No repos registered. Use: sipag repo add <name> <url>"
-        return 1
+# Gather context from all repos in repos.conf (or detect from git) and combine into one session
+start_run_all() {
+    local -a repos=()
+
+    # Try repos.conf first
+    local conf="${SIPAG_DIR}/repos.conf"
+    if [[ -f "$conf" ]]; then
+        local name url
+        while IFS='=' read -r name url; do
+            name="${name// /}"
+            url="${url// /}"
+            [[ -z "$name" || "$name" == \#* ]] && continue
+            url="${url%.git}"
+            url="${url#https://github.com/}"
+            repos+=("$url")
+        done < "$conf"
     fi
 
-    local -a repos=()
-    local name url
-    while IFS='=' read -r name url; do
-        name="${name// /}"
-        url="${url// /}"
-        [[ -z "$name" || "$name" == \#* ]] && continue
-        url="${url%.git}"
-        url="${url#https://github.com/}"
-        repos+=("$url")
-    done < "$conf"
-
+    # Fall back to detecting from current git repo
     if [[ ${#repos[@]} -eq 0 ]]; then
-        echo "Error: repos.conf is empty. Use: sipag repo add <name> <url>"
-        return 1
+        local detected
+        detected=$(_start_detect_repo)
+        if [[ -n "$detected" ]]; then
+            repos+=("$detected")
+        else
+            echo "Error: Not in a git repo and no repos registered."
+            echo "  Run from a git repo, or: sipag repo add <name> <url>"
+            return 1
+        fi
     fi
 
     echo "=== sipag: loading context for ${#repos[@]} repos: ${repos[*]} ==="

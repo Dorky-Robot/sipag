@@ -111,26 +111,33 @@ cmd_work() {
 	if [[ -n "${1:-}" ]]; then
 		repos=("$1")
 	else
+		# Try repos.conf
 		local conf="${SIPAG_DIR}/repos.conf"
-		if [[ ! -f "$conf" ]]; then
-			echo "Error: No repos registered and no repo specified."
-			echo "  Register a repo: sipag repo add <name> <url>"
-			echo "  Or run: sipag work <owner/repo>"
-			return 1
+		if [[ -f "$conf" ]]; then
+			local name url
+			while IFS='=' read -r name url; do
+				name="${name// /}"
+				url="${url// /}"
+				[[ -z "$name" || "$name" == \#* ]] && continue
+				url="${url%.git}"
+				url="${url#https://github.com/}"
+				repos+=("$url")
+			done < "$conf"
 		fi
-		local name url
-		while IFS='=' read -r name url; do
-			name="${name// /}"
-			url="${url// /}"
-			[[ -z "$name" || "$name" == \#* ]] && continue
-			url="${url%.git}"
-			url="${url#https://github.com/}"
-			repos+=("$url")
-		done < "$conf"
+		# Fall back to current git repo
 		if [[ ${#repos[@]} -eq 0 ]]; then
-			echo "Error: repos.conf is empty."
-			echo "  Register a repo: sipag repo add <name> <url>"
-			return 1
+			local detected
+			detected=$(git remote get-url origin 2>/dev/null || true)
+			detected="${detected%.git}"
+			detected="${detected#https://github.com/}"
+			detected="${detected#git@github.com:}"
+			if [[ -n "$detected" ]]; then
+				repos+=("$detected")
+			else
+				echo "Error: Not in a git repo and no repos registered."
+				echo "  Run from a git repo, or: sipag repo add <name> <url>"
+				return 1
+			fi
 		fi
 	fi
 
