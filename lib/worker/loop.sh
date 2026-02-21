@@ -35,18 +35,18 @@ worker_loop() {
 
         local new_issues=()
         for issue in "${all_issues[@]}"; do
-            if worker_is_seen "$issue"; then
+            if worker_is_seen "$issue" "$repo"; then
                 # Seen issues: skip only while an open PR is still in progress.
                 # If re-labeled approved after a closed/failed PR, re-queue.
                 if worker_has_open_pr "$repo" "$issue"; then
                     continue
                 fi
                 echo "[$(date +%H:%M:%S)] Re-queuing #${issue} (re-approved, no open PR)"
-                worker_unsee "$issue"
+                worker_unsee "$issue" "$repo"
             elif worker_has_pr "$repo" "$issue"; then
                 # Never seen but already has an open or merged PR (e.g. from another session)
                 echo "[$(date +%H:%M:%S)] Skipping #${issue} (already has a PR)"
-                worker_mark_seen "$issue"
+                worker_mark_seen "$issue" "$repo"
                 continue
             fi
             new_issues+=("$issue")
@@ -56,7 +56,7 @@ worker_loop() {
         local prs_to_iterate=()
         mapfile -t prs_needing_changes < <(worker_find_prs_needing_iteration "$repo")
         for pr_num in "${prs_needing_changes[@]}"; do
-            if worker_pr_is_running "$pr_num"; then
+            if worker_pr_is_running "$pr_num" "$repo"; then
                 echo "[$(date +%H:%M:%S)] Skipping PR #${pr_num} iteration (already in progress)"
                 continue
             fi
@@ -108,7 +108,7 @@ worker_loop() {
                 echo "--- Issue batch: ${batch[*]} ---"
 
                 for issue in "${batch[@]}"; do
-                    worker_mark_seen "$issue"
+                    worker_mark_seen "$issue" "$repo"
                 done
 
                 local pids=()

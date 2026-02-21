@@ -39,7 +39,7 @@ where
 {
     let tick = Duration::from_millis(200);
     let mut last_tick = Instant::now();
-    let mut last_task_refresh = Instant::now();
+    let mut last_refresh = Instant::now();
 
     loop {
         terminal.draw(|f| ui::render(f, app))?;
@@ -60,14 +60,13 @@ where
         }
 
         if last_tick.elapsed() >= tick {
-            app.on_tick()?;
             last_tick = Instant::now();
         }
 
-        // Refresh task list from disk every second
-        if last_task_refresh.elapsed() >= Duration::from_secs(1) {
-            app.refresh_tasks()?;
-            last_task_refresh = Instant::now();
+        // Re-read worker JSON files every 2 seconds
+        if last_refresh.elapsed() >= Duration::from_secs(2) {
+            app.refresh_workers()?;
+            last_refresh = Instant::now();
         }
     }
 }

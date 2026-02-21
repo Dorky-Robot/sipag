@@ -5,8 +5,10 @@ use sipag_core::{
     init,
     repo,
     task::{self, default_sipag_dir, TaskStatus},
+    worker_state,
 };
 use std::fs;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -516,31 +518,69 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
 }
 
 fn cmd_status() -> Result<()> {
+    // When stdout is a TTY, launch the interactive TUI.
+    if std::io::stdout().is_terminal() {
+        let status = std::process::Command::new("sipag-tui")
+            .status()
+            .with_context(|| "Failed to exec sipag-tui — is it installed?")?;
+        if !status.success() {
+            bail!("sipag-tui exited with status: {}", status);
+        }
+        return Ok(());
+    }
+
+    // Plain text output when piped.
     let dir = sipag_dir();
-    let labels = [("Queue", "queue"), ("Running", "running"), ("Done", "done"), ("Failed", "failed")];
+    let workers = worker_state::list_workers(&dir)?;
 
-    for (label, subdir) in &labels {
-        let d = dir.join(subdir);
-        if !d.exists() {
-            continue;
-        }
-        let mut items: Vec<String> = fs::read_dir(&d)
-            .unwrap_or_else(|_| fs::read_dir("/dev/null").unwrap())
-            .flatten()
-            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
+    if workers.is_empty() {
+        println!("No workers found. Run 'sipag work <owner/repo>' to start workers.");
+        return Ok(());
+    }
 
-        if items.is_empty() {
-            continue;
-        }
+    println!(
+        "{:<25}  {:<7}  {:<8}  {:<10}  BRANCH/PR",
+        "REPO", "ISSUE", "STATUS", "DURATION"
+    );
 
-        items.sort();
-        println!("{} ({}):", label, items.len());
-        for item in &items {
-            println!("  {item}");
+    let mut n_running = 0usize;
+    let mut n_done = 0usize;
+    let mut n_failed = 0usize;
+
+    for w in &workers {
+        let branch_col = match w.status.as_str() {
+            "done" => w
+                .pr_num
+                .map(|n| format!("PR #{n} opened"))
+                .unwrap_or_else(|| w.branch.clone()),
+            _ => w.branch.clone(),
+        };
+        println!(
+            "{:<25}  #{:<6}  {:<8}  {:<10}  {}",
+            truncate(&w.repo, 25),
+            w.issue_num,
+            &w.status,
+            w.format_duration(),
+            branch_col,
+        );
+        match w.status.as_str() {
+            "running" => n_running += 1,
+            "done" => n_done += 1,
+            "failed" => n_failed += 1,
+            _ => {}
         }
     }
 
+    println!();
+    println!("{n_running} running · {n_done} done · {n_failed} failed");
+
     Ok(())
+}
+
+fn truncate(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }

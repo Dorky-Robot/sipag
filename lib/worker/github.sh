@@ -98,7 +98,7 @@ worker_reconcile() {
         pr_title=$(gh pr view "$merged_pr" --repo "$repo" --json title -q '.title' 2>/dev/null)
         echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${merged_pr} (${pr_title})"
         gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${merged_pr}" 2>/dev/null
-        worker_mark_seen "$issue"
+        worker_mark_seen "$issue" "$repo"
     done
 }
 

@@ -24,7 +24,7 @@ must happen through PRs built in Docker workers. This means:
 2. Have a product/architecture conversation — ask broad questions, not ticket-by-ticket
 3. As issues get approved, run `sipag work <repo>` as a background task
 4. While workers build, keep conversing — refine more tickets, discuss architecture
-5. Check worker progress periodically: `tail -5 /tmp/sipag-backlog/issue-N.log`
+5. Check worker progress periodically: `tail -5 ~/.sipag/logs/OWNER--REPO--N.log`
 6. When PRs land, review them — discuss trade-offs, batch-approve clean ones
 7. Merge approved PRs: `gh pr merge N --repo <repo> --rebase --delete-branch`
 
@@ -40,7 +40,7 @@ must happen through PRs built in Docker workers. This means:
 **Background workers**:
 - Start workers: run `sipag work <repo>` as a background shell task
 - Workers only pick up issues labeled "approved"
-- Check progress: `tail -5 /tmp/sipag-backlog/issue-N.log`
+- Check progress: `tail -5 ~/.sipag/logs/OWNER--REPO--N.log` or `sipag status`
 - Check overall status: `tail -20` on the sipag work output
 - Workers create PRs automatically when done
 

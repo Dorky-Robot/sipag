@@ -3,12 +3,15 @@ use std::path::Path;
 
 /// Create the sipag directory structure (idempotent).
 ///
-/// Creates `queue/`, `running/`, `done/`, and `failed/` under `sipag_dir`.
-/// Prints a line for each directory that is created, then a summary.
+/// Creates the standard subdirectories under `sipag_dir`:
+/// - `queue/`, `running/`, `done/`, `failed/` — task queue dirs
+/// - `workers/` — JSON state files for `sipag work` issue workers
+/// - `logs/`    — persistent worker log files (replaces /tmp)
+/// - `seen/`    — per-repo dedup files (one file per OWNER--REPO)
 pub fn init_dirs(sipag_dir: &Path) -> Result<()> {
     let mut created = false;
 
-    for subdir in &["queue", "running", "done", "failed"] {
+    for subdir in &["queue", "running", "done", "failed", "workers", "logs", "seen"] {
         let path = sipag_dir.join(subdir);
         if !path.exists() {
             std::fs::create_dir_all(&path)?;
@@ -39,6 +42,9 @@ mod tests {
         assert!(dir.path().join("running").exists());
         assert!(dir.path().join("done").exists());
         assert!(dir.path().join("failed").exists());
+        assert!(dir.path().join("workers").exists());
+        assert!(dir.path().join("logs").exists());
+        assert!(dir.path().join("seen").exists());
     }
 
     #[test]

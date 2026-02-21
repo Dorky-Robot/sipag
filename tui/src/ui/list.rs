@@ -1,38 +1,68 @@
 use crate::app::App;
-use crate::task::Status;
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
     Frame,
 };
 
-pub fn render_list(f: &mut Frame, app: &App) {
+pub fn render_list(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // Split into: task table | bottom bar (legend + help).
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
+    // Split into: header | table | bottom bar
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(3),
+    ])
+    .split(area);
+
+    // ── Header bar ────────────────────────────────────────────────────────────
+    let (running, done, failed) = app.worker_counts();
+    let repos = app.active_repos();
+    let repo_str = if repos.is_empty() {
+        "no active repos".to_string()
+    } else {
+        repos.join(", ")
+    };
+    let header_text = format!(
+        " sipag  │  {} running · {} done · {} failed  │  polling: {}",
+        running, done, failed, repo_str
+    );
+    let header = Paragraph::new(Line::from(Span::styled(
+        header_text,
+        Style::default().add_modifier(Modifier::BOLD),
+    )))
+    .block(Block::default().borders(Borders::BOTTOM));
+    f.render_widget(header, chunks[0]);
 
     // ── Table header ─────────────────────────────────────────────────────────
-    let header = Row::new(vec![
-        Cell::from("ID"),
-        Cell::from("St"),
-        Cell::from("Pri"),
-        Cell::from("Repo"),
-        Cell::from("Title"),
-        Cell::from("Age"),
+    let col_header = Row::new(vec![
+        Cell::from("REPO"),
+        Cell::from("ISSUE"),
+        Cell::from("STATUS"),
+        Cell::from("DURATION"),
+        Cell::from("BRANCH / PR"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    // ── Task rows ─────────────────────────────────────────────────────────────
+    // ── Worker rows ───────────────────────────────────────────────────────────
+    let selected_idx = app.table_state.selected();
     let rows: Vec<Row> = app
-        .tasks
+        .workers
         .iter()
         .enumerate()
-        .map(|(i, task)| {
-            let style = if i == app.selected {
+        .map(|(i, w)| {
+            let status_color = match w.status.as_str() {
+                "running" => Color::Cyan,
+                "done" => Color::Green,
+                "failed" => Color::Red,
+                _ => Color::White,
+            };
+
+            let row_style = if Some(i) == selected_idx {
                 Style::default()
                     .bg(Color::Blue)
                     .fg(Color::White)
@@ -41,85 +71,56 @@ pub fn render_list(f: &mut Frame, app: &App) {
                 Style::default()
             };
 
-            let pri = task
-                .priority
-                .as_deref()
-                .map(|p| match p {
-                    "high" => "H",
-                    "low" => "L",
-                    _ => "M",
-                })
-                .unwrap_or("-");
+            let status_style = if Some(i) == selected_idx {
+                row_style
+            } else {
+                Style::default().fg(status_color)
+            };
+
+            let branch_col = match w.status.as_str() {
+                "done" => w
+                    .pr_num
+                    .map(|n| format!("PR #{n} opened"))
+                    .unwrap_or_else(|| w.branch.clone()),
+                _ => w.branch.clone(),
+            };
 
             Row::new(vec![
-                Cell::from(format!("{}", task.id)),
-                Cell::from(task.status.icon()),
-                Cell::from(pri),
-                Cell::from(task.repo.as_deref().unwrap_or("-")),
-                Cell::from(task.title.as_str()),
-                Cell::from(task.format_age()),
+                Cell::from(w.repo.clone()).style(row_style),
+                Cell::from(format!("#{}", w.issue_num)).style(row_style),
+                Cell::from(w.status.clone()).style(status_style),
+                Cell::from(w.format_duration()).style(row_style),
+                Cell::from(branch_col).style(row_style),
             ])
-            .style(style)
             .height(1)
         })
         .collect();
 
     // Column widths
     let widths = [
-        Constraint::Length(4),  // ID
-        Constraint::Length(3),  // St
-        Constraint::Length(4),  // Pri
-        Constraint::Length(10), // Repo
-        Constraint::Min(20),    // Title
-        Constraint::Length(6),  // Age
+        Constraint::Length(26),  // REPO
+        Constraint::Length(8),   // ISSUE
+        Constraint::Length(9),   // STATUS
+        Constraint::Length(11),  // DURATION
+        Constraint::Min(20),     // BRANCH / PR
     ];
 
     let table = Table::new(rows, widths)
-        .header(header)
+        .header(col_header)
         .block(
             Block::default()
-                .title(" sipag ")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
-        );
+                .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
+                .border_type(BorderType::Plain),
+        )
+        // Disable automatic selection highlighting — rows are styled manually.
+        .highlight_style(Style::default());
 
-    f.render_widget(table, chunks[0]);
+    f.render_stateful_widget(table, chunks[1], &mut app.table_state);
 
     // ── Bottom bar ────────────────────────────────────────────────────────────
-    let pending = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Pending)
-        .count();
-    let running = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Running)
-        .count();
-    let done = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Done)
-        .count();
-    let failed = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Failed)
-        .count();
-
-    let legend = format!(
-        "  · pending  ⧖ running  ✓ done  ✗ failed    {} tasks ({} pending, {} running, {} done, {} failed)",
-        app.tasks.len(),
-        pending,
-        running,
-        done,
-        failed,
+    let help = "  j/k: navigate   Enter: view log   q: quit";
+    let bottom = Paragraph::new(Line::from(help)).block(
+        Block::default().borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM),
     );
-    let help = "  j/k:navigate  Enter:detail  q:quit";
-
-    let bottom = Paragraph::new(vec![Line::from(legend), Line::from(help)]).block(
-        Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
-    );
-
-    f.render_widget(bottom, chunks[1]);
+    f.render_widget(bottom, chunks[2]);
 }

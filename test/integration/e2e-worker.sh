@@ -165,7 +165,7 @@ fi
 
 if [[ -z "$PR_NUM" ]]; then
     fail "No PR found referencing issue #${ISSUE_NUM}.
-  Check worker logs in /tmp/sipag-backlog/issue-${ISSUE_NUM}.log for details."
+  Check worker logs in ~/.sipag/logs/ for details."
 fi
 
 BRANCH_NAME=$(gh pr view "$PR_NUM" --repo "$TEST_REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)

@@ -9,7 +9,9 @@
 # shellcheck disable=SC2034  # Variables consumed by other worker submodules
 
 SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
-WORKER_LOG_DIR="/tmp/sipag-backlog"
+WORKER_LOG_DIR="${SIPAG_DIR}/logs"
+WORKER_STATE_DIR="${SIPAG_DIR}/workers"
+WORKER_SEEN_DIR="${SIPAG_DIR}/seen"
 
 # Defaults (overridden by worker_load_config)
 WORKER_BATCH_SIZE=4
@@ -38,11 +40,9 @@ worker_load_config() {
     done < "$config"
 }
 
-# Initialize worker runtime state: log dir, seen file, timeout command, credentials
+# Initialize worker runtime state: dirs, timeout command, credentials
 worker_init() {
-    mkdir -p "$WORKER_LOG_DIR"
-    WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-    touch "$WORKER_SEEN_FILE"
+    mkdir -p "$WORKER_LOG_DIR" "$WORKER_STATE_DIR" "$WORKER_SEEN_DIR"
 
     # Resolve timeout command (gtimeout on macOS, timeout on Linux)
     WORKER_TIMEOUT_CMD="timeout"
