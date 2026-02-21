@@ -46,7 +46,6 @@ Usage:
   sipag next [-c] [-n] [-f]     Run next task from a markdown checklist
   sipag list [-f path]           Print all tasks with status
   sipag add "task" [-f path]     Append task to checklist
-  sipag usage [--since Nd]       Show token usage and cost estimates
   sipag setup                    Configure sipag and Claude Code permissions
   sipag version                  Print version
   sipag help                     Show this help
@@ -159,86 +158,6 @@ cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
 
-cmd_usage() {
-	local since="" log_file
-	while [[ $# -gt 0 ]]; do
-		case "$1" in
-		--since)
-			shift
-			since="${1:?--since requires a value (e.g. 7d, 24h, 1w)}"
-			shift
-			;;
-		*)
-			shift
-			;;
-		esac
-	done
-
-	log_file="${SIPAG_DIR}/usage.log"
-	if [[ ! -f "$log_file" ]]; then
-		echo "No usage data yet. Usage is recorded automatically when workers complete."
-		echo "Usage log: ${log_file}"
-		return 0
-	fi
-
-	local period_label="All time"
-	[[ -n "$since" ]] && period_label="Last ${since}"
-	echo "${period_label}:"
-
-	if command -v jq &>/dev/null; then
-		# Compute cutoff timestamp for --since filter (empty = no filter)
-		local cutoff=""
-		if [[ -n "$since" ]]; then
-			local n
-			if [[ "$since" =~ ^([0-9]+)d$ ]]; then
-				n="${BASH_REMATCH[1]}"
-				cutoff=$(date -u -d "-${n} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-					|| date -u -v"-${n}d" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
-			elif [[ "$since" =~ ^([0-9]+)h$ ]]; then
-				n="${BASH_REMATCH[1]}"
-				cutoff=$(date -u -d "-${n} hours" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-					|| date -u -v"-${n}H" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
-			elif [[ "$since" =~ ^([0-9]+)w$ ]]; then
-				n=$(( ${BASH_REMATCH[1]} * 7 ))
-				cutoff=$(date -u -d "-${n} days" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-					|| date -u -v"-${n}d" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
-			fi
-		fi
-
-		# Pass cutoff as a jq variable to avoid shell quoting issues.
-		# Per-repo breakdown followed by grand total.
-		jq -rs --arg cutoff "$cutoff" '
-			[
-				.[] |
-				if $cutoff == "" then . else select(.ts >= $cutoff) end
-			] |
-			(
-				group_by(.repo)[] |
-				(.[0].repo)                              as $repo |
-				([.[].input_tokens  // 0] | add)         as $inp  |
-				([.[].output_tokens // 0] | add)         as $out  |
-				([.[].cost_usd      // 0] | add)         as $cost |
-				(length)                                 as $runs |
-				"  \($repo):  \($inp) input / \($out) output  ~$\($cost | . * 100 | round / 100)  (\($runs) run\(if $runs == 1 then "" else "s" end))"
-			),
-			(
-				([.[].input_tokens  // 0] | add)         as $inp  |
-				([.[].output_tokens // 0] | add)         as $out  |
-				([.[].cost_usd      // 0] | add)         as $cost |
-				(length)                                 as $runs |
-				"  Total:  \($inp) input / \($out) output  ~$\($cost | . * 100 | round / 100)  (\($runs) run\(if $runs == 1 then "" else "s" end))"
-			)
-		' "$log_file" 2>/dev/null || true
-	else
-		local runs
-		runs=$(wc -l < "$log_file")
-		echo "  ${runs} run(s) recorded (install jq for token counts and cost totals)."
-	fi
-
-	echo ""
-	echo "  Log: ${log_file}"
-}
-
 # --- Argument parsing ---
 
 main() {
@@ -248,7 +167,6 @@ main() {
 	local work_repo=""
 	local start_repo=""
 	local merge_repo=""
-	local usage_args=()
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -279,15 +197,6 @@ main() {
 				merge_repo="$1"
 				shift
 			fi
-			;;
-		usage)
-			command="usage"
-			shift
-			# Collect remaining args for cmd_usage
-			while [[ $# -gt 0 ]]; do
-				usage_args+=("$1")
-				shift
-			done
 			;;
 		next)
 			command="next"
@@ -353,7 +262,6 @@ main() {
 	setup) cmd_setup ;;
 	work) cmd_work "$work_repo" ;;
 	merge) cmd_merge "$merge_repo" ;;
-	usage) cmd_usage "${usage_args[@]}" ;;
 	next) cmd_next ;;
 	list) cmd_list ;;
 	add) cmd_add "$add_text" ;;
