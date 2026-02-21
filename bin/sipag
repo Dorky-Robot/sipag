@@ -30,6 +30,7 @@ source "${SIPAG_ROOT}/lib/merge.sh"
 source "${SIPAG_ROOT}/lib/preflight.sh"
 # shellcheck source=../lib/doctor.sh
 source "${SIPAG_ROOT}/lib/doctor.sh"
+# refresh-docs is sourced transitively via lib/worker.sh → lib/refresh-docs.sh
 
 # --- Defaults ---
 
@@ -44,6 +45,7 @@ sipag — autonomous dev agent powered by Claude Code
 Usage:
   sipag start [<owner/repo>]           Prime session for agile workflow (all repos if omitted)
   sipag work [<owner/repo>] [--once]   Pick up approved issues, code in Docker (all repos if omitted)
+  sipag refresh-docs <owner/repo>      Generate/update ARCHITECTURE.md and VISION.md via Claude
   sipag status                         Show worker state across all repos
   sipag drain                          Signal workers to finish current batch and exit
   sipag resume                         Clear drain signal so workers continue polling
@@ -65,20 +67,23 @@ Agile workflow:
 
 Flags:
       --once         (work) Process one polling cycle and exit (useful for testing)
+      --check        (refresh-docs) Only refresh if ARCHITECTURE.md is stale
 
 Config (~/.sipag/config):
   batch_size=1                 Max parallel Docker containers (default: 1, max: 5)
   image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
+  doc_refresh_interval=10      Polling cycles between auto doc refreshes (0 = disabled)
 
 Environment:
-  SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
-  SIPAG_BATCH_SIZE        Max parallel Docker containers (default: 1, max: 5)
-  SIPAG_MODEL             Model override
-  SIPAG_PROMPT_PREFIX     Prepended to every prompt
-  SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
-  SIPAG_CLAUDE_ARGS       Extra raw args to claude
+  SIPAG_TIMEOUT                Claude timeout in seconds (default: 600)
+  SIPAG_BATCH_SIZE             Max parallel Docker containers (default: 1, max: 5)
+  SIPAG_DOC_REFRESH_INTERVAL   Cycles between auto doc refreshes (default: 10, 0 = disabled)
+  SIPAG_MODEL                  Model override
+  SIPAG_PROMPT_PREFIX          Prepended to every prompt
+  SIPAG_SKIP_PERMISSIONS       Set 0 for interactive mode (default: 1)
+  SIPAG_CLAUDE_ARGS            Extra raw args to claude
 EOF
 }
 
@@ -243,6 +248,28 @@ cmd_doctor() {
 	doctor_run
 }
 
+# Generate or update ARCHITECTURE.md (and handle VISION.md) via a Claude worker.
+# Accepts an optional --check flag: only refresh if ARCHITECTURE.md is stale.
+cmd_refresh_docs() {
+	local repo="${1:-}"
+	local check_mode="${2:-}"
+
+	if [[ -z "$repo" ]]; then
+		echo "Usage: sipag refresh-docs <owner/repo> [--check]"
+		return 1
+	fi
+
+	preflight_repo "$repo" || return 1
+	preflight_gh_auth || return 1
+	preflight_auth || return 1
+	preflight_docker_running || return 1
+
+	worker_load_config
+	worker_init "$repo"
+
+	refresh_docs_run "$repo" "$check_mode"
+}
+
 cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
@@ -255,6 +282,8 @@ main() {
 	local work_repo=""
 	local start_repo=""
 	local merge_repo=""
+	local refresh_docs_repo=""
+	local refresh_docs_check=""
 
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
@@ -275,6 +304,14 @@ main() {
 			shift
 			if [[ $# -gt 0 && "$1" != -* ]]; then
 				work_repo="$1"
+				shift
+			fi
+			;;
+		refresh-docs)
+			command="refresh_docs"
+			shift
+			if [[ $# -gt 0 && "$1" != -* ]]; then
+				refresh_docs_repo="$1"
 				shift
 			fi
 			;;
@@ -314,6 +351,10 @@ main() {
 			export WORKER_ONCE=1
 			shift
 			;;
+		--check)
+			refresh_docs_check="--check"
+			shift
+			;;
 		-*)
 			echo "Unknown flag: $1"
 			usage
@@ -348,6 +389,7 @@ main() {
 	setup) cmd_setup ;;
 	doctor) cmd_doctor ;;
 	work) cmd_work "$work_repo" ;;
+	refresh_docs) cmd_refresh_docs "$refresh_docs_repo" "$refresh_docs_check" ;;
 	drain) cmd_drain ;;
 	resume) cmd_resume ;;
 	status) cmd_status ;;

@@ -16,6 +16,7 @@
 # When multiple repos are given, each polling cycle iterates through all of them.
 worker_loop() {
     local -a repos=("$@")
+    local _cycle_count=0
 
     echo "sipag work"
     if [[ ${#repos[@]} -eq 1 ]]; then
@@ -174,6 +175,19 @@ worker_loop() {
                 -q '.[] | "  #\(.number): \(.title)"'
             echo ""
         done
+
+        # Periodic doc refresh (every WORKER_DOC_REFRESH_INTERVAL cycles, skipping cycle 0)
+        # Runs in the background so it never delays the polling loop.
+        if [[ "${WORKER_DOC_REFRESH_INTERVAL:-0}" -gt 0 ]] && \
+                (( _cycle_count > 0 && _cycle_count % WORKER_DOC_REFRESH_INTERVAL == 0 )); then
+            local _doc_repo
+            for _doc_repo in "${repos[@]}"; do
+                echo "[$(date +%H:%M:%S)] Triggering doc refresh for ${_doc_repo} (cycle ${_cycle_count})..."
+                refresh_docs_run "$_doc_repo" &
+            done
+        fi
+
+        _cycle_count=$(( _cycle_count + 1 ))
 
         if [[ "${WORKER_ONCE}" -eq 1 ]]; then
             if [[ $found_work -eq 0 ]]; then

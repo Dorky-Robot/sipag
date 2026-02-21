@@ -22,6 +22,7 @@ WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
 WORKER_ONCE=0
 WORKER_AUTO_MERGE=true
+WORKER_DOC_REFRESH_INTERVAL="${SIPAG_DOC_REFRESH_INTERVAL:-10}"
 WORKER_REPO_SLUG=""
 
 # Load config
@@ -43,6 +44,7 @@ worker_load_config() {
             poll_interval) WORKER_POLL_INTERVAL="$value" ;;
             work_label) WORKER_WORK_LABEL="$value" ;;
             auto_merge) WORKER_AUTO_MERGE="$value" ;;
+            doc_refresh_interval) WORKER_DOC_REFRESH_INTERVAL="$value" ;;
         esac
     done < "$config"
 }
