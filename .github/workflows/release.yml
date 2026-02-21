@@ -68,6 +68,8 @@ jobs:
           cp bin/sipag "dist/sipag-${VERSION}-${TARGET}/bin/"
           cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
           cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/worker"
+          cp lib/worker/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/worker/"
 
           # Create tarball
           cd dist
@@ -104,94 +106,60 @@ jobs:
 
   update-formula:
     name: Update Homebrew formula
-    needs: build
+    needs: release
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-          merge-multiple: true
-
-      - name: Compute SHA-256 for each archive
-        id: hashes
+      - name: Compute SHA-256 for GitHub archive
+        id: archive
         run: |
           VERSION=${{ github.ref_name }}
-          echo "macos_arm64=$(shasum -a 256 dist/sipag-${VERSION}-aarch64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "macos_x86_64=$(shasum -a 256 dist/sipag-${VERSION}-x86_64-apple-darwin.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "linux_x86_64=$(shasum -a 256 dist/sipag-${VERSION}-x86_64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(shasum -a 256 dist/sipag-${VERSION}-aarch64-unknown-linux-gnu.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ARCHIVE_URL="https://github.com/Dorky-Robot/sipag/archive/refs/tags/${VERSION}.tar.gz"
+          SHA256=$(curl -fsSL "$ARCHIVE_URL" | shasum -a 256 | cut -d' ' -f1)
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "url=${ARCHIVE_URL}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew tap
         uses: actions/checkout@v4
         with:
-          repository: Dorky-Robot/homebrew-sipag
+          repository: Dorky-Robot/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
-      - name: Update formula with new version and hashes
+      - name: Update formula with new version and hash
         env:
           VERSION: ${{ github.ref_name }}
-          MACOS_ARM64: ${{ steps.hashes.outputs.macos_arm64 }}
-          MACOS_X86_64: ${{ steps.hashes.outputs.macos_x86_64 }}
-          LINUX_X86_64: ${{ steps.hashes.outputs.linux_x86_64 }}
-          LINUX_ARM64: ${{ steps.hashes.outputs.linux_arm64 }}
+          ARCHIVE_SHA256: ${{ steps.archive.outputs.sha256 }}
+          ARCHIVE_URL: ${{ steps.archive.outputs.url }}
         run: |
           VERSION_CLEAN="${VERSION#v}"  # strip leading 'v' for formula version field
-          cat > homebrew-tap/Formula/sipag.rb << FORMULA
-          class Sipag < Formula
-            desc "Conversational agile for Claude Code — you talk, workers ship PRs"
-            homepage "https://github.com/Dorky-Robot/sipag"
-            version "${VERSION_CLEAN}"
-            license "MIT"
+          mkdir -p homebrew-tap/Formula
+          cat > homebrew-tap/Formula/sipag.rb << 'FORMULA'
+class Sipag < Formula
+  desc "Autonomous dev agent powered by Claude Code"
+  homepage "https://github.com/Dorky-Robot/sipag"
+  url "ARCHIVE_URL_PLACEHOLDER"
+  sha256 "SHA256_PLACEHOLDER"
+  version "VERSION_PLACEHOLDER"
+  license "MIT"
 
-            on_macos do
-              on_arm do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-aarch64-apple-darwin.tar.gz"
-                sha256 "${MACOS_ARM64}"
-              end
-              on_intel do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-x86_64-apple-darwin.tar.gz"
-                sha256 "${MACOS_X86_64}"
-              end
-            end
+  depends_on "jq"
+  depends_on "gh"
 
-            on_linux do
-              on_arm do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${LINUX_ARM64}"
-              end
-              on_intel do
-                url "https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}/sipag-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${LINUX_X86_64}"
-              end
-            end
+  def install
+    prefix.install "bin", "lib"
+    bin.install_symlink prefix/"bin/sipag"
+  end
 
-            def install
-              bin.install "sipag"
-              (libexec/"bin").install "bin/sipag" => "sipag"
-              (libexec/"lib").install Dir["lib/*.sh"]
-              (libexec/"lib/prompts").install Dir["lib/prompts/*.md"]
-            end
-
-            def caveats
-              <<~EOS
-                The sipag Rust CLI is installed to bin/.
-
-                Bash helper scripts (sipag start, sipag work, sipag merge, sipag setup)
-                are installed to #{opt_libexec}/bin/sipag.
-
-                To use these bash commands directly, add to your shell profile:
-                  export PATH="#{opt_libexec}/bin:\$PATH"
-              EOS
-            end
-
-            test do
-              system bin/"sipag", "version"
-            end
-          end
-          FORMULA
+  test do
+    system "#{bin}/sipag", "version"
+  end
+end
+FORMULA
+          # Substitute the placeholders with actual values
+          sed -i "s|ARCHIVE_URL_PLACEHOLDER|${ARCHIVE_URL}|" homebrew-tap/Formula/sipag.rb
+          sed -i "s|SHA256_PLACEHOLDER|${ARCHIVE_SHA256}|" homebrew-tap/Formula/sipag.rb
+          sed -i "s|VERSION_PLACEHOLDER|${VERSION_CLEAN}|" homebrew-tap/Formula/sipag.rb
 
       - name: Commit and push updated formula
         run: |
