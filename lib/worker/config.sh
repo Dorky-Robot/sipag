@@ -47,25 +47,20 @@ worker_load_config() {
     done < "$config"
 }
 
-# Initialize worker runtime state: log dir, seen file, timeout command, credentials
+# Initialize worker runtime state: log dir, timeout command, credentials
 # $1: repo in OWNER/REPO format (e.g. "Dorky-Robot/sipag")
 worker_init() {
     local repo="${1:-}"
 
     mkdir -p "${SIPAG_DIR}/workers"
     mkdir -p "${SIPAG_DIR}/logs"
-    mkdir -p "${SIPAG_DIR}/seen"
 
     WORKER_LOG_DIR="${SIPAG_DIR}/logs"
 
-    # Set per-repo seen file (OWNER--REPO format to avoid path separator issues)
+    # Set per-repo slug (OWNER--REPO format to avoid path separator issues)
     if [[ -n "$repo" ]]; then
         WORKER_REPO_SLUG="${repo//\//--}"  # Dorky-Robot/sipag → Dorky-Robot--sipag
-        WORKER_SEEN_FILE="${SIPAG_DIR}/seen/${WORKER_REPO_SLUG}"
-    else
-        WORKER_SEEN_FILE="${SIPAG_DIR}/seen/default"
     fi
-    touch "$WORKER_SEEN_FILE"
 
     # Resolve timeout command (gtimeout on macOS, timeout on Linux)
     WORKER_TIMEOUT_CMD="timeout"

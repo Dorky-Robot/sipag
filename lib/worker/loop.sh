@@ -40,11 +40,8 @@ worker_loop() {
         local found_work=0
         local repo
         for repo in "${repos[@]}"; do
-            # Update per-repo globals (slug for log/state file naming, seen file for dedup)
+            # Update per-repo globals (slug for log/state file naming)
             WORKER_REPO_SLUG="${repo//\//--}"
-            mkdir -p "${SIPAG_DIR}/seen"
-            WORKER_SEEN_FILE="${SIPAG_DIR}/seen/${WORKER_REPO_SLUG}"
-            touch "$WORKER_SEEN_FILE"
 
             # Reconcile: close issues that already have merged PRs
             worker_reconcile "$repo"
@@ -61,20 +58,32 @@ worker_loop() {
             local -a new_issues=()
             local issue
             for issue in "${all_issues[@]}"; do
-                if worker_is_seen "$issue"; then
-                    # Seen issues: skip only while an open PR is still in progress.
-                    # If re-labeled approved after a closed/failed PR, re-queue.
-                    if worker_has_open_pr "$repo" "$issue"; then
-                        continue
-                    fi
-                    echo "[$(date +%H:%M:%S)] Re-queuing #${issue} (re-approved, no open PR)"
-                    worker_unsee "$issue"
-                elif worker_has_pr "$repo" "$issue"; then
-                    # Never seen but already has an open or merged PR (e.g. from another session)
-                    echo "[$(date +%H:%M:%S)] Skipping #${issue} (already has a PR)"
-                    worker_mark_seen "$issue"
+                # 1. State file says done → skip (already completed successfully)
+                if worker_is_completed "$repo" "$issue"; then
                     continue
                 fi
+
+                # 2. State file says running → skip (container may still be alive)
+                if worker_is_in_flight "$repo" "$issue"; then
+                    continue
+                fi
+
+                # 3. State file says failed + issue still labeled approved → re-dispatch
+                if worker_is_failed "$repo" "$issue"; then
+                    echo "[$(date +%H:%M:%S)] Re-queuing #${issue} (previous worker failed, issue still approved)"
+                    new_issues+=("$issue")
+                    continue
+                fi
+
+                # 4. No state file → check for existing open or merged PR
+                if worker_has_pr "$repo" "$issue"; then
+                    # PR exists from another session; record as done so we skip next cycle
+                    echo "[$(date +%H:%M:%S)] Skipping #${issue} (existing PR found, recording state)"
+                    worker_mark_state_done "$repo" "$issue"
+                    continue
+                fi
+
+                # No state file, no PR → dispatch new worker
                 new_issues+=("$issue")
             done
 
@@ -133,10 +142,6 @@ worker_loop() {
                 for ((i = 0; i < ${#new_issues[@]}; i += WORKER_BATCH_SIZE)); do
                     local batch=("${new_issues[@]:i:WORKER_BATCH_SIZE}")
                     echo "--- Issue batch: ${batch[*]} ---"
-
-                    for issue in "${batch[@]}"; do
-                        worker_mark_seen "$issue"
-                    done
 
                     local pids=()
                     for issue in "${batch[@]}"; do
