@@ -155,8 +155,13 @@ pub enum RepoCommands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None | Some(Commands::Tui) => {
-            let sipag_dir = default_sipag_dir();
-            crate::tui::run_tui(&sipag_dir)
+            let status = std::process::Command::new("sipag-tui")
+                .status()
+                .with_context(|| "Failed to exec sipag-tui — is it installed?")?;
+            if !status.success() {
+                bail!("sipag-tui exited with status: {}", status);
+            }
+            Ok(())
         }
         Some(Commands::Version) => {
             println!("sipag {VERSION}");
