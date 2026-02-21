@@ -73,15 +73,36 @@ ${body}
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
             git checkout -b "$BRANCH"
             git push -u origin "$BRANCH"
-            gh pr create --repo "'"${repo}"'" \
-                --title "$ISSUE_TITLE" \
-                --body "$PR_BODY" \
-                --draft \
-                --head "$BRANCH"
-            echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
-            claude --print --dangerously-skip-permissions -p "$PROMPT" \
-                && { gh pr ready "$BRANCH" --repo "'"${repo}"'" || true; \
-                     echo "[sipag] PR marked ready for review"; }
+            # Attempt early draft PR. GitHub rejects this when the branch has no commits
+            # yet ("No commits between main and BRANCH"). Capture the failure and defer —
+            # the PR will be created (or retried) after Claude pushes its work.
+            if gh pr create --repo "'"${repo}"'" \
+                    --title "$ISSUE_TITLE" \
+                    --body "$PR_BODY" \
+                    --draft \
+                    --head "$BRANCH" 2>/tmp/sipag-pr-err.log; then
+                echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
+            else
+                echo "[sipag] Draft PR deferred (will retry after work): $(cat /tmp/sipag-pr-err.log)"
+            fi
+            claude --print --dangerously-skip-permissions -p "$PROMPT" && {
+                # Ensure PR exists after work is committed. Retry if the early creation failed.
+                existing_pr=$(gh pr list --repo "'"${repo}"'" --head "$BRANCH" \
+                    --state open --json number -q ".[0].number" 2>/dev/null || true)
+                if [[ -z "$existing_pr" ]]; then
+                    echo "[sipag] Retrying PR creation after work completion"
+                    if gh pr create --repo "'"${repo}"'" \
+                            --title "$ISSUE_TITLE" \
+                            --body "$PR_BODY" \
+                            --head "$BRANCH" 2>/tmp/sipag-pr-retry-err.log; then
+                        echo "[sipag] PR created after work"
+                    else
+                        echo "[sipag] WARNING: PR creation failed after work: $(cat /tmp/sipag-pr-retry-err.log)"
+                    fi
+                fi
+                gh pr ready "$BRANCH" --repo "'"${repo}"'" || true
+                echo "[sipag] PR marked ready for review"
+            }
         ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
 
     local exit_code=$?
@@ -93,9 +114,22 @@ ${body}
         worker_transition_label "$repo" "$issue_num" "in-progress" ""
         echo "[#${issue_num}] DONE: $title"
 
-        # Look up the PR opened by the worker
+        # Verify a PR was created; if the container's PR creation also failed, create one now.
+        # This is the final safety net before the branch could be left orphaned.
         local pr_num pr_url
-        pr_num=$(gh pr list --repo "$repo" --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
+        pr_num=$(gh pr list --repo "$repo" --head "$branch" --state open --json number -q '.[0].number' 2>/dev/null || true)
+        if [[ -z "$pr_num" ]]; then
+            echo "[#${issue_num}] Post-run: no open PR found — creating recovery PR for branch ${branch}"
+            if gh pr create --repo "$repo" \
+                    --title "$title" \
+                    --body "$pr_body" \
+                    --head "$branch" 2>/dev/null; then
+                echo "[#${issue_num}] Recovery PR created"
+                pr_num=$(gh pr list --repo "$repo" --head "$branch" --state open --json number -q '.[0].number' 2>/dev/null || true)
+            else
+                echo "[#${issue_num}] WARNING: Recovery PR creation failed — branch ${branch} needs manual PR"
+            fi
+        fi
         pr_url=$(gh pr list --repo "$repo" --head "$branch" --json url -q '.[0].url' 2>/dev/null || true)
 
         # Hook: worker completed

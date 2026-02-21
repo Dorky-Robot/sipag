@@ -373,6 +373,104 @@ EOF
   [[ "$status" -ne 0 ]]
 }
 
+# --- worker_reconcile_orphaned_branches ---
+
+@test "worker_reconcile_orphaned_branches: creates PR for orphaned branch with commits ahead" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"branches"*"per_page"* ]]; then
+  printf 'sipag/issue-5-fix-bug\n'
+elif [[ "$args" == *"compare"* ]]; then
+  printf '3\n'
+elif [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == "issue view"* && "$args" == *"title"* ]]; then
+  printf 'Fix bug\n'
+elif [[ "$args" == "issue view"* && "$args" == *"body"* ]]; then
+  printf 'Description\n'
+elif [[ "$args" == "pr create"* ]]; then
+  printf 'https://github.com/owner/repo/pull/10\n'
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Orphaned branch detected"
+  assert_output_contains "sipag/issue-5-fix-bug"
+  assert_output_contains "Recovery PR created"
+}
+
+@test "worker_reconcile_orphaned_branches: skips branch that already has an open PR" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"branches"*"per_page"* ]]; then
+  printf 'sipag/issue-7-existing-pr\n'
+elif [[ "$args" == *"pr list"* ]]; then
+  printf '42\n'
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Orphaned branch detected"
+  assert_output_not_contains "Recovery PR created"
+}
+
+@test "worker_reconcile_orphaned_branches: skips branch with no commits ahead of main" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"branches"*"per_page"* ]]; then
+  printf 'sipag/issue-9-no-commits\n'
+elif [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == *"compare"* ]]; then
+  printf '0\n'
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Orphaned branch detected"
+  assert_output_not_contains "Recovery PR created"
+}
+
+@test "worker_reconcile_orphaned_branches: skips branch with no issue number in name" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"branches"*"per_page"* ]]; then
+  printf 'sipag/issue-no-number\n'
+elif [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == *"compare"* ]]; then
+  printf '5\n'
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Orphaned branch detected"
+}
+
+@test "worker_reconcile_orphaned_branches: handles empty branch list" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+printf ''
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Orphaned branch detected"
+}
+
 # --- sipag_run_hook ---
 
 @test "sipag_run_hook: silently skips missing hook" {
