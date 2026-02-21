@@ -78,6 +78,7 @@ impl From<WorkerState> for Task {
         });
 
         let status = match w.status {
+            sipag_core::worker::WorkerStatus::Enqueued => Status::Queue,
             sipag_core::worker::WorkerStatus::Running
             | sipag_core::worker::WorkerStatus::Recovering => Status::Running,
             sipag_core::worker::WorkerStatus::Done => Status::Done,

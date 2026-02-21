@@ -3,7 +3,7 @@
 #
 # Uses ~/.sipag/workers/REPO_SLUG--ISSUE.json state files to determine whether
 # an issue has been dispatched, is in flight, or has already completed.
-# State values written by docker.sh: "running", "done", "failed".
+# State values written by docker.sh: "enqueued", "running", "done", "failed".
 #
 # Also tracks PR iteration state using temp marker files (reset on restart).
 #
@@ -30,12 +30,18 @@ worker_is_completed() {
     _worker_state_has_status "$(worker_state_file "$repo" "$issue_num")" "done"
 }
 
-# Check if issue is currently in flight (state file status: running or recovering).
+# Check if issue is queued but waiting for a container to start (state file status: enqueued).
+worker_is_enqueued() {
+    local repo="$1" issue_num="$2"
+    _worker_state_has_status "$(worker_state_file "$repo" "$issue_num")" "enqueued"
+}
+
+# Check if issue is currently in flight (state file status: enqueued, running, or recovering).
 worker_is_in_flight() {
     local repo="$1" issue_num="$2"
     local sf
     sf=$(worker_state_file "$repo" "$issue_num")
-    _worker_state_has_status "$sf" "running" || _worker_state_has_status "$sf" "recovering"
+    _worker_state_has_status "$sf" "enqueued" || _worker_state_has_status "$sf" "running" || _worker_state_has_status "$sf" "recovering"
 }
 
 # Check if issue's previous worker failed (state file status: failed).

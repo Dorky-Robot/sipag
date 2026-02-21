@@ -12,6 +12,40 @@
 
 # shellcheck disable=SC2154  # Globals defined in config.sh, sourced by worker.sh
 
+# Write minimal "enqueued" worker state JSON to ~/.sipag/workers/ before
+# the container starts. This guarantees the issue is never silently dropped
+# if the process crashes between issue discovery and container launch.
+# $1: repo slug (OWNER--REPO), $2: issue_num
+_worker_write_enqueued_state() {
+    local repo_slug="$1" issue_num="$2"
+    local state_file="${SIPAG_DIR}/workers/${repo_slug}--${issue_num}.json"
+    local container_name="sipag-issue-${issue_num}"
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    mkdir -p "${SIPAG_DIR}/workers"
+    # shellcheck disable=SC2016  # jq variables are not shell variables
+    jq -n \
+        --arg repo "${repo_slug/--//}" \
+        --argjson issue_num "$issue_num" \
+        --arg container_name "$container_name" \
+        --arg started_at "$now" \
+        '{
+            repo: $repo,
+            issue_num: $issue_num,
+            issue_title: "",
+            branch: "",
+            container_name: $container_name,
+            pr_num: null,
+            pr_url: null,
+            status: "enqueued",
+            started_at: $started_at,
+            ended_at: null,
+            duration_s: null,
+            exit_code: null,
+            log_path: null
+        }' > "$state_file"
+}
+
 # Write initial worker state JSON to ~/.sipag/workers/
 # $1: repo slug (OWNER--REPO), $2: issue_num, $3: issue_title,
 # $4: branch, $5: container_name, $6: started_at, $7: log_path
@@ -123,8 +157,9 @@ worker_recover() {
 
         local status
         status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
-        # Handle both "running" (normal) and "recovering" (stale from old code)
-        [[ "$status" == "running" || "$status" == "recovering" ]] || continue
+        # Handle "running" (normal), "recovering" (stale from old code), and
+        # "enqueued" (identified but container never started due to crash)
+        [[ "$status" == "running" || "$status" == "recovering" || "$status" == "enqueued" ]] || continue
 
         local repo issue_num branch container_name
         repo=$(jq -r '.repo' "$state_file")
@@ -133,6 +168,22 @@ worker_recover() {
         container_name=$(jq -r '.container_name' "$state_file")
 
         local repo_slug="${repo//\//--}"
+
+        # Enqueued workers have no container; the process crashed before the
+        # container could start. Restore the work label and mark as failed so
+        # the next poll cycle re-dispatches the issue.
+        if [[ "$status" == "enqueued" ]]; then
+            echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} was enqueued but container never started — returning to ${WORKER_WORK_LABEL}"
+            worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+            local tmp_enq now_enq
+            now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            tmp_enq=$(mktemp)
+            jq --arg status "failed" --arg ended_at "$now_enq" \
+               '.status = $status | .ended_at = $ended_at' \
+               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+            finalized=$(( finalized + 1 ))
+            continue
+        fi
 
         if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
                 | grep -q "^${container_name}$"; then
@@ -174,7 +225,7 @@ worker_finalize_exited() {
 
         local status
         status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
-        [[ "$status" == "running" || "$status" == "recovering" ]] || continue
+        [[ "$status" == "running" || "$status" == "recovering" || "$status" == "enqueued" ]] || continue
 
         local repo issue_num branch container_name
         repo=$(jq -r '.repo' "$state_file")
@@ -183,6 +234,21 @@ worker_finalize_exited() {
         container_name=$(jq -r '.container_name' "$state_file")
 
         local repo_slug="${repo//\//--}"
+
+        # Enqueued workers have no container (written before docker run was called).
+        # If still enqueued at finalization time, the worker subprocess died before
+        # transitioning to "running". Restore the work label and mark as failed.
+        if [[ "$status" == "enqueued" ]]; then
+            echo "[$(date +%H:%M:%S)] Enqueued worker #${issue_num} — container never started, returning to ${WORKER_WORK_LABEL}"
+            worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+            local tmp_enq now_enq
+            now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            tmp_enq=$(mktemp)
+            jq --arg status "failed" --arg ended_at "$now_enq" \
+               '.status = $status | .ended_at = $ended_at' \
+               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+            continue
+        fi
 
         # Container still alive → skip, it's still working
         if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
@@ -201,6 +267,11 @@ worker_run_issue() {
     local repo="$1"
     local issue_num="$2"
     local title body branch slug pr_body prompt task_id start_time
+
+    # Record the issue as enqueued immediately — before the label transition —
+    # so that a crash between discovery and container start leaves a recoverable
+    # state file instead of silently dropping the issue.
+    _worker_write_enqueued_state "$WORKER_REPO_SLUG" "$issue_num"
 
     # Mark as in-progress so the spec is locked from edits
     worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"

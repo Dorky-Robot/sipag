@@ -550,6 +550,7 @@ fn cmd_status() -> Result<()> {
         "REPO", "ISSUE", "STATUS", "DURATION"
     );
 
+    let mut enqueued = 0usize;
     let mut running = 0usize;
     let mut done = 0usize;
     let mut failed = 0usize;
@@ -568,6 +569,7 @@ fn cmd_status() -> Result<()> {
         );
 
         match w.status.as_str() {
+            "enqueued" => enqueued += 1,
             "running" => running += 1,
             "done" => done += 1,
             "failed" => failed += 1,
@@ -575,7 +577,10 @@ fn cmd_status() -> Result<()> {
         }
     }
 
-    println!("\n{} running · {} done · {} failed", running, done, failed);
+    println!(
+        "\n{} enqueued · {} running · {} done · {} failed",
+        enqueued, running, done, failed
+    );
 
     Ok(())
 }
