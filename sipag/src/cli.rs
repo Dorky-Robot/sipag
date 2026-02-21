@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
+    config::WorkerConfig,
     executor::{self, RunConfig},
     init,
     prompt::{format_duration, generate_task_id},
@@ -514,12 +515,8 @@ fn cmd_queue_run() -> Result<()> {
 
     let queue_dir = dir.join("queue");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "1800".to_string())
-        .parse::<u64>()
-        .unwrap_or(1800);
+    let worker_cfg = WorkerConfig::load(&dir)?;
+    let timeout = worker_cfg.timeout.as_secs();
 
     let repo = FileTaskRepository::new(dir.clone());
     let mut processed = 0;
@@ -607,7 +604,7 @@ fn cmd_queue_run() -> Result<()> {
                 description: &task_file_data.title,
                 issue: issue_num.as_deref(),
                 background: false,
-                image: &image,
+                image: &worker_cfg.image,
                 timeout_secs: timeout,
             },
         );
@@ -625,12 +622,7 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let task_id = generate_task_id(description, chrono::Utc::now());
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "1800".to_string())
-        .parse::<u64>()
-        .unwrap_or(1800);
+    let worker_cfg = WorkerConfig::load(&dir)?;
 
     executor::run_impl(
         &dir,
@@ -640,8 +632,8 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
             description,
             issue,
             background,
-            image: &image,
-            timeout_secs: timeout,
+            image: &worker_cfg.image,
+            timeout_secs: worker_cfg.timeout.as_secs(),
         },
     )
 }
