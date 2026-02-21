@@ -333,45 +333,95 @@ PR_ITER_JQ='
   [[ "$result" == "add-oauth2-support-v3" ]]
 }
 
-# --- worker_unsee ---
+# --- worker_is_completed / worker_is_in_flight / worker_is_failed ---
 
-@test "worker_unsee removes an issue from the seen file" {
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  printf '10\n20\n30\n' > "$WORKER_SEEN_FILE"
-  worker_unsee 20
-  run grep -cx '20' "$WORKER_SEEN_FILE"
-  [[ "$output" == "0" ]]
-}
-
-@test "worker_unsee leaves other entries intact" {
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  printf '10\n20\n30\n' > "$WORKER_SEEN_FILE"
-  worker_unsee 20
-  run grep -cx '10' "$WORKER_SEEN_FILE"
-  [[ "$output" == "1" ]]
-  run grep -cx '30' "$WORKER_SEEN_FILE"
-  [[ "$output" == "1" ]]
-}
-
-@test "worker_unsee is idempotent when issue is not in seen file" {
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  printf '10\n30\n' > "$WORKER_SEEN_FILE"
-  run worker_unsee 99
-  [[ "$status" -eq 0 ]]
-}
-
-@test "worker_unsee is safe when seen file does not exist" {
-  WORKER_SEEN_FILE="${SIPAG_DIR}/no-such-seen"
-  run worker_unsee 42
-  [[ "$status" -eq 0 ]]
-}
-
-@test "worker_unsee + worker_is_seen: issue is not seen after unsee" {
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  printf '7\n' > "$WORKER_SEEN_FILE"
-  worker_unsee 7
-  run worker_is_seen 7
+@test "worker_is_completed returns false when no state file exists" {
+  run worker_is_completed "owner/repo" 42
   [[ "$status" -ne 0 ]]
+}
+
+@test "worker_is_completed returns true when state file has status done" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"done"}' > "${SIPAG_DIR}/workers/owner--repo--42.json"
+  run worker_is_completed "owner/repo" 42
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_is_completed returns false when state file has status running" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"running"}' > "${SIPAG_DIR}/workers/owner--repo--42.json"
+  run worker_is_completed "owner/repo" 42
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_is_in_flight returns false when no state file exists" {
+  run worker_is_in_flight "owner/repo" 7
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_is_in_flight returns true when state file has status running" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"running"}' > "${SIPAG_DIR}/workers/owner--repo--7.json"
+  run worker_is_in_flight "owner/repo" 7
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_is_in_flight returns false when state file has status done" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"done"}' > "${SIPAG_DIR}/workers/owner--repo--7.json"
+  run worker_is_in_flight "owner/repo" 7
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_is_failed returns false when no state file exists" {
+  run worker_is_failed "owner/repo" 99
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_is_failed returns true when state file has status failed" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"failed"}' > "${SIPAG_DIR}/workers/owner--repo--99.json"
+  run worker_is_failed "owner/repo" 99
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_is_failed returns false when state file has status done" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  echo '{"status":"done"}' > "${SIPAG_DIR}/workers/owner--repo--99.json"
+  run worker_is_failed "owner/repo" 99
+  [[ "$status" -ne 0 ]]
+}
+
+# --- worker_mark_state_done ---
+
+@test "worker_mark_state_done creates state file with done status when none exists" {
+  run worker_mark_state_done "owner/repo" 55
+  [[ "$status" -eq 0 ]]
+  local state_file="${SIPAG_DIR}/workers/owner--repo--55.json"
+  [[ -f "$state_file" ]]
+  [[ "$(jq -r '.status' "$state_file")" == "done" ]]
+}
+
+@test "worker_mark_state_done stores pr_num when provided" {
+  run worker_mark_state_done "owner/repo" 55 "123" "https://github.com/owner/repo/pull/123"
+  local state_file="${SIPAG_DIR}/workers/owner--repo--55.json"
+  [[ "$(jq -r '.pr_num' "$state_file")" == "123" ]]
+  [[ "$(jq -r '.pr_url' "$state_file")" == "https://github.com/owner/repo/pull/123" ]]
+}
+
+@test "worker_mark_state_done updates existing running state file to done" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  local state_file="${SIPAG_DIR}/workers/owner--repo--66.json"
+  echo '{"status":"running","pr_num":null,"pr_url":null,"ended_at":null}' > "$state_file"
+  run worker_mark_state_done "owner/repo" 66
+  [[ "$status" -eq 0 ]]
+  [[ "$(jq -r '.status' "$state_file")" == "done" ]]
+}
+
+@test "worker_mark_state_done: after marking done, worker_is_completed returns true" {
+  worker_mark_state_done "owner/repo" 77
+  run worker_is_completed "owner/repo" 77
+  [[ "$status" -eq 0 ]]
 }
 
 # --- worker_has_open_pr ---
@@ -562,8 +612,7 @@ GHEOF
   chmod +x "${TEST_TMPDIR}/bin/gh"
 
   # Initialize worker state without running the real worker_init (avoids gh auth call)
-  # worker_loop manages WORKER_SEEN_FILE per-repo; just ensure the seen dir exists
-  mkdir -p "${SIPAG_DIR}/seen"
+  mkdir -p "${SIPAG_DIR}/workers"
   WORKER_GH_TOKEN="test-token"
   WORKER_OAUTH_TOKEN=""
   WORKER_API_KEY=""
@@ -583,7 +632,7 @@ echo '[]'
 GHEOF
   chmod +x "${TEST_TMPDIR}/bin/gh"
 
-  mkdir -p "${SIPAG_DIR}/seen"
+  mkdir -p "${SIPAG_DIR}/workers"
   WORKER_GH_TOKEN="test-token"
   WORKER_OAUTH_TOKEN=""
   WORKER_API_KEY=""

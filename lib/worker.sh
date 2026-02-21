@@ -6,7 +6,8 @@
 #
 # This file is a thin loader. Implementation lives in lib/worker/:
 #   config.sh  — defaults, worker_load_config(), worker_init(), worker_slugify()
-#   dedup.sh   — worker_is_seen/mark_seen/unsee, worker_pr_is/mark_running/done
+#   dedup.sh   — state-file dedup (worker_is_completed/in_flight/failed,
+#                worker_mark_state_done), worker_pr_is/mark_running/done
 #   github.sh  — worker_has_pr/open_pr, find_prs_needing_iteration,
 #                worker_reconcile, worker_transition_label, sipag_run_hook
 #   merge.sh   — worker_auto_merge
