@@ -1,10 +1,9 @@
-use crate::app::App;
-use crate::task::Status;
+use crate::app::{App, TaskStatus};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
 
@@ -16,23 +15,21 @@ pub fn render_list(f: &mut Frame, app: &App) {
 
     // ── Table header ─────────────────────────────────────────────────────────
     let header = Row::new(vec![
-        Cell::from("ID"),
         Cell::from("St"),
-        Cell::from("Pri"),
         Cell::from("Repo"),
         Cell::from("Title"),
-        Cell::from("Age"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
     // ── Task rows ─────────────────────────────────────────────────────────────
+    let selected_idx = app.task_list_state.selected();
     let rows: Vec<Row> = app
         .tasks
         .iter()
         .enumerate()
         .map(|(i, task)| {
-            let style = if i == app.selected {
+            let style = if Some(i) == selected_idx {
                 Style::default()
                     .bg(Color::Blue)
                     .fg(Color::White)
@@ -41,23 +38,16 @@ pub fn render_list(f: &mut Frame, app: &App) {
                 Style::default()
             };
 
-            let pri = task
-                .priority
-                .as_deref()
-                .map(|p| match p {
-                    "high" => "H",
-                    "low" => "L",
-                    _ => "M",
-                })
-                .unwrap_or("-");
+            let repo_display = if task.repo.is_empty() {
+                "-"
+            } else {
+                task.repo.as_str()
+            };
 
             Row::new(vec![
-                Cell::from(format!("{}", task.id)),
-                Cell::from(task.status.icon()),
-                Cell::from(pri),
-                Cell::from(task.repo.as_deref().unwrap_or("-")),
+                Cell::from(task.status.symbol()),
+                Cell::from(repo_display.to_string()),
                 Cell::from(task.title.as_str()),
-                Cell::from(task.format_age()),
             ])
             .style(style)
             .height(1)
@@ -66,46 +56,25 @@ pub fn render_list(f: &mut Frame, app: &App) {
 
     // Column widths
     let widths = [
-        Constraint::Length(4),  // ID
         Constraint::Length(3),  // St
-        Constraint::Length(4),  // Pri
-        Constraint::Length(10), // Repo
+        Constraint::Length(14), // Repo
         Constraint::Min(20),    // Title
-        Constraint::Length(6),  // Age
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" sipag ")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .title(" sipag ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded),
+    );
 
-    f.render_widget(table, chunks[0]);
+    // Use a mutable clone of the table state for rendering (ratatui requires &mut)
+    let mut table_state = TableState::default();
+    table_state.select(selected_idx);
+    f.render_stateful_widget(table, chunks[0], &mut table_state);
 
     // ── Bottom bar ────────────────────────────────────────────────────────────
-    let pending = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Pending)
-        .count();
-    let running = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Running)
-        .count();
-    let done = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Done)
-        .count();
-    let failed = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Failed)
-        .count();
+    let (pending, running, done, failed) = app.task_counts();
 
     let legend = format!(
         "  · pending  ⧖ running  ✓ done  ✗ failed    {} tasks ({} pending, {} running, {} done, {} failed)",
@@ -115,11 +84,20 @@ pub fn render_list(f: &mut Frame, app: &App) {
         done,
         failed,
     );
-    let help = "  j/k:navigate  Enter:detail  q:quit";
 
-    let bottom = Paragraph::new(vec![Line::from(legend), Line::from(help)]).block(
-        Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
-    );
+    // Show attach hint when a running task is selected
+    let has_running_selected = selected_idx
+        .and_then(|i| app.tasks.get(i))
+        .is_some_and(|t| t.status == TaskStatus::Running);
+
+    let help = if has_running_selected {
+        "  j/k:navigate  a:attach  x:execute  r:retry  q:quit"
+    } else {
+        "  j/k:navigate  x:execute  r:retry  q:quit"
+    };
+
+    let bottom = Paragraph::new(vec![Line::from(legend), Line::from(help)])
+        .block(Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT));
 
     f.render_widget(bottom, chunks[1]);
 }
