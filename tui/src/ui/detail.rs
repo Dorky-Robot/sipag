@@ -7,6 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use sipag_core::worker::state::format_duration;
 
 pub fn render_detail(f: &mut Frame, app: &App) {
     if app.tasks.is_empty() {
@@ -35,10 +36,18 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     // ── Footer bar ────────────────────────────────────────────────────────────
-    let footer_text = match task.status {
-        Status::Running => " [Esc] back  [j/k] scroll  [a] attach  [q] quit",
-        Status::Failed => " [Esc] back  [j/k] scroll  [r] retry  [q] quit",
-        _ => " [Esc] back  [j/k] scroll  [q] quit",
+    let is_terminal = task.status == Status::Done || task.status == Status::Failed;
+    // Only task-file backed failed tasks support in-TUI retry.
+    let can_retry = task.status == Status::Failed && !task.file_path.as_os_str().is_empty();
+
+    let footer_text = if task.status == Status::Running {
+        " [Esc] back  [j/k] scroll  [a] attach  [q] quit"
+    } else if can_retry {
+        " [Esc] back  [j/k] scroll  [r] retry  [x] dismiss  [q] quit"
+    } else if is_terminal {
+        " [Esc] back  [j/k] scroll  [x] dismiss  [q] quit"
+    } else {
+        " [Esc] back  [j/k] scroll  [q] quit"
     };
     let footer = Paragraph::new(Line::from(footer_text))
         .style(Style::default().fg(Color::White).bg(Color::DarkGray));
@@ -70,10 +79,18 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         Span::styled("  Repo:     ", label_style),
         Span::raw(task.repo.as_deref().unwrap_or("-")),
     ]));
+
+    let status_style = match task.status {
+        Status::Queue => Style::default().fg(Color::Yellow),
+        Status::Running => Style::default().fg(Color::Cyan),
+        Status::Done => Style::default().fg(Color::Green),
+        Status::Failed => Style::default().fg(Color::Red),
+    };
     top_lines.push(Line::from(vec![
         Span::styled("  Status:   ", label_style),
-        Span::raw(task.status.name()),
+        Span::styled(task.status.name(), status_style),
     ]));
+
     top_lines.push(Line::from(vec![
         Span::styled("  Priority: ", label_style),
         Span::raw(task.priority.as_deref().unwrap_or("-")),
@@ -88,6 +105,66 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         Span::styled("  Added:    ", label_style),
         Span::raw(task.format_age()),
     ]));
+
+    // ── Extra metadata for done/failed archive tasks ──────────────────────────
+    if task.status == Status::Done {
+        // Duration
+        top_lines.push(Line::from(vec![
+            Span::styled("  Duration: ", label_style),
+            Span::raw(format_duration(task.duration_s)),
+        ]));
+
+        // Completion time (human age)
+        if task.ended_at.is_some() {
+            top_lines.push(Line::from(vec![
+                Span::styled("  Ended:    ", label_style),
+                Span::raw(format!("{} ago", task.format_ended_age())),
+            ]));
+        }
+
+        // PR info
+        if let Some(pr_num) = task.pr_num {
+            let pr_display = task
+                .pr_url
+                .as_deref()
+                .map(|url| format!("PR #{} — {}", pr_num, url))
+                .unwrap_or_else(|| format!("PR #{}", pr_num));
+            top_lines.push(Line::from(vec![
+                Span::styled("  PR:       ", label_style),
+                Span::styled(
+                    pr_display,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+            ]));
+        }
+    } else if task.status == Status::Failed {
+        // Duration
+        top_lines.push(Line::from(vec![
+            Span::styled("  Duration: ", label_style),
+            Span::raw(format_duration(task.duration_s)),
+        ]));
+
+        // Completion time (human age)
+        if task.ended_at.is_some() {
+            top_lines.push(Line::from(vec![
+                Span::styled("  Ended:    ", label_style),
+                Span::raw(format!("{} ago", task.format_ended_age())),
+            ]));
+        }
+
+        // Exit code
+        let exit_str = task
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        top_lines.push(Line::from(vec![
+            Span::styled("  Exit:     ", label_style),
+            Span::styled(exit_str, Style::default().fg(Color::Red)),
+        ]));
+    }
+
     top_lines.push(Line::from(""));
 
     // Description section.
