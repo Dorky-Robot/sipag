@@ -20,9 +20,22 @@ _start_show_worker_status() {
     done
 }
 
+# Ensure the standard sipag labels exist on a repo (idempotent — silently skips existing labels)
+_start_ensure_labels() {
+    local repo="$1"
+    gh label create "approved"    --repo "$repo" --color "0e8a16" --description "Ready for sipag work — greenlit for development"   >/dev/null 2>&1 || true
+    gh label create "in-progress" --repo "$repo" --color "fbca04" --description "Worker is actively building this — do not edit"    >/dev/null 2>&1 || true
+    gh label create "P0"          --repo "$repo" --color "b60205" --description "Critical — blocks everything"                      >/dev/null 2>&1 || true
+    gh label create "P1"          --repo "$repo" --color "e4e669" --description "Important — needed for the cycle"                  >/dev/null 2>&1 || true
+    gh label create "P2"          --repo "$repo" --color "0075ca" --description "Normal — nice to have soon"                       >/dev/null 2>&1 || true
+    gh label create "P3"          --repo "$repo" --color "bfd4f2" --description "Low — when we get to it"                          >/dev/null 2>&1 || true
+}
+
 # Print GitHub context for one repo (without the workflow prompt)
 _start_print_repo_context() {
     local repo="$1"
+
+    _start_ensure_labels "$repo"
 
     echo "=== sipag: loading context for ${repo} ==="
     echo ""
@@ -37,7 +50,17 @@ _start_print_repo_context() {
         --json number,title,body,reviewDecision,additions,deletions --limit 20
 
     echo ""
-    echo "## Labels"
+    echo "## Sipag Label Legend"
+    echo "| Label | Purpose |"
+    echo "|-------|---------|"
+    echo "| \`approved\`    | Gates worker pickup — label an issue here to queue it for a Docker worker |"
+    echo "| \`in-progress\` | Worker is actively building this — do not edit the issue while set |"
+    echo "| \`P0\`          | Critical — blocks everything; should be rare |"
+    echo "| \`P1\`          | Important — needed for the cycle |"
+    echo "| \`P2\`          | Normal — nice to have soon |"
+    echo "| \`P3\`          | Low — when we get to it |"
+    echo ""
+    echo "## Labels on this repo"
     gh label list --repo "${repo}" --json name,description --limit 100
 
     echo ""
