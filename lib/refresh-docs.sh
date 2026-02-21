@@ -99,7 +99,8 @@ refresh_docs_run() {
     prompt="${prompt//${_tpl_repo}/${repo}}"
 
     # Datestamped branch: multiple runs on the same day reuse the same branch
-    local branch="sipag/refresh-docs-$(date +%Y%m%d)"
+    local branch
+    branch="sipag/refresh-docs-$(date +%Y%m%d)"
     local image="${WORKER_IMAGE:-ghcr.io/dorky-robot/sipag-worker:latest}"
     local timeout_cmd="${WORKER_TIMEOUT_CMD:-}"
     local timeout="${WORKER_TIMEOUT:-1800}"

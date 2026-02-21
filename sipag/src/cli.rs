@@ -8,7 +8,7 @@ use sipag_core::{
     repo,
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
-    worker::{config::WorkerConfig, github::preflight_gh_auth, poll::run_worker_loop},
+    worker::{github::preflight_gh_auth, poll::run_worker_loop},
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -297,7 +297,7 @@ fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
-    let mut cfg = WorkerConfig::load(&dir);
+    let mut cfg = WorkerConfig::load(&dir)?;
     cfg.once = once;
 
     // Preflight checks.

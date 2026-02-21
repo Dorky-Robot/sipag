@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use super::config::WorkerConfig;
 use super::github;
 use super::ports::StateStore;
 use super::state::WorkerState;
 use super::status::WorkerStatus;
 use super::store::FileStateStore;
+use crate::config::WorkerConfig;
 use crate::task::slugify;
 
 // ── Prompt templates (embedded at compile time) ───────────────────────────────
@@ -246,7 +246,7 @@ pub fn dispatch_issue_worker(
         &pr_body,
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,
@@ -393,7 +393,7 @@ pub fn dispatch_pr_iteration(
         "",
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,
@@ -471,7 +471,7 @@ pub fn dispatch_conflict_fix(
         "",
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,

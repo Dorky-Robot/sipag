@@ -6,11 +6,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 
-use super::config::WorkerConfig;
 use super::decision::decide_issue_action;
 use super::dispatch::{
     dispatch_conflict_fix, dispatch_issue_worker, dispatch_pr_iteration, is_container_running,
@@ -24,6 +22,7 @@ use super::recovery::recover_and_finalize;
 use super::status::WorkerStatus;
 use super::store::FileStateStore;
 use crate::auth;
+use crate::config::WorkerConfig;
 
 /// Entry point for `sipag work`.
 ///
@@ -38,7 +37,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     }
     println!("Label: {}", cfg.work_label);
     println!("Batch size: {}", cfg.batch_size);
-    println!("Poll interval: {}s", cfg.poll_interval);
+    println!("Poll interval: {}s", cfg.poll_interval.as_secs());
     println!("Logs: {}/logs/", sipag_dir.display());
     println!(
         "Started: {}",
@@ -272,8 +271,12 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             break;
         }
 
-        println!("[{}] Next poll in {}s...", hms(), cfg.poll_interval);
-        thread::sleep(Duration::from_secs(cfg.poll_interval));
+        println!(
+            "[{}] Next poll in {}s...",
+            hms(),
+            cfg.poll_interval.as_secs()
+        );
+        thread::sleep(cfg.poll_interval);
     }
 
     Ok(())

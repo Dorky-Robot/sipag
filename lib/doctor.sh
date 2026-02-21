@@ -128,15 +128,15 @@ doctor_run() {
 	echo "sipag:"
 
 	if [[ -d "${SIPAG_DIR}" ]]; then
-		_doctor_ok "~/.sipag/ directory exists"
+		_doctor_ok "$HOME/.sipag/ directory exists"
 	else
-		_doctor_err "~/.sipag/ directory missing"
+		_doctor_err "$HOME/.sipag/ directory missing"
 		printf "\n      To fix, run:  sipag setup\n\n"
 	fi
 
 	local subdir missing_dirs
 	missing_dirs=()
-	for subdir in queue running done failed; do
+	for subdir in queue running "done" failed; do
 		if [[ ! -d "${SIPAG_DIR}/${subdir}" ]]; then
 			missing_dirs+=("$subdir")
 		fi

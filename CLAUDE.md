@@ -178,8 +178,8 @@ The pre-push hook runs the full test suite automatically (installed via `make in
 
 Hooks are the sole quality gate. Code that gets pushed is already validated.
 
-**Pre-commit** (fast, ~15s): gitleaks secrets scan, typos spell check, cargo deny CVE
-check, cargo fmt, cargo clippy, shellcheck.
+**Pre-commit** (~1 min): gitleaks secrets scan, typos spell check, cargo deny CVE
+check, **cargo build --release**, cargo fmt, cargo clippy, shellcheck.
 
 **Pre-push** (~2-3 min): cargo test --workspace (blocking), cargo machete (warning),
 gitleaks final scan (blocking).
