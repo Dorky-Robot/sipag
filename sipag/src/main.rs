@@ -1,4 +1,5 @@
 mod cli;
+mod completions;
 
 use clap::Parser;
 

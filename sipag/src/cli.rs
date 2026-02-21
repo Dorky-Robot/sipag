@@ -103,6 +103,12 @@ pub enum Commands {
     /// Show queue state across all directories
     Status,
 
+    /// Print shell completion scripts for bash, zsh, or fish
+    Completions {
+        /// Shell type: bash, zsh, or fish
+        shell: String,
+    },
+
     /// Print version
     Version,
 
@@ -143,6 +149,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
             println!("sipag {VERSION}");
             Ok(())
@@ -516,6 +523,17 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_completions(shell: &str) -> Result<()> {
+    let script = match shell {
+        "bash" => crate::completions::BASH,
+        "zsh" => crate::completions::ZSH,
+        "fish" => crate::completions::FISH,
+        _ => bail!("Unknown shell '{shell}'. Use: bash, zsh, or fish"),
+    };
+    print!("{script}");
+    Ok(())
 }
 
 fn cmd_status() -> Result<()> {
