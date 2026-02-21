@@ -1,8 +1,28 @@
 #!/usr/bin/env bash
 # sipag — start: gather GitHub context and prime a Claude Code session
 
-start_run() {
-    local repo="${1:?Usage: sipag start <owner/repo>}"
+SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
+
+# Display current worker status from ~/.sipag/workers/*.json
+_start_show_worker_status() {
+    local workers_dir="${SIPAG_DIR}/workers"
+    [[ -d "$workers_dir" ]] || return 0
+
+    local printed_header=0
+    local f
+    for f in "${workers_dir}"/*.json; do
+        [[ -f "$f" ]] || continue
+        if [[ $printed_header -eq 0 ]]; then
+            echo "## Worker Status"
+            printed_header=1
+        fi
+        jq -r '"  [\(.status)] #\(.issue_num): \(.issue_title) [\(.repo)]"' "$f" 2>/dev/null
+    done
+}
+
+# Print GitHub context for one repo (without the workflow prompt)
+_start_print_repo_context() {
+    local repo="$1"
 
     echo "=== sipag: loading context for ${repo} ==="
     echo ""
@@ -29,7 +49,52 @@ start_run() {
     echo "## Repository Structure"
     gh api "repos/${repo}/git/trees/HEAD?recursive=1" \
         --jq '[.tree[].path]' 2>/dev/null | head -200
+}
 
+# Gather context from all repos in repos.conf and combine into one session
+start_run_all() {
+    local conf="${SIPAG_DIR}/repos.conf"
+
+    if [[ ! -f "$conf" ]]; then
+        echo "Error: No repos registered. Use: sipag repo add <name> <url>"
+        return 1
+    fi
+
+    local -a repos=()
+    local name url
+    while IFS='=' read -r name url; do
+        name="${name// /}"
+        url="${url// /}"
+        [[ -z "$name" || "$name" == \#* ]] && continue
+        url="${url%.git}"
+        url="${url#https://github.com/}"
+        repos+=("$url")
+    done < "$conf"
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        echo "Error: repos.conf is empty. Use: sipag repo add <name> <url>"
+        return 1
+    fi
+
+    echo "=== sipag: loading context for ${#repos[@]} repos: ${repos[*]} ==="
+    echo ""
+
+    local repo
+    for repo in "${repos[@]}"; do
+        _start_print_repo_context "$repo"
+        echo ""
+        echo "---"
+        echo ""
+    done
+
+    _start_show_worker_status
+    echo ""
+    cat "${SIPAG_ROOT}/lib/prompts/start.md"
+}
+
+start_run() {
+    local repo="${1:?Usage: sipag start <owner/repo>}"
+    _start_print_repo_context "$repo"
     echo ""
     cat "${SIPAG_ROOT}/lib/prompts/start.md"
 }
