@@ -16,7 +16,7 @@ ${prs_json}
 3. Based on answers, propose a merge plan:
    - Which PRs to merge and in what order
    - Which PRs to skip and why (conflicts, missing reviews, risky changes)
-   - Which PRs need adjustments first (rebase, failing CI, etc.)
+   - Which PRs need adjustments first (failing CI, conflicts to resolve, etc.)
 4. When the human agrees, execute the merges serially
 5. Handle failures: if a merge fails (conflict, CI), report it and move on
 6. After merging, clean up: close stale PRs, report what landed
@@ -25,8 +25,7 @@ ${prs_json}
 - Check PR details: `gh pr view N --repo REPO --json ...`
 - Check CI status: `gh pr checks N --repo REPO`
 - Fetch diffs for review: `gh pr diff N --repo REPO`
-- Merge with rebase: `gh pr merge N --repo REPO --rebase --delete-branch`
-- Squash merge: `gh pr merge N --repo REPO --squash --delete-branch`
+- Squash merge (default): `gh pr merge N --repo REPO --squash --delete-branch`
 - Close stale PRs: `gh pr close N --repo REPO --comment "reason"`
 - Request changes: `gh pr review N --repo REPO --request-changes --body "..."`
 

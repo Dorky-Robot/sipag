@@ -5,8 +5,17 @@ set -euo pipefail
 
 SIPAG_VERSION="2.0.0"
 
-# Resolve project root
-SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Resolve project root — follows symlinks so Homebrew installs work correctly.
+# Works from both dev checkout (script in bin/) and any installed location
+# (e.g. Homebrew symlinks /usr/local/bin/sipag → prefix/bin/sipag).
+_sipag_script="${BASH_SOURCE[0]}"
+while [[ -L "$_sipag_script" ]]; do
+	_sipag_dir="$(cd "$(dirname "$_sipag_script")" && pwd)"
+	_sipag_script="$(readlink "$_sipag_script")"
+	[[ "$_sipag_script" = /* ]] || _sipag_script="${_sipag_dir}/${_sipag_script}"
+done
+SIPAG_ROOT="$(cd "$(dirname "$_sipag_script")/.." && pwd)"
+unset _sipag_script _sipag_dir
 
 # Source libraries
 # shellcheck source=../lib/worker.sh
@@ -35,6 +44,7 @@ Usage:
   sipag work [<owner/repo>] [--once]   Pick up approved issues, code in Docker (all repos if omitted)
   sipag drain                          Signal workers to finish current batch and exit
   sipag resume                         Clear drain signal so workers continue polling
+  sipag status                         Show worker state across all repos
   sipag merge <owner/repo>             Conversational PR merge session
   sipag setup                          Configure sipag and Claude Code permissions
   sipag version                        Print version
@@ -133,6 +143,59 @@ cmd_resume() {
 	echo "Drain signal cleared. Workers will continue polling."
 }
 
+cmd_status() {
+	local workers_dir="${SIPAG_DIR}/workers"
+	if [[ ! -d "$workers_dir" ]] || [[ -z "$(ls -A "$workers_dir" 2>/dev/null)" ]]; then
+		echo "No workers found. Run 'sipag work <owner/repo>' to start."
+		return 0
+	fi
+
+	# Interactive terminal: launch TUI if available
+	if [[ -t 1 ]] && command -v sipag-tui &>/dev/null; then
+		exec sipag-tui
+	fi
+
+	# Plain text table (piped output or TUI not installed)
+	printf "%-24s %-7s %-9s %-10s %s\n" "REPO" "ISSUE" "STATUS" "DURATION" "BRANCH"
+
+	local running=0 done_count=0 failed=0
+	for f in "$workers_dir"/*.json; do
+		[[ -f "$f" ]] || continue
+		local repo issue_num status duration_s branch pr_num display_branch duration
+		repo=$(jq -r '.repo // ""' "$f")
+		issue_num=$(jq -r '.issue_num // ""' "$f")
+		status=$(jq -r '.status // ""' "$f")
+		duration_s=$(jq -r 'if .duration_s != null then (.duration_s | tostring) else "" end' "$f")
+		branch=$(jq -r '.branch // ""' "$f")
+		pr_num=$(jq -r 'if .pr_num != null then (.pr_num | tostring) else "" end' "$f")
+
+		# Format duration
+		duration="-"
+		if [[ -n "$duration_s" && "$duration_s" =~ ^[0-9]+$ ]]; then
+			duration="$(( duration_s / 60 ))m$(( duration_s % 60 ))s"
+		fi
+
+		# Format branch/PR column
+		if [[ "$status" == "done" && -n "$pr_num" ]]; then
+			display_branch="PR #${pr_num}"
+		else
+			display_branch="$branch"
+		fi
+
+		case "$status" in
+			running) running=$(( running + 1 )) ;;
+			done)    done_count=$(( done_count + 1 )) ;;
+			failed)  failed=$(( failed + 1 )) ;;
+		esac
+
+		printf "%-24s %-7s %-9s %-10s %s\n" \
+			"$repo" "#${issue_num}" "$status" "$duration" "$display_branch"
+	done
+
+	echo ""
+	echo "${running} running · ${done_count} done · ${failed} failed"
+}
+
 cmd_merge() {
 	local repo="${1:?Usage: sipag merge <owner/repo>}"
 	merge_run "$repo"
@@ -179,6 +242,10 @@ main() {
 			;;
 		resume)
 			command="resume"
+			shift
+			;;
+		status)
+			command="status"
 			shift
 			;;
 		merge)
@@ -230,6 +297,7 @@ main() {
 	work) cmd_work "$work_repo" ;;
 	drain) cmd_drain ;;
 	resume) cmd_resume ;;
+	status) cmd_status ;;
 	merge) cmd_merge "$merge_repo" ;;
 	esac
 }

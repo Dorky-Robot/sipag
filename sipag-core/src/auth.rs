@@ -46,4 +46,3 @@ pub fn preflight_auth(sipag_dir: &Path) -> Result<()> {
         sipag_dir.display()
     )
 }
-

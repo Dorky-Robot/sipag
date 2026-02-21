@@ -520,35 +520,44 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
 
 fn cmd_status() -> Result<()> {
     let dir = sipag_dir();
-    let labels = [
-        ("Queue", "queue"),
-        ("Running", "running"),
-        ("Done", "done"),
-        ("Failed", "failed"),
-    ];
+    let workers = sipag_core::worker::list_workers(&dir)?;
 
-    for (label, subdir) in &labels {
-        let d = dir.join(subdir);
-        if !d.exists() {
-            continue;
-        }
-        let mut items: Vec<String> = fs::read_dir(&d)
-            .unwrap_or_else(|_| fs::read_dir("/dev/null").unwrap())
-            .flatten()
-            .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
+    if workers.is_empty() {
+        println!("No workers found. Run 'sipag work <owner/repo>' to start.");
+        return Ok(());
+    }
 
-        if items.is_empty() {
-            continue;
-        }
+    println!(
+        "{:<24} {:<7} {:<9} {:<10} BRANCH",
+        "REPO", "ISSUE", "STATUS", "DURATION"
+    );
 
-        items.sort();
-        println!("{} ({}):", label, items.len());
-        for item in &items {
-            println!("  {item}");
+    let mut running = 0usize;
+    let mut done = 0usize;
+    let mut failed = 0usize;
+
+    for w in &workers {
+        let duration = sipag_core::worker::format_worker_duration(w.duration_s);
+        let branch_col = sipag_core::worker::branch_display(w);
+
+        println!(
+            "{:<24} {:<7} {:<9} {:<10} {}",
+            w.repo,
+            format!("#{}", w.issue_num),
+            w.status,
+            duration,
+            branch_col,
+        );
+
+        match w.status.as_str() {
+            "running" => running += 1,
+            "done" => done += 1,
+            "failed" => failed += 1,
+            _ => {}
         }
     }
+
+    println!("\n{} running · {} done · {} failed", running, done, failed);
 
     Ok(())
 }
