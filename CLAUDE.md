@@ -169,7 +169,29 @@ make dev       # fmt + lint + test (recommended before pushing)
 make test      # cargo test only
 ```
 
-The pre-push hook runs `make dev` automatically (installed via `make install-hooks`).
+The pre-push hook runs the full test suite automatically (installed via `make install-hooks`).
+
+### Quality gates — git hooks
+
+Hooks are the sole quality gate. Code that gets pushed is already validated.
+
+**Pre-commit** (fast, ~15s): gitleaks secrets scan, typos spell check, cargo deny CVE
+check, cargo fmt, cargo clippy, shellcheck.
+
+**Pre-push** (~2-3 min): cargo test --workspace (blocking), cargo machete (warning),
+gitleaks final scan (blocking).
+
+Install once after cloning:
+
+```bash
+make install-hooks
+```
+
+#### Rules
+
+- **Never use `--no-verify`**. Fix the issue instead.
+- Run `make dev` (fmt + clippy + test) before opening or updating PRs.
+- Tests must pass before push.
 
 ### Part of the dorky robot stack
 

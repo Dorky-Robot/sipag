@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
-# secrets-scan.sh — scan commits being pushed for potential secrets
+# secrets-scan.sh — shared gitleaks wrapper for git hooks
 #
-# Called by the pre-push hook.  When run as a git hook, stdin carries:
-#   <local-ref> <local-sha1> <remote-ref> <remote-sha1>
-# When run standalone (e.g. make secrets-scan), it scans HEAD against the
-# upstream tracking branch, or all tracked files if no upstream is set.
+# Prefers gitleaks (600+ patterns + entropy analysis) when installed.
+# Falls back to built-in grep patterns for environments without gitleaks.
+#
+# Called by pre-commit and pre-push hooks.
 #
 # Exit codes:
 #   0  — clean, nothing found
-#   1  — at least one secret pattern matched (push blocked)
+#   1  — secrets detected (push/commit blocked)
 
 set -euo pipefail
+
+# ── Use gitleaks when available ───────────────────────────────────────────────
+if command -v gitleaks >/dev/null 2>&1; then
+    # Pass-through any extra args (e.g. --no-banner --verbose)
+    exec gitleaks git --no-banner --verbose "$@"
+fi
+
+# ── Fallback: grep-based pattern scan ────────────────────────────────────────
+echo "  NOTE  gitleaks not installed — using built-in pattern scan (limited coverage)" >&2
+echo "  NOTE  Install gitleaks for full 600+ pattern coverage: https://github.com/gitleaks/gitleaks#installing" >&2
 
 # ── Patterns ─────────────────────────────────────────────────────────────────
 # Each entry is an extended-regex fragment searched with grep -E.
