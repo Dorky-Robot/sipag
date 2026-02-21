@@ -44,13 +44,14 @@ worker_init() {
     command -v gtimeout &>/dev/null && WORKER_TIMEOUT_CMD="gtimeout"
     command -v "$WORKER_TIMEOUT_CMD" &>/dev/null || WORKER_TIMEOUT_CMD=""
 
-    # Load credentials
-    if [[ ! -f "${SIPAG_DIR}/token" ]]; then
-        echo "Error: no token found at ${SIPAG_DIR}/token"
-        echo "Run: claude setup-token && cp ~/.claude/token ${SIPAG_DIR}/token"
-        return 1
+    # Load credentials: token file takes priority, ANTHROPIC_API_KEY is fallback
+    WORKER_OAUTH_TOKEN=""
+    WORKER_API_KEY=""
+    if [[ -s "${SIPAG_DIR}/token" ]]; then
+        WORKER_OAUTH_TOKEN=$(cat "${SIPAG_DIR}/token")
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        WORKER_API_KEY="${ANTHROPIC_API_KEY}"
     fi
-    WORKER_OAUTH_TOKEN=$(cat "${SIPAG_DIR}/token")
     WORKER_GH_TOKEN=$(gh auth token)
 }
 
@@ -230,7 +231,8 @@ Instructions:
 
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
-        -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
         -e PROMPT \
         -e BRANCH \
@@ -318,7 +320,8 @@ Instructions:
 
     PROMPT="$prompt" BRANCH="$branch_name" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
-        -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
         -e PROMPT \
         -e BRANCH \

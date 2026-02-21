@@ -24,6 +24,8 @@ source "${SIPAG_ROOT}/lib/setup.sh"
 source "${SIPAG_ROOT}/lib/start.sh"
 # shellcheck source=../lib/merge.sh
 source "${SIPAG_ROOT}/lib/merge.sh"
+# shellcheck source=../lib/preflight.sh
+source "${SIPAG_ROOT}/lib/preflight.sh"
 
 # --- Defaults ---
 
@@ -127,6 +129,8 @@ cmd_add() {
 
 cmd_start() {
 	local repo="${1:?Usage: sipag start <owner/repo>}"
+	preflight_gh_auth || return 1
+	preflight_repo "$repo" || return 1
 	start_run "$repo"
 }
 
@@ -137,6 +141,10 @@ cmd_setup() {
 cmd_work() {
 	local repo="${1:?Usage: sipag work <owner/repo>}"
 	worker_load_config
+	preflight_auth || return 1
+	preflight_docker_running || return 1
+	preflight_docker_image "${WORKER_IMAGE}" || return 1
+	preflight_gh_auth || return 1
 	worker_init
 	worker_loop "$repo"
 }
