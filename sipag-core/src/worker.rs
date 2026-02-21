@@ -15,20 +15,28 @@
 //!
 //! Configuration lives in `crate::config::WorkerConfig` (not in this module).
 
-pub mod decision;
-pub mod dedup;
-pub mod dispatch;
-pub mod github;
+pub(crate) mod decision;
+pub(crate) mod dispatch;
+pub(crate) mod github;
 pub mod poll;
-pub mod ports;
-pub mod recovery;
+pub(crate) mod ports;
+pub(crate) mod recovery;
 pub mod state;
-pub mod status;
-pub mod store;
+pub(crate) mod status;
+pub(crate) mod store;
 
-// Re-export core types for backward compatibility.
+// Re-export public API — only what external crates actually use.
+pub use poll::run_worker_loop;
 pub use state::{branch_display, format_duration as format_worker_duration, WorkerState};
 pub use status::WorkerStatus;
 pub use store::{
     list_all_workers as list_workers, mark_worker_failed_by_container as mark_worker_failed,
 };
+
+/// Check that `gh` CLI is authenticated and can reach the GitHub API.
+///
+/// Thin wrapper so external crates don't need to reach into the internal
+/// `github` submodule.
+pub fn preflight_gh_auth() -> anyhow::Result<()> {
+    github::preflight_gh_auth()
+}

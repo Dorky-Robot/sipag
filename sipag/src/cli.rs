@@ -8,7 +8,7 @@ use sipag_core::{
     repo,
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
-    worker::{github::preflight_gh_auth, poll::run_worker_loop},
+    worker::{preflight_gh_auth, run_worker_loop},
 };
 use std::fs;
 use std::path::{Path, PathBuf};
