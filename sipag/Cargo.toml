@@ -5,7 +5,7 @@ edition = "2021"
 description = "Sandbox launcher for Claude Code — single binary with CLI and TUI"
 
 [[bin]]
-name = "sipag"
+name = "sipag-cli"
 path = "src/main.rs"
 
 [dependencies]

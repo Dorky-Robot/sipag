@@ -1,10 +1,32 @@
-.PHONY: build install test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness
+.PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness
+
+SHARE_DIR ?= $(HOME)/.sipag/share
+BIN_DIR   ?= $(HOME)/.cargo/bin
 
 build:
 	cargo build --release
 
 install:
+	@# Rust binaries (sipag-cli for container management, sipag-tui for TUI)
 	cargo install --path sipag
+	cargo install --path tui
+	@# Bash scripts to share prefix
+	@mkdir -p "$(SHARE_DIR)/bin" "$(SHARE_DIR)/lib/worker" "$(SHARE_DIR)/lib/prompts"
+	@install -m 755 bin/sipag "$(SHARE_DIR)/bin/sipag"
+	@install -m 644 lib/*.sh "$(SHARE_DIR)/lib/"
+	@install -m 644 lib/worker/*.sh "$(SHARE_DIR)/lib/worker/"
+	@install -m 644 lib/prompts/*.md "$(SHARE_DIR)/lib/prompts/"
+	@# sipag on PATH → bash entry point (the primary command)
+	@ln -sf "$(SHARE_DIR)/bin/sipag" "$(BIN_DIR)/sipag"
+	@echo ""
+	@echo "sipag installed. Try: sipag status"
+
+uninstall:
+	@rm -f "$(BIN_DIR)/sipag"
+	@rm -rf "$(SHARE_DIR)"
+	@cargo uninstall sipag-cli 2>/dev/null || true
+	@cargo uninstall sipag-tui 2>/dev/null || true
+	@echo "sipag uninstalled."
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 test:
