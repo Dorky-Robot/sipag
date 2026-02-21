@@ -138,6 +138,40 @@ _worker_finalize_gone_container() {
     fi
 }
 
+# Prune terminal state files (status: done or failed) older than WORKER_STATE_MAX_AGE_DAYS.
+#
+# Called once at startup before worker_recover() so stale state from old/irrelevant
+# repos does not accumulate forever. Only terminal states (done/failed) are pruned;
+# active states (enqueued/running/recovering) are never deleted automatically.
+#
+# Age is determined by the file's mtime. The threshold defaults to 7 days and is
+# configurable via SIPAG_STATE_MAX_AGE_DAYS or the state_max_age_days= config key.
+worker_prune_state_files() {
+    local workers_dir="${SIPAG_DIR}/workers"
+    [[ -d "$workers_dir" ]] || return 0
+
+    local max_age_days="${WORKER_STATE_MAX_AGE_DAYS:-7}"
+    local pruned=0
+
+    for state_file in "${workers_dir}"/*.json; do
+        [[ -f "$state_file" ]] || continue
+
+        local status
+        status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
+        # Only prune terminal states — never touch active entries
+        [[ "$status" == "done" || "$status" == "failed" ]] || continue
+
+        # Check file age using find -mtime; +N means "older than N days"
+        if [[ -n "$(find "$state_file" -mtime "+${max_age_days}" 2>/dev/null)" ]]; then
+            rm -f "$state_file"
+            pruned=$(( pruned + 1 ))
+        fi
+    done
+
+    [[ $pruned -gt 0 ]] && echo "[$(date +%H:%M:%S)] Pruned ${pruned} terminal state file(s) older than ${max_age_days} days"
+    return 0
+}
+
 # Recover orphaned worker state files on startup.
 #
 # Scans ~/.sipag/workers/*.json for entries with status "running" or
@@ -156,6 +190,9 @@ _worker_finalize_gone_container() {
 worker_recover() {
     local workers_dir="${SIPAG_DIR}/workers"
     [[ -d "$workers_dir" ]] || return 0
+
+    # Prune old terminal state files first so they don't pollute recovery output
+    worker_prune_state_files
 
     local adopted=0 finalized=0
 
@@ -199,8 +236,7 @@ worker_recover() {
             continue
         fi
 
-        if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
-                | grep -q "^${container_name}$"; then
+        if [[ -n "$(docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
             # Container still running: leave as "running", finalize_exited will catch it
             echo "[$(date +%H:%M:%S)] Recovery: container ${container_name} still running (#${issue_num}) — will finalize when it exits"
 
@@ -279,8 +315,7 @@ worker_finalize_exited() {
         fi
 
         # Container still alive → skip, it's still working
-        if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
-                | grep -q "^${container_name}$"; then
+        if [[ -n "$(docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null)" ]]; then
             continue
         fi
 
