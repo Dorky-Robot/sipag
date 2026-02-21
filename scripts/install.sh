@@ -5,6 +5,7 @@ set -euo pipefail
 
 REPO="Dorky-Robot/sipag"
 INSTALL_DIR="${SIPAG_INSTALL_DIR:-/usr/local/bin}"
+SHARE_DIR="${SIPAG_SHARE_DIR:-/usr/local/share/sipag}"
 
 # ── Detect OS ─────────────────────────────────────────────────────────────────
 
@@ -62,23 +63,49 @@ curl -fsSL -o "${tmpdir}/${archive}" "$download_url"
 tar -xzf "${tmpdir}/${archive}" -C "$tmpdir"
 extracted_dir="${tmpdir}/sipag-${version}-${target}"
 
-# ── Install binary ────────────────────────────────────────────────────────────
+# ── Install bash scripts to share prefix ─────────────────────────────────────
+#
+# Layout: ${SHARE_DIR}/
+#   bin/sipag          — main bash CLI script
+#   lib/               — library files sourced by bin/sipag
+#   lib/worker/        — worker submodule scripts
 
-if [ -w "$INSTALL_DIR" ]; then
-  install -m 755 "${extracted_dir}/sipag" "${INSTALL_DIR}/sipag"
+_install() {
+  if [ -w "$(dirname "$2")" ]; then
+    install "$@"
+  else
+    sudo install "$@"
+  fi
+}
+
+_mkdir() {
+  if [ -w "$(dirname "$1")" ] 2>/dev/null || [ -d "$1" ]; then
+    mkdir -p "$1"
+  else
+    sudo mkdir -p "$1"
+  fi
+}
+
+echo "Installing bash scripts to ${SHARE_DIR}..."
+_mkdir "${SHARE_DIR}/bin"
+_mkdir "${SHARE_DIR}/lib/worker"
+_mkdir "${SHARE_DIR}/lib/prompts"
+
+_install -m 755 "${extracted_dir}/bin/sipag"    "${SHARE_DIR}/bin/sipag"
+_install -m 644 "${extracted_dir}"/lib/*.sh      "${SHARE_DIR}/lib/"
+_install -m 644 "${extracted_dir}"/lib/worker/*.sh "${SHARE_DIR}/lib/worker/"
+_install -m 644 "${extracted_dir}"/lib/prompts/*.md "${SHARE_DIR}/lib/prompts/"
+
+# ── Symlink bin/sipag → share prefix ─────────────────────────────────────────
+
+echo "Creating symlink ${INSTALL_DIR}/sipag → ${SHARE_DIR}/bin/sipag..."
+_mkdir "${INSTALL_DIR}"
+
+if [ -w "${INSTALL_DIR}" ]; then
+  ln -sf "${SHARE_DIR}/bin/sipag" "${INSTALL_DIR}/sipag"
 else
-  echo "Installing to ${INSTALL_DIR} (requires sudo)..."
-  sudo install -m 755 "${extracted_dir}/sipag" "${INSTALL_DIR}/sipag"
+  sudo ln -sf "${SHARE_DIR}/bin/sipag" "${INSTALL_DIR}/sipag"
 fi
-
-# ── Install bash scripts ──────────────────────────────────────────────────────
-
-SIPAG_DIR="${HOME}/.sipag"
-mkdir -p "${SIPAG_DIR}/bin" "${SIPAG_DIR}/lib/prompts"
-
-install -m 755 "${extracted_dir}/bin/sipag" "${SIPAG_DIR}/bin/sipag"
-install -m 644 "${extracted_dir}"/lib/*.sh "${SIPAG_DIR}/lib/"
-install -m 644 "${extracted_dir}"/lib/prompts/*.md "${SIPAG_DIR}/lib/prompts/"
 
 # ── PATH reminder ─────────────────────────────────────────────────────────────
 
@@ -95,7 +122,15 @@ fi
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 echo ""
-echo "sipag ${version} installed to ${INSTALL_DIR}/sipag"
+echo "sipag ${version} installed."
+echo "  scripts: ${SHARE_DIR}"
+echo "  command: ${INSTALL_DIR}/sipag"
+echo ""
+echo "Prerequisites (install separately if not present):"
+echo "  jq        — brew install jq / apt install jq"
+echo "  gh        — brew install gh / https://cli.github.com"
+echo "  Docker    — https://www.docker.com/products/docker-desktop"
+echo "  Claude Code — npm install -g @anthropic-ai/claude-code"
 echo ""
 echo "Next step:"
 echo "  sipag setup"
