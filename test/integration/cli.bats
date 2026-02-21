@@ -197,6 +197,19 @@ EOF
   assert_output_contains "SIPAG_FILE"
 }
 
+@test "help: documents --once flag" {
+  run "${SIPAG_ROOT}/bin/sipag" help
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "--once"
+}
+
+@test "--once: flag is recognized (not 'Unknown flag')" {
+  # --once with no repo arg will fail at the "Usage: sipag work <owner/repo>"
+  # check, not at flag parsing. The important thing is it does NOT say "Unknown flag".
+  run "${SIPAG_ROOT}/bin/sipag" work --once
+  assert_output_not_contains "Unknown flag"
+}
+
 # --- -f flag ---
 
 @test "-f flag: uses custom file path" {

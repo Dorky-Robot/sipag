@@ -1,0 +1,81 @@
+name: Integration Test (E2E Worker)
+
+# Runs the full end-to-end test: GitHub issue → sipag worker → PR opened.
+# This test uses real Docker, real Claude API calls, and a real GitHub repo,
+# so it is intentionally not run on every PR.
+#
+# Triggers:
+#   - Weekly schedule (Saturday 02:00 UTC)
+#   - Manual dispatch (for ad-hoc runs or before releases)
+#
+# Required secrets:
+#   ANTHROPIC_API_KEY  — Claude API key for worker containers
+#   E2E_GH_TOKEN       — GitHub PAT with repo + issues + pull_requests scopes
+#                        for Dorky-Robot/sipag-test-target
+#                        (GITHUB_TOKEN is scoped to this repo only, not the test repo)
+
+on:
+  schedule:
+    - cron: '0 2 * * 6'   # Saturday 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Test target repo (owner/repo)'
+        required: false
+        default: 'Dorky-Robot/sipag-test-target'
+      image:
+        description: 'Worker Docker image (leave blank for default)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: End-to-end worker test
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    env:
+      SIPAG_E2E_REPO: ${{ github.event.inputs.repo || 'Dorky-Robot/sipag-test-target' }}
+      SIPAG_IMAGE: ${{ github.event.inputs.image || 'ghcr.io/dorky-robot/sipag-worker:latest' }}
+      # Credentials for the worker containers
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # GH_TOKEN used by gh CLI on the runner (issues, PR verification)
+      GH_TOKEN: ${{ secrets.E2E_GH_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up gh CLI auth
+        run: |
+          echo "${{ secrets.E2E_GH_TOKEN }}" | gh auth login --with-token
+
+      - name: Pull worker Docker image
+        run: docker pull "${SIPAG_IMAGE}"
+
+      - name: Create sipag config directory
+        run: |
+          mkdir -p ~/.sipag
+          # Write Claude API key as token file so worker_init picks it up
+          # (ANTHROPIC_API_KEY env var is the fallback, but token file is preferred)
+          echo "${ANTHROPIC_API_KEY}" > ~/.sipag/token
+          chmod 600 ~/.sipag/token
+
+      - name: Verify test repo is accessible
+        run: gh repo view "${SIPAG_E2E_REPO}"
+
+      - name: Run end-to-end integration test
+        run: |
+          chmod +x test/integration/e2e-worker.sh
+          test/integration/e2e-worker.sh
+
+      - name: Upload worker logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sipag-worker-logs
+          path: /tmp/sipag-backlog/
+          retention-days: 7

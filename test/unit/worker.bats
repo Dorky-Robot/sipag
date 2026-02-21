@@ -334,3 +334,52 @@ HOOK
   done
   grep -q "worker.started" "$output_file"
 }
+
+# --- WORKER_ONCE ---
+
+@test "WORKER_ONCE defaults to 0" {
+  [[ "$WORKER_ONCE" == "0" ]]
+}
+
+@test "worker_loop --once: exits after cycle with no work" {
+  # Mock gh to return empty results for all calls
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+# Return empty JSON array for all gh calls (no issues, no PRs)
+echo '[]'
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  # Initialize worker state without running the real worker_init (avoids gh auth call)
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  touch "$WORKER_SEEN_FILE"
+  WORKER_GH_TOKEN="test-token"
+  WORKER_OAUTH_TOKEN=""
+  WORKER_API_KEY=""
+  WORKER_TIMEOUT_CMD=""
+  WORKER_ONCE=1
+
+  # worker_loop should exit after one cycle (no infinite sleep)
+  run worker_loop "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "--once"
+}
+
+@test "worker_loop --once flag: --once message appears in output" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+echo '[]'
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  touch "$WORKER_SEEN_FILE"
+  WORKER_GH_TOKEN="test-token"
+  WORKER_OAUTH_TOKEN=""
+  WORKER_API_KEY=""
+  WORKER_TIMEOUT_CMD=""
+  WORKER_ONCE=1
+
+  run worker_loop "owner/repo"
+  assert_output_contains "--once:"
+}
