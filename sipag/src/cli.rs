@@ -1,15 +1,17 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
+    config::WorkerConfig,
     executor::{self, RunConfig},
     init,
     prompt::{format_duration, generate_task_id},
     repo,
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
+    worker::{config::WorkerConfig, github::preflight_gh_auth, poll::run_worker_loop},
 };
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -29,6 +31,52 @@ pub struct Cli {
 pub enum Commands {
     /// Launch the interactive TUI (default when no args given)
     Tui,
+
+    /// Poll GitHub for approved issues and dispatch Docker workers
+    Work {
+        /// Repository in owner/repo format (e.g. Dorky-Robot/sipag).
+        /// May be specified multiple times. Defaults to repos.conf or current git remote.
+        repos: Vec<String>,
+
+        /// Process one polling cycle and exit
+        #[arg(long)]
+        once: bool,
+    },
+
+    /// Signal workers to finish current batch and exit
+    Drain,
+
+    /// Clear the drain signal so workers continue polling
+    Resume,
+
+    /// Configure sipag and Claude Code permissions
+    Setup,
+
+    /// Diagnose setup problems and print fix commands
+    Doctor,
+
+    /// Prime an agile session (interactive: triage, approve, then run `sipag work`)
+    Start {
+        /// Repository in owner/repo format (optional; uses repos.conf if omitted)
+        repo: Option<String>,
+    },
+
+    /// Conversational PR merge session
+    Merge {
+        /// Repository in owner/repo format (optional; inferred from git remote)
+        repo: Option<String>,
+    },
+
+    /// Generate or update ARCHITECTURE.md and VISION.md via Claude
+    #[command(name = "refresh-docs")]
+    RefreshDocs {
+        /// Repository in owner/repo format
+        repo: String,
+
+        /// Only refresh if ARCHITECTURE.md is stale
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Launch a Docker sandbox for a task
     Run {
@@ -64,7 +112,8 @@ pub enum Commands {
     },
 
     /// Process queue/ serially (uses sipag run internally)
-    Start,
+    #[command(name = "queue-run")]
+    QueueRun,
 
     /// Create ~/.sipag/{queue,running,done,failed}
     Init,
@@ -164,6 +213,32 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Work { repos, once }) => cmd_work(repos, once),
+        Some(Commands::Drain) => cmd_drain(),
+        Some(Commands::Resume) => cmd_resume(),
+        Some(Commands::Setup) => cmd_shell_script("setup", &[]),
+        Some(Commands::Doctor) => cmd_shell_script("doctor", &[]),
+        Some(Commands::Start { repo }) => {
+            let args = repo
+                .as_deref()
+                .map(|r| vec![r.to_string()])
+                .unwrap_or_default();
+            cmd_shell_script("start", &args)
+        }
+        Some(Commands::Merge { repo }) => {
+            let args = repo
+                .as_deref()
+                .map(|r| vec![r.to_string()])
+                .unwrap_or_default();
+            cmd_shell_script("merge", &args)
+        }
+        Some(Commands::RefreshDocs { repo, check }) => {
+            let mut args = vec![repo];
+            if check {
+                args.push("--check".to_string());
+            }
+            cmd_shell_script("refresh-docs", &args)
+        }
         Some(Commands::Triage {
             repo,
             dry_run,
@@ -175,7 +250,7 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
-        Some(Commands::Start) => cmd_start(),
+        Some(Commands::QueueRun) => cmd_queue_run(),
         Some(Commands::Run {
             repo,
             issue,
@@ -216,23 +291,232 @@ fn sipag_dir() -> PathBuf {
     default_sipag_dir()
 }
 
+// ── New commands (previously bash-only) ──────────────────────────────────────
+
+fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
+    let dir = sipag_dir();
+    init::init_dirs(&dir).ok();
+
+    let mut cfg = WorkerConfig::load(&dir);
+    cfg.once = once;
+
+    // Preflight checks.
+    sipag_core::auth::preflight_auth(&dir)?;
+    sipag_core::docker::preflight_docker_running()?;
+
+    // Auto-pull image if not present.
+    let image_check = std::process::Command::new("docker")
+        .args(["image", "inspect", &cfg.image])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if !image_check.map(|s| s.success()).unwrap_or(false) {
+        println!("Worker image '{}' not found — pulling...", cfg.image);
+        let pull = std::process::Command::new("docker")
+            .args(["pull", &cfg.image])
+            .status();
+        if !pull.map(|s| s.success()).unwrap_or(false) {
+            bail!(
+                "Error: Could not pull '{}'. Run 'sipag setup' to configure.",
+                cfg.image
+            );
+        }
+    }
+
+    preflight_gh_auth()?;
+
+    // Clear stale drain signal.
+    let drain_file = dir.join("drain");
+    if drain_file.exists() {
+        println!("Warning: stale drain signal found. Clearing it and starting normally.");
+        println!("Use 'sipag drain' to signal a graceful shutdown.");
+        fs::remove_file(&drain_file).ok();
+    }
+
+    // Resolve repos list.
+    if repos.is_empty() {
+        repos = resolve_repos(&dir)?;
+    }
+
+    run_worker_loop(&repos, &dir, cfg)
+}
+
+fn cmd_drain() -> Result<()> {
+    let dir = sipag_dir();
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join("drain"), "")?;
+    println!("Drain signal sent. Running workers will finish their current batch and exit.");
+    println!("Use 'sipag resume' to cancel.");
+    Ok(())
+}
+
+fn cmd_resume() -> Result<()> {
+    let drain_file = sipag_dir().join("drain");
+    fs::remove_file(&drain_file).ok();
+    println!("Drain signal cleared. Workers will continue polling.");
+    Ok(())
+}
+
+/// Run a bash script from the sipag lib/ installation (for commands that still
+/// shell out: setup, doctor, start, merge, refresh-docs).
+///
+/// Resolution order for the lib/ directory:
+///   1. `SIPAG_ROOT` environment variable → `$SIPAG_ROOT/lib/`
+///   2. `~/.sipag/share/lib/` (Makefile install location)
+///   3. Next to the binary: `<exe-dir>/../lib/` etc.
+fn cmd_shell_script(script_name: &str, args: &[String]) -> Result<()> {
+    let lib_dir = find_lib_dir()?;
+
+    // Map logical names to (file, entry-function).
+    let (script_file, func_name) = match script_name {
+        "setup" => ("setup.sh", "setup_run"),
+        "doctor" => ("doctor.sh", "doctor_run"),
+        "start" => ("start.sh", "start_run_wrapper"),
+        "merge" => ("merge.sh", "merge_run"),
+        "refresh-docs" => ("refresh-docs.sh", "refresh_docs_run"),
+        _ => bail!("Unknown shell script: {script_name}"),
+    };
+
+    let script_path = lib_dir.join(script_file);
+    if !script_path.exists() {
+        bail!(
+            "Script not found: {}\n\nRun 'make install' or set SIPAG_ROOT to the sipag checkout root.",
+            script_path.display()
+        );
+    }
+
+    // Source the script and call the entry function, forwarding any args.
+    let inline = format!(
+        "source {} && {func_name} \"$@\"",
+        shell_quote(script_path.to_string_lossy().as_ref())
+    );
+
+    let mut bash_args = vec!["-c".to_string(), inline, "--".to_string()];
+    bash_args.extend_from_slice(args);
+
+    let status = std::process::Command::new("bash")
+        .args(&bash_args)
+        .status()
+        .with_context(|| format!("Failed to run bash script: {script_file}"))?;
+
+    if !status.success() {
+        bail!("{script_name} exited with status: {status}");
+    }
+    Ok(())
+}
+
+fn find_lib_dir() -> Result<PathBuf> {
+    // 1. SIPAG_ROOT env var.
+    if let Ok(root) = std::env::var("SIPAG_ROOT") {
+        let lib = PathBuf::from(root).join("lib");
+        if lib.exists() {
+            return Ok(lib);
+        }
+    }
+
+    // 2. ~/.sipag/share/lib (Makefile install location).
+    if let Some(home) = dirs_home() {
+        let lib = home.join(".sipag").join("share").join("lib");
+        if lib.exists() {
+            return Ok(lib);
+        }
+    }
+
+    // 3. Relative to the running binary — walk ancestors looking for lib/setup.sh.
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(5) {
+            let lib = ancestor.join("lib");
+            if lib.join("setup.sh").exists() {
+                return Ok(lib);
+            }
+        }
+    }
+
+    bail!(
+        "Could not find sipag lib/ directory.\n\n\
+         Run 'make install' or set SIPAG_ROOT to the sipag checkout root."
+    )
+}
+
+/// Minimal shell quoting: wraps path in single quotes, escaping any embedded
+/// single quotes.  Sufficient for file-system paths.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+/// Resolve the list of repos from repos.conf or the current git remote.
+fn resolve_repos(sipag_dir: &Path) -> Result<Vec<String>> {
+    let conf = sipag_dir.join("repos.conf");
+    if conf.exists() {
+        if let Ok(contents) = fs::read_to_string(&conf) {
+            let repos: Vec<String> = contents
+                .lines()
+                .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+                .filter_map(|l| l.split_once('=').map(|(_, v)| v.trim().to_string()))
+                .map(|url| {
+                    let url = url.trim_end_matches(".git").to_string();
+                    url.strip_prefix("https://github.com/")
+                        .unwrap_or(&url)
+                        .to_string()
+                })
+                .filter(|u| !u.is_empty())
+                .collect();
+            if !repos.is_empty() {
+                return Ok(repos);
+            }
+        }
+    }
+
+    // Fall back to current git remote.
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let url = url.trim_end_matches(".git").to_string();
+            let repo = url
+                .strip_prefix("https://github.com/")
+                .or_else(|| url.strip_prefix("git@github.com:"))
+                .unwrap_or(&url)
+                .to_string();
+            if !repo.is_empty() {
+                return Ok(vec![repo]);
+            }
+        }
+    }
+
+    bail!(
+        "Error: Not in a git repo and no repos registered.\n\
+         Run from a git repo, or: sipag repo add <name> <url>"
+    )
+}
+
+// ── Existing commands (unchanged from sipag-cli) ──────────────────────────────
+
 fn cmd_init() -> Result<()> {
     init::init_dirs(&sipag_dir())
 }
 
-fn cmd_start() -> Result<()> {
+/// Process the queue/ directory serially.
+///
+/// Renamed from `start` to `queue-run` to avoid clashing with the
+/// agile-session-primer `sipag start [<repo>]` (which shells out to
+/// lib/start.sh).  The queue-based workflow is used in the offline / file-
+/// based task runner, not the GitHub issue workflow.
+fn cmd_queue_run() -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "1800".to_string())
-        .parse::<u64>()
-        .unwrap_or(1800);
+    let worker_cfg = WorkerConfig::load(&dir)?;
+    let timeout = worker_cfg.timeout.as_secs();
 
     let repo = FileTaskRepository::new(dir.clone());
     let mut processed = 0;
@@ -296,7 +580,7 @@ fn cmd_start() -> Result<()> {
             .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
             .map(|s| s.to_string());
 
-        // Transition Queue → Running via repository (enforces state machine + does file move).
+        // Transition Queue → Running via repository.
         let task_id = TaskId::new(&task_name);
         let mut domain_task = match repo.get(&task_id) {
             Ok(t) => t,
@@ -320,7 +604,7 @@ fn cmd_start() -> Result<()> {
                 description: &task_file_data.title,
                 issue: issue_num.as_deref(),
                 background: false,
-                image: &image,
+                image: &worker_cfg.image,
                 timeout_secs: timeout,
             },
         );
@@ -338,12 +622,7 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let task_id = generate_task_id(description, chrono::Utc::now());
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE")
-        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "1800".to_string())
-        .parse::<u64>()
-        .unwrap_or(1800);
+    let worker_cfg = WorkerConfig::load(&dir)?;
 
     executor::run_impl(
         &dir,
@@ -353,8 +632,8 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
             description,
             issue,
             background,
-            image: &image,
-            timeout_secs: timeout,
+            image: &worker_cfg.image,
+            timeout_secs: worker_cfg.timeout.as_secs(),
         },
     )
 }
@@ -460,7 +739,7 @@ fn cmd_kill(task_id: &str) -> Result<()> {
         .args(["kill", &container_name])
         .output();
 
-    // Transition Running → Failed via repository (enforces state machine + does file move).
+    // Transition Running → Failed via repository.
     let repo = FileTaskRepository::new(dir.clone());
     let id = TaskId::new(task_id);
     let mut task = repo.get(&id)?;
@@ -530,7 +809,7 @@ fn cmd_retry(name: &str) -> Result<()> {
         let _ = fs::remove_file(&failed_log);
     }
 
-    // Transition Failed → Queued via repository (enforces state machine + does file move).
+    // Transition Failed → Queued.
     let repo = FileTaskRepository::new(dir.clone());
     let id = TaskId::new(name);
     let mut task = repo.get(&id)?;
