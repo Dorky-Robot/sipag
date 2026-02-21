@@ -16,7 +16,9 @@ pub fn read_task_file(path: &Path, status: TaskStatus) -> Result<TaskFile> {
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
-    parse_task_content(&content, &name, status)
+    let mut task = parse_task_content(&content, &name, status)?;
+    task.file_path = path.to_path_buf();
+    Ok(task)
 }
 
 /// Write a task file with YAML frontmatter.
@@ -162,6 +164,7 @@ mod tests {
         assert_eq!(task.title, "Fix the bug");
         assert_eq!(task.body, "some body text");
         assert_eq!(task.status, TaskStatus::Queue);
+        assert_eq!(task.file_path, path);
     }
 
     #[test]

@@ -9,6 +9,8 @@ pub use storage::{
     write_tracking_file,
 };
 
+use std::path::PathBuf;
+
 /// Status of a task based on which directory it lives in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -26,6 +28,31 @@ impl TaskStatus {
             TaskStatus::Done => "done",
             TaskStatus::Failed => "failed",
         }
+    }
+
+    /// Single-character icon for use in list views.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            TaskStatus::Queue => "·",
+            TaskStatus::Running => "⧖",
+            TaskStatus::Done => "✓",
+            TaskStatus::Failed => "✗",
+        }
+    }
+
+    /// Human-readable status name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TaskStatus::Queue => "pending",
+            TaskStatus::Running => "running",
+            TaskStatus::Done => "done",
+            TaskStatus::Failed => "failed",
+        }
+    }
+
+    /// Single-character symbol (alias for icon()).
+    pub fn symbol(&self) -> &'static str {
+        self.icon()
     }
 }
 
@@ -50,4 +77,6 @@ pub struct TaskFile {
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
+    /// Absolute path to the task file on disk.
+    pub file_path: PathBuf,
 }

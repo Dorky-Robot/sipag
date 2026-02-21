@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::PathBuf;
 
 use crate::task::{TaskFile, TaskStatus};
 
@@ -85,6 +86,7 @@ pub fn parse_task_content(content: &str, name: &str, status: TaskStatus) -> Resu
         title,
         body,
         status,
+        file_path: PathBuf::new(),
     })
 }
 
