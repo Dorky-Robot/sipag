@@ -7,8 +7,10 @@ on:
     paths:
       - 'Dockerfile'
       - 'lib/**'
+      - '.github/workflows/publish-worker.yml'
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
