@@ -539,8 +539,8 @@ GHEOF
   chmod +x "${TEST_TMPDIR}/bin/gh"
 
   # Initialize worker state without running the real worker_init (avoids gh auth call)
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  touch "$WORKER_SEEN_FILE"
+  # worker_loop manages WORKER_SEEN_FILE per-repo; just ensure the seen dir exists
+  mkdir -p "${SIPAG_DIR}/seen"
   WORKER_GH_TOKEN="test-token"
   WORKER_OAUTH_TOKEN=""
   WORKER_API_KEY=""
@@ -560,8 +560,7 @@ echo '[]'
 GHEOF
   chmod +x "${TEST_TMPDIR}/bin/gh"
 
-  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
-  touch "$WORKER_SEEN_FILE"
+  mkdir -p "${SIPAG_DIR}/seen"
   WORKER_GH_TOKEN="test-token"
   WORKER_OAUTH_TOKEN=""
   WORKER_API_KEY=""

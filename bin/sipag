@@ -40,15 +40,15 @@ usage() {
 sipag — autonomous dev agent powered by Claude Code
 
 Usage:
-  sipag start <owner/repo>           Prime session for agile workflow
-  sipag work <owner/repo> [--once]   Pick up approved issues, code in Docker
-  sipag drain                        Signal workers to finish current batch and exit
-  sipag resume                       Clear drain signal so workers continue polling
-  sipag status                       Show worker state across all repos
-  sipag merge <owner/repo>           Conversational PR merge session
-  sipag setup                        Configure sipag and Claude Code permissions
-  sipag version                      Print version
-  sipag help                         Show this help
+  sipag start [<owner/repo>]           Prime session for agile workflow (all repos if omitted)
+  sipag work [<owner/repo>] [--once]   Pick up approved issues, code in Docker (all repos if omitted)
+  sipag drain                          Signal workers to finish current batch and exit
+  sipag resume                         Clear drain signal so workers continue polling
+  sipag status                         Show worker state across all repos
+  sipag merge <owner/repo>             Conversational PR merge session
+  sipag setup                          Configure sipag and Claude Code permissions
+  sipag version                        Print version
+  sipag help                           Show this help
 
 Agile workflow:
   start → (converse, triage, refine, approve) → work → merge
@@ -74,10 +74,14 @@ EOF
 # --- Commands ---
 
 cmd_start() {
-	local repo="${1:?Usage: sipag start <owner/repo>}"
 	preflight_gh_auth || return 1
-	preflight_repo "$repo" || return 1
-	start_run "$repo"
+	local repo="${1:-}"
+	if [[ -n "$repo" ]]; then
+		preflight_repo "$repo" || return 1
+		start_run "$repo"
+	else
+		start_run_all
+	fi
 }
 
 cmd_setup() {
@@ -85,7 +89,6 @@ cmd_setup() {
 }
 
 cmd_work() {
-	local repo="${1:?Usage: sipag work <owner/repo>}"
 	worker_load_config
 	preflight_auth || return 1
 	preflight_docker_running || return 1
@@ -96,8 +99,36 @@ cmd_work() {
 		echo "Use 'sipag drain' to signal a graceful shutdown."
 		rm -f "${SIPAG_DIR}/drain"
 	fi
-	worker_init "$repo"
-	worker_loop "$repo"
+
+	local -a repos=()
+	if [[ -n "${1:-}" ]]; then
+		repos=("$1")
+	else
+		local conf="${SIPAG_DIR}/repos.conf"
+		if [[ ! -f "$conf" ]]; then
+			echo "Error: No repos registered and no repo specified."
+			echo "  Register a repo: sipag repo add <name> <url>"
+			echo "  Or run: sipag work <owner/repo>"
+			return 1
+		fi
+		local name url
+		while IFS='=' read -r name url; do
+			name="${name// /}"
+			url="${url// /}"
+			[[ -z "$name" || "$name" == \#* ]] && continue
+			url="${url%.git}"
+			url="${url#https://github.com/}"
+			repos+=("$url")
+		done < "$conf"
+		if [[ ${#repos[@]} -eq 0 ]]; then
+			echo "Error: repos.conf is empty."
+			echo "  Register a repo: sipag repo add <name> <url>"
+			return 1
+		fi
+	fi
+
+	worker_init "${repos[0]}"
+	worker_loop "${repos[@]}"
 }
 
 cmd_drain() {
