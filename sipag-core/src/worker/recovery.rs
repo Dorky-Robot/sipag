@@ -1,14 +1,20 @@
 use anyhow::Result;
+use std::time::Duration;
 
 use super::decision::{decide_finalization, FinalizationResult};
 use super::ports::{ContainerRuntime, GitHubGateway, StateStore};
 use super::status::WorkerStatus;
+
+/// Workers with no heartbeat update for this long are considered stale.
+const STALE_HEARTBEAT_THRESHOLD: Duration = Duration::from_secs(10 * 60); // 10 minutes
 
 /// Result of processing one worker during recovery/finalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryOutcome {
     /// Container is still running — left as-is.
     StillRunning { issue_num: u64 },
+    /// Container is running but heartbeat is stale — may be stuck.
+    StaleHeartbeat { issue_num: u64 },
     /// Container exited — state updated to done or failed.
     Finalized {
         issue_num: u64,
@@ -51,6 +57,10 @@ pub fn recover_and_finalize(
                     outcomes.push(RecoveryOutcome::ResetToRunning {
                         issue_num: worker.issue_num,
                     });
+                } else if is_heartbeat_stale(&worker.last_heartbeat) {
+                    outcomes.push(RecoveryOutcome::StaleHeartbeat {
+                        issue_num: worker.issue_num,
+                    });
                 } else {
                     outcomes.push(RecoveryOutcome::StillRunning {
                         issue_num: worker.issue_num,
@@ -62,7 +72,7 @@ pub fn recover_and_finalize(
                     &worker.repo,
                     worker.issue_num,
                     Some("in-progress"),
-                    None,
+                    Some("needs-review"),
                 );
                 let mut updated = worker.clone();
                 updated.status = WorkerStatus::Done;
@@ -95,6 +105,28 @@ pub fn recover_and_finalize(
     }
 
     Ok(outcomes)
+}
+
+/// Check if a heartbeat timestamp is older than the stale threshold.
+///
+/// Returns `false` if the heartbeat is `None` (workers without heartbeat
+/// support are not considered stale — they predate the feature).
+fn is_heartbeat_stale(last_heartbeat: &Option<String>) -> bool {
+    let Some(hb) = last_heartbeat else {
+        return false;
+    };
+
+    // Parse ISO 8601 timestamp: "2024-01-15T10:30:00Z"
+    let Ok(hb_time) = chrono::DateTime::parse_from_rfc3339(hb) else {
+        // Also try the format without timezone offset: "2024-01-15T10:30:00Z" sometimes
+        // parsed differently. Fall back to non-stale if unparsable.
+        return false;
+    };
+
+    let now = chrono::Utc::now();
+    let age = now.signed_duration_since(hb_time);
+
+    age > chrono::Duration::from_std(STALE_HEARTBEAT_THRESHOLD).unwrap_or(chrono::Duration::MAX)
 }
 
 #[cfg(test)]
@@ -260,6 +292,8 @@ mod tests {
             duration_s: None,
             exit_code: None,
             log_path: None,
+            last_heartbeat: None,
+            phase: None,
         }
     }
 
@@ -383,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn done_finalization_removes_in_progress_label() {
+    fn done_finalization_transitions_to_needs_review() {
         let store = MockStore::new(vec![make_worker(42, WorkerStatus::Running)]);
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new().with_pr("sipag/issue-42-test", 100);
@@ -398,7 +432,7 @@ mod tests {
                 repo: "test/repo".to_string(),
                 issue: 42,
                 remove: Some("in-progress".to_string()),
-                add: None,
+                add: Some("needs-review".to_string()),
             }
         );
     }
@@ -521,5 +555,59 @@ mod tests {
 
         let calls = github.label_calls.borrow();
         assert_eq!(calls[0].add, Some("ready".to_string()));
+    }
+
+    #[test]
+    fn running_with_fresh_heartbeat_stays_running() {
+        let mut worker = make_worker(42, WorkerStatus::Running);
+        worker.last_heartbeat = Some(chrono::Utc::now().to_rfc3339());
+        let store = MockStore::new(vec![worker]);
+        let containers = MockContainers {
+            running: vec!["sipag-issue-42".to_string()],
+        };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
+    }
+
+    #[test]
+    fn running_with_stale_heartbeat_flagged() {
+        let mut worker = make_worker(42, WorkerStatus::Running);
+        // 15 minutes ago — exceeds the 10-minute threshold.
+        let stale_time = chrono::Utc::now() - chrono::Duration::minutes(15);
+        worker.last_heartbeat = Some(stale_time.to_rfc3339());
+        let store = MockStore::new(vec![worker]);
+        let containers = MockContainers {
+            running: vec!["sipag-issue-42".to_string()],
+        };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0],
+            RecoveryOutcome::StaleHeartbeat { issue_num: 42 }
+        );
+    }
+
+    #[test]
+    fn running_without_heartbeat_not_stale() {
+        // Workers without heartbeat support (None) should not be flagged.
+        let worker = make_worker(42, WorkerStatus::Running);
+        assert!(worker.last_heartbeat.is_none());
+        let store = MockStore::new(vec![worker]);
+        let containers = MockContainers {
+            running: vec!["sipag-issue-42".to_string()],
+        };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
     }
 }

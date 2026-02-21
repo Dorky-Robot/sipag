@@ -58,18 +58,16 @@ jobs:
           ARCHIVE="sipag-${VERSION}-${TARGET}.tar.gz"
 
           # Staging directory
-          mkdir -p "dist/sipag-${VERSION}-${TARGET}/bin"
           mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/prompts"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/container"
 
           # Binary
           cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
 
-          # Bash scripts
-          cp bin/sipag "dist/sipag-${VERSION}-${TARGET}/bin/"
+          # Bash scripts (setup, doctor, start, merge, refresh-docs)
           cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
+          cp lib/container/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/container/"
           cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
-          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/worker"
-          cp lib/worker/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/worker/"
 
           # Create tarball
           cd dist

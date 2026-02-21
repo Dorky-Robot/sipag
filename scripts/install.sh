@@ -66,9 +66,9 @@ extracted_dir="${tmpdir}/sipag-${version}-${target}"
 # ── Install bash scripts to share prefix ─────────────────────────────────────
 #
 # Layout: ${SHARE_DIR}/
-#   bin/sipag          — main bash CLI script
-#   lib/               — library files sourced by bin/sipag
-#   lib/worker/        — worker submodule scripts
+#   lib/               — shell-out scripts (setup, doctor, start, merge, refresh-docs)
+#   lib/container/     — container entrypoint scripts (embedded in Rust via include_str)
+#   lib/prompts/       — prompt templates
 
 _install() {
   if [ -w "$(dirname "$2")" ]; then
@@ -87,25 +87,18 @@ _mkdir() {
 }
 
 echo "Installing bash scripts to ${SHARE_DIR}..."
-_mkdir "${SHARE_DIR}/bin"
-_mkdir "${SHARE_DIR}/lib/worker"
+_mkdir "${SHARE_DIR}/lib/container"
 _mkdir "${SHARE_DIR}/lib/prompts"
 
-_install -m 755 "${extracted_dir}/bin/sipag"    "${SHARE_DIR}/bin/sipag"
-_install -m 644 "${extracted_dir}"/lib/*.sh      "${SHARE_DIR}/lib/"
-_install -m 644 "${extracted_dir}"/lib/worker/*.sh "${SHARE_DIR}/lib/worker/"
-_install -m 644 "${extracted_dir}"/lib/prompts/*.md "${SHARE_DIR}/lib/prompts/"
+_install -m 644 "${extracted_dir}"/lib/*.sh         "${SHARE_DIR}/lib/"
+_install -m 644 "${extracted_dir}"/lib/container/*.sh "${SHARE_DIR}/lib/container/"
+_install -m 644 "${extracted_dir}"/lib/prompts/*.md  "${SHARE_DIR}/lib/prompts/"
 
-# ── Symlink bin/sipag → share prefix ─────────────────────────────────────────
+# ── Install binary ───────────────────────────────────────────────────────────
 
-echo "Creating symlink ${INSTALL_DIR}/sipag → ${SHARE_DIR}/bin/sipag..."
+echo "Installing sipag binary to ${INSTALL_DIR}..."
 _mkdir "${INSTALL_DIR}"
-
-if [ -w "${INSTALL_DIR}" ]; then
-  ln -sf "${SHARE_DIR}/bin/sipag" "${INSTALL_DIR}/sipag"
-else
-  sudo ln -sf "${SHARE_DIR}/bin/sipag" "${INSTALL_DIR}/sipag"
-fi
+_install -m 755 "${extracted_dir}/sipag" "${INSTALL_DIR}/sipag"
 
 # ── PATH reminder ─────────────────────────────────────────────────────────────
 

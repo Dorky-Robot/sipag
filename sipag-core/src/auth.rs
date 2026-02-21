@@ -6,7 +6,7 @@ use std::path::Path;
 ///
 /// Checks `CLAUDE_CODE_OAUTH_TOKEN` env var first, then `sipag_dir/token` file.
 /// Returns `None` if no OAuth token is found (does not check `ANTHROPIC_API_KEY`).
-pub fn resolve_token(sipag_dir: &Path) -> Option<String> {
+pub(crate) fn resolve_token(sipag_dir: &Path) -> Option<String> {
     if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
         if !token.is_empty() {
             return Some(token);

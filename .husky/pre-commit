@@ -5,9 +5,10 @@
 #   1. Secrets scan    (gitleaks — BLOCKING)
 #   2. Spell check     (typos — BLOCKING)
 #   3. CVE advisories  (cargo deny — BLOCKING)
-#   4. Formatting      (cargo fmt --check — BLOCKING)
-#   5. Lint            (cargo clippy — BLOCKING)
-#   6. Shell lint      (shellcheck — BLOCKING)
+#   4. Release build   (cargo build --release — BLOCKING)
+#   5. Formatting      (cargo fmt --check — BLOCKING)
+#   6. Lint            (cargo clippy — BLOCKING)
+#   7. Shell lint      (shellcheck — BLOCKING)
 #
 # Install once per clone:
 #   make install-hooks
@@ -26,7 +27,7 @@ echo "  pre-commit checks"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ── 1. Secrets scan (BLOCKING) ────────────────────────────────────────────────
-step "[1/6] Secrets scan (gitleaks)"
+step "[1/7] Secrets scan (gitleaks)"
 if command -v gitleaks >/dev/null 2>&1; then
     if ! gitleaks git --pre-commit --no-banner --verbose; then
         fail "Secrets detected — commit blocked. Remove secrets before committing."
@@ -38,7 +39,7 @@ else
 fi
 
 # ── 2. Spell check (BLOCKING) ────────────────────────────────────────────────
-step "[2/6] Spell check (typos)"
+step "[2/7] Spell check (typos)"
 if command -v typos >/dev/null 2>&1; then
     if ! typos; then
         fail "Spelling errors found — commit blocked. Fix typos before committing."
@@ -50,7 +51,7 @@ else
 fi
 
 # ── 3. CVE advisories (BLOCKING) ─────────────────────────────────────────────
-step "[3/6] CVE advisories (cargo deny)"
+step "[3/7] CVE advisories (cargo deny)"
 if command -v cargo-deny >/dev/null 2>&1 || cargo deny --version >/dev/null 2>&1; then
     if ! cargo deny check advisories; then
         fail "Known CVEs found in dependencies — commit blocked. Update or audit deps."
@@ -61,24 +62,31 @@ else
     warn "Install: cargo install cargo-deny"
 fi
 
-# ── 4. Formatting (BLOCKING) ─────────────────────────────────────────────────
-step "[4/6] Formatting (cargo fmt --check)"
+# ── 4. Release build (BLOCKING) ────────────────────────────────────────────
+step "[4/7] Release build (cargo build --release)"
+if ! cargo build --release; then
+    fail "Release build failed — commit blocked. Fix build errors before committing."
+fi
+echo "      ✓ Release build OK"
+
+# ── 5. Formatting (BLOCKING) ─────────────────────────────────────────────────
+step "[5/7] Formatting (cargo fmt --check)"
 if ! cargo fmt --all -- --check; then
     fail "Formatting errors — commit blocked. Run: cargo fmt"
 fi
 echo "      ✓ Formatting OK"
 
-# ── 5. Lint (BLOCKING) ───────────────────────────────────────────────────────
-step "[5/6] Lint (cargo clippy -D warnings)"
+# ── 6. Lint (BLOCKING) ───────────────────────────────────────────────────────
+step "[6/7] Lint (cargo clippy -D warnings)"
 if ! cargo clippy --all-targets -- -D warnings; then
     fail "Clippy warnings — commit blocked. Fix warnings before committing."
 fi
 echo "      ✓ No clippy warnings"
 
-# ── 6. Shell lint (BLOCKING) ─────────────────────────────────────────────────
-step "[6/6] Shell lint (shellcheck)"
+# ── 7. Shell lint (BLOCKING) ─────────────────────────────────────────────────
+step "[7/7] Shell lint (shellcheck)"
 if command -v shellcheck >/dev/null 2>&1; then
-    if ! shellcheck --severity=warning bin/sipag lib/*.sh lib/worker/*.sh; then
+    if ! shellcheck --severity=warning lib/*.sh lib/container/*.sh; then
         fail "shellcheck errors — commit blocked. Fix shell script issues before committing."
     fi
     echo "      ✓ Shell scripts OK"

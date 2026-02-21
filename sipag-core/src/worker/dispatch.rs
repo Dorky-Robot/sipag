@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-use super::config::WorkerConfig;
 use super::github;
 use super::ports::StateStore;
 use super::state::WorkerState;
 use super::status::WorkerStatus;
 use super::store::FileStateStore;
+use crate::config::WorkerConfig;
 use crate::task::slugify;
 
 // ── Prompt templates (embedded at compile time) ───────────────────────────────
@@ -25,107 +25,20 @@ const WORKER_CONFLICT_FIX_PROMPT: &str =
     include_str!("../../../lib/prompts/worker-conflict-fix.md");
 
 // ── Container bash scripts (run inside the Docker container) ─────────────────
+//
+// Each script lives in its own file under lib/container/ and is embedded at
+// compile time via include_str!(). This is the single source of truth — the
+// bash docker.sh scripts are a parallel legacy implementation that will be
+// removed in Phase 2 of the Raptor refactor.
+//
+// All scripts expect these environment variables from `docker run -e`:
+//   REPO, BRANCH, PROMPT, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY
+// Issue worker also needs: ISSUE_TITLE, PR_BODY
 
-/// Bash script injected into the container for a new issue worker.
-///
-/// Environment variables provided by `docker run -e ...`:
-///   REPO, BRANCH, ISSUE_TITLE, PR_BODY, PROMPT,
-///   CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, GH_TOKEN
-const ISSUE_CONTAINER_SCRIPT: &str = r#"set -euo pipefail
-git clone "https://github.com/${REPO}.git" /work && cd /work
-git config user.name "sipag"
-git config user.email "sipag@localhost"
-git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-git checkout -b "$BRANCH"
-git push -u origin "$BRANCH"
-if gh pr create --repo "${REPO}" \
-        --title "$ISSUE_TITLE" \
-        --body "$PR_BODY" \
-        --draft \
-        --head "$BRANCH" 2>/tmp/sipag-pr-err.log; then
-    echo "[sipag] Draft PR opened: branch=$BRANCH"
-else
-    echo "[sipag] Draft PR deferred (will retry after work): $(cat /tmp/sipag-pr-err.log)"
-fi
-tmux new-session -d -s claude \
-    "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
-tmux set-option -t claude history-limit 50000
-touch /tmp/claude.log
-tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
-tail -f /tmp/claude.log &
-TAIL_PID=$!
-while tmux has-session -t claude 2>/dev/null; do sleep 1; done
-kill $TAIL_PID 2>/dev/null || true
-wait $TAIL_PID 2>/dev/null || true
-CLAUDE_EXIT=$(cat /tmp/.claude-exit 2>/dev/null || echo 1)
-if [[ "$CLAUDE_EXIT" -eq 0 ]]; then
-    existing_pr=$(gh pr list --repo "${REPO}" --head "$BRANCH" \
-        --state open --json number -q ".[0].number" 2>/dev/null || true)
-    if [[ -z "$existing_pr" ]]; then
-        echo "[sipag] Retrying PR creation after work completion"
-        gh pr create --repo "${REPO}" \
-                --title "$ISSUE_TITLE" \
-                --body "$PR_BODY" \
-                --head "$BRANCH" 2>/dev/null || true
-    fi
-    gh pr ready "$BRANCH" --repo "${REPO}" || true
-    echo "[sipag] PR marked ready for review"
-fi
-exit "$CLAUDE_EXIT"
-"#;
-
-/// Bash script for a PR iteration container.
-///
-/// Extra env: REPO, BRANCH, PROMPT, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN,
-/// ANTHROPIC_API_KEY
-const ITERATION_CONTAINER_SCRIPT: &str = r#"set -euo pipefail
-git clone "https://github.com/${REPO}.git" /work && cd /work
-git config user.name "sipag"
-git config user.email "sipag@localhost"
-git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-git checkout "$BRANCH"
-tmux new-session -d -s claude \
-    "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
-tmux set-option -t claude history-limit 50000
-touch /tmp/claude.log
-tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
-tail -f /tmp/claude.log &
-TAIL_PID=$!
-while tmux has-session -t claude 2>/dev/null; do sleep 1; done
-kill $TAIL_PID 2>/dev/null || true
-wait $TAIL_PID 2>/dev/null || true
-exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
-"#;
-
-/// Bash script for a conflict-fix container (merges main forward).
-///
-/// Extra env: REPO, BRANCH, PROMPT, GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN,
-/// ANTHROPIC_API_KEY
-const CONFLICT_FIX_CONTAINER_SCRIPT: &str = r#"set -euo pipefail
-git clone "https://github.com/${REPO}.git" /work && cd /work
-git config user.name "sipag"
-git config user.email "sipag@localhost"
-git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-git checkout "$BRANCH"
-git fetch origin main
-if git merge origin/main --no-edit; then
-    git push origin "$BRANCH"
-    echo "[sipag] Merged main into $BRANCH (no conflicts)"
-    exit 0
-fi
-echo "[sipag] Conflicts detected in $BRANCH, running Claude to resolve..."
-tmux new-session -d -s claude \
-    "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
-tmux set-option -t claude history-limit 50000
-touch /tmp/claude.log
-tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
-tail -f /tmp/claude.log &
-TAIL_PID=$!
-while tmux has-session -t claude 2>/dev/null; do sleep 1; done
-kill $TAIL_PID 2>/dev/null || true
-wait $TAIL_PID 2>/dev/null || true
-exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
-"#;
+const ISSUE_CONTAINER_SCRIPT: &str = include_str!("../../../lib/container/issue-worker.sh");
+const ITERATION_CONTAINER_SCRIPT: &str = include_str!("../../../lib/container/iteration-worker.sh");
+const CONFLICT_FIX_CONTAINER_SCRIPT: &str =
+    include_str!("../../../lib/container/conflict-fix-worker.sh");
 
 // ── Public helpers ────────────────────────────────────────────────────────────
 
@@ -191,13 +104,12 @@ pub fn dispatch_issue_worker(
         duration_s: None,
         exit_code: None,
         log_path: Some(log_path.clone()),
+        last_heartbeat: None,
+        phase: None,
     };
     store.save(&enqueued_state)?;
 
-    // 2. Transition label: work_label → in-progress.
-    let _ = github::transition_label(repo, issue_num, Some(&cfg.work_label), Some("in-progress"));
-
-    // 3. Fetch issue details.
+    // 2. Fetch issue details (label transition is handled inside the container).
     let (title, body) = github::get_issue_details(repo, issue_num)
         .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
 
@@ -233,11 +145,17 @@ pub fn dispatch_issue_worker(
         duration_s: None,
         exit_code: None,
         log_path: Some(log_path.clone()),
+        last_heartbeat: Some(started_at.clone()),
+        phase: Some("starting container".to_string()),
     };
     store.save(&running_state)?;
 
     // 6. Run Docker container (blocking).
+    //    The container handles label transitions (approved → in-progress → done/restored).
     let start = Instant::now();
+    let workers_dir = sipag_dir.join("workers");
+    let state_filename = format!("{repo_slug}--{issue_num}.json");
+    let issue_num_str = issue_num.to_string();
     let success = run_worker_container(
         &container_name,
         repo,
@@ -246,23 +164,26 @@ pub fn dispatch_issue_worker(
         &pr_body,
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,
         ISSUE_CONTAINER_SCRIPT,
         &log_path,
+        Some((&workers_dir, &state_filename)),
+        &[
+            ("ISSUE_NUM", &issue_num_str),
+            ("WORK_LABEL", &cfg.work_label),
+        ],
     );
     let duration_s = start.elapsed().as_secs() as i64;
     let ended_at = now_utc();
 
-    // 7. Update state and manage labels.
+    // 7. Update state file. Label transitions are handled by the container itself.
     if success {
-        // Find the PR that was created.
+        // Find the PR that was created (container may have already recorded it
+        // in the state file, but confirm via GitHub for reliability).
         let pr = github::find_pr_for_branch(repo, &branch).unwrap_or(None);
-
-        // Remove in-progress label.
-        let _ = github::transition_label(repo, issue_num, Some("in-progress"), None);
 
         let mut done_state = running_state.clone();
         done_state.status = WorkerStatus::Done;
@@ -276,10 +197,6 @@ pub fn dispatch_issue_worker(
         store.save(&done_state)?;
         println!("[#{issue_num}] DONE: {title}");
     } else {
-        // Return issue to work_label for retry.
-        let _ =
-            github::transition_label(repo, issue_num, Some("in-progress"), Some(&cfg.work_label));
-
         let mut fail_state = running_state.clone();
         fail_state.status = WorkerStatus::Failed;
         fail_state.ended_at = Some(ended_at);
@@ -393,12 +310,14 @@ pub fn dispatch_pr_iteration(
         "",
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,
         ITERATION_CONTAINER_SCRIPT,
         &log_path,
+        None,
+        &[],
     );
 
     if success {
@@ -471,12 +390,14 @@ pub fn dispatch_conflict_fix(
         "",
         &prompt,
         &cfg.image,
-        cfg.timeout,
+        cfg.timeout.as_secs(),
         gh_token,
         oauth_token,
         api_key,
         CONFLICT_FIX_CONTAINER_SCRIPT,
         &log_path,
+        None,
+        &[],
     );
 
     if success {
@@ -496,6 +417,13 @@ fn now_utc() -> String {
 
 /// Run the Docker container for a worker, streaming output to `log_path`.
 ///
+/// When `state_mount` is `Some((host_workers_dir, state_filename))`, the host's
+/// workers directory is bind-mounted into the container and `STATE_FILE` is set
+/// so the container can self-report heartbeats, phases, and PR info.
+///
+/// `extra_env` passes additional environment variables to the container
+/// (e.g. `ISSUE_NUM`, `WORK_LABEL` for label management).
+///
 /// Returns `true` on success (exit 0), `false` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn run_worker_container(
@@ -512,6 +440,8 @@ fn run_worker_container(
     api_key: Option<&str>,
     script: &str,
     log_path: &PathBuf,
+    state_mount: Option<(&Path, &str)>,
+    extra_env: &[(&str, &str)],
 ) -> bool {
     let log_out = match File::create(log_path) {
         Ok(f) => f,
@@ -528,14 +458,31 @@ fn run_worker_container(
         }
     };
 
-    let mut cmd = Command::new("timeout");
-    cmd.arg(timeout_secs.to_string())
-        .arg("docker")
-        .arg("run")
-        .arg("--rm")
-        .arg("--name")
-        .arg(container_name)
-        // Repository identity
+    let timeout_bin = resolve_timeout_command();
+    let mut cmd;
+    if let Some(ref bin) = timeout_bin {
+        cmd = Command::new(bin);
+        cmd.arg(timeout_secs.to_string()).arg("docker").arg("run");
+    } else {
+        cmd = Command::new("docker");
+        cmd.arg("run");
+    }
+    cmd.arg("--rm").arg("--name").arg(container_name);
+
+    // Mount workers directory for state self-reporting.
+    if let Some((workers_dir, state_filename)) = state_mount {
+        cmd.arg("-v")
+            .arg(format!("{}:/sipag-state", workers_dir.display()))
+            .arg("-e")
+            .arg(format!("STATE_FILE=/sipag-state/{state_filename}"));
+    }
+
+    // Extra env vars (e.g. ISSUE_NUM, WORK_LABEL for container-side label management).
+    for (key, value) in extra_env {
+        cmd.arg("-e").arg(format!("{key}={value}"));
+    }
+
+    cmd // Repository identity
         .arg("-e")
         .arg(format!("REPO={repo}"))
         // Branch and PR metadata (for the issue worker script)
@@ -628,6 +575,24 @@ fn collect_inline_comments(repo: &str, pr_num: u64) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Find a working timeout command: `timeout` (Linux/coreutils) or `gtimeout` (macOS Homebrew).
+/// Returns `None` if neither is available — the caller should run Docker without a timeout wrapper.
+fn resolve_timeout_command() -> Option<String> {
+    for bin in ["timeout", "gtimeout"] {
+        if Command::new(bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return Some(bin.to_string());
+        }
+    }
+    eprintln!("sipag: warning: neither `timeout` nor `gtimeout` found — running without timeout");
+    None
 }
 
 fn get_pr_diff(repo: &str, pr_num: u64) -> String {
