@@ -1046,6 +1046,168 @@ EOF
   [[ "$s21" == "failed" ]]
 }
 
+# --- worker_issue_is_open ---
+
+@test "worker_issue_is_open: returns true when gh reports OPEN" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "OPEN"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_issue_is_open "owner/repo" 42
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_issue_is_open: returns false when gh reports CLOSED" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "CLOSED"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_issue_is_open "owner/repo" 42
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_issue_is_open: returns false when gh fails" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_issue_is_open "owner/repo" 42
+  [[ "$status" -ne 0 ]]
+}
+
+# --- worker_transition_label: resilience ---
+
+@test "worker_transition_label: does not crash when gh issue edit fails" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  # Must not crash under set -e; function should return 0
+  run worker_transition_label "owner/repo" 42 "in-progress" "approved"
+  [[ "$status" -eq 0 ]]
+}
+
+# --- worker_recover: closed issue handling ---
+
+@test "worker_recover: does not crash when issue is closed and gh issue edit fails" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--30.json" "owner/repo" 30 \
+    "sipag/issue-30-closed" "sipag-issue-30"
+  WORKER_WORK_LABEL="approved"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  # gh: no PR, issue is closed, issue edit fails with non-zero (mimics real GH behavior)
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == *"issue edit"* ]]; then
+  exit 1
+elif [[ "$args" == *"issue view"* ]]; then
+  echo "CLOSED"
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "→ failed"
+  assert_output_contains "#30"
+}
+
+@test "worker_recover: skips label transition when issue is closed (container gone, PR exists)" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--31.json" "owner/repo" 31 \
+    "sipag/issue-31-closed" "sipag-issue-31"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  local marker="${TEST_TMPDIR}/issue-edit-called"
+
+  # gh: PR exists, issue is closed; issue edit should NOT be called
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"pr list"* && "\$args" == *"number"* ]]; then
+  echo "55"
+elif [[ "\$args" == *"pr list"* && "\$args" == *"url"* ]]; then
+  echo "https://github.com/owner/repo/pull/55"
+elif [[ "\$args" == *"issue edit"* ]]; then
+  touch "${marker}"
+  exit 0
+elif [[ "\$args" == *"issue view"* ]]; then
+  echo "CLOSED"
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "→ done"
+  # Label transition must be skipped for closed issues
+  [[ ! -f "$marker" ]]
+}
+
+@test "worker_recover: skips label transition when issue is closed (container gone, no PR)" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--32.json" "owner/repo" 32 \
+    "sipag/issue-32-closed" "sipag-issue-32"
+  WORKER_WORK_LABEL="approved"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  local marker="${TEST_TMPDIR}/issue-edit-called"
+
+  # gh: no PR, issue is closed; issue edit should NOT be called
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "\$args" == *"issue edit"* ]]; then
+  touch "${marker}"
+  exit 0
+elif [[ "\$args" == *"issue view"* ]]; then
+  echo "CLOSED"
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "→ failed"
+  # Label transition must be skipped for closed issues
+  [[ ! -f "$marker" ]]
+}
+
 @test "worker_auto_merge: does not fire hook when merge fails" {
   WORKER_AUTO_MERGE=true
   mkdir -p "${SIPAG_DIR}/hooks"

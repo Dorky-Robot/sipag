@@ -176,11 +176,22 @@ ${issue_body}
     done
 }
 
+# Check if an issue is currently open (not closed or merged).
+# Returns 0 (true) for open issues, 1 (false) for closed issues.
+# Used by worker_recover to skip label transitions on issues that have since been closed.
+worker_issue_is_open() {
+    local repo="$1" issue_num="$2"
+    local state
+    state=$(gh issue view "$issue_num" --repo "$repo" --json state -q '.state' 2>/dev/null || echo "")
+    [[ "$state" == "OPEN" ]]
+}
+
 # Transition an issue's pipeline label: remove old, add new
 # Usage: worker_transition_label <repo> <issue_num> <from_label> <to_label>
 # Either label can be empty to skip that side of the swap.
+# Uses || true so a non-zero exit from gh (e.g. closed issue) does not kill the worker under set -e.
 worker_transition_label() {
     local repo="$1" issue_num="$2" from_label="$3" to_label="$4"
-    [[ -n "$from_label" ]] && gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null
-    [[ -n "$to_label" ]]   && gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null
+    [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; }
+    [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; }
 }
