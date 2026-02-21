@@ -60,9 +60,15 @@ mod tests {
         assert_eq!(slugify("Fix Bug #1!"), "fix-bug-1");
         assert_eq!(slugify("hello   world"), "hello-world");
         assert_eq!(slugify("  hello  "), "hello");
-        assert_eq!(slugify("Code hygiene: remove dead code"), "code-hygiene-remove-dead-code");
+        assert_eq!(
+            slugify("Code hygiene: remove dead code"),
+            "code-hygiene-remove-dead-code"
+        );
         // Multi-char specials: parens + colon collapse to a single hyphen each group
-        assert_eq!(slugify("feat(worker): detect stale PRs"), "feat-worker-detect-stale-prs");
+        assert_eq!(
+            slugify("feat(worker): detect stale PRs"),
+            "feat-worker-detect-stale-prs"
+        );
     }
 
     #[test]
