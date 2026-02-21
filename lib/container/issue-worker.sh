@@ -102,8 +102,9 @@ if [[ "$CLAUDE_EXIT" -eq 0 ]]; then
         fi
     fi
 
-    # Success: remove in-progress label (issue will be closed when PR merges via "Closes #N").
-    transition_label "in-progress" ""
+    # Success: transition in-progress → needs-review.
+    # Issue will be closed when PR merges via "Closes #N".
+    transition_label "in-progress" "needs-review"
 else
     # Failure: remove in-progress, restore work label for retry.
     transition_label "in-progress" "${WORK_LABEL:-approved}"

@@ -72,7 +72,7 @@ pub fn recover_and_finalize(
                     &worker.repo,
                     worker.issue_num,
                     Some("in-progress"),
-                    None,
+                    Some("needs-review"),
                 );
                 let mut updated = worker.clone();
                 updated.status = WorkerStatus::Done;
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn done_finalization_removes_in_progress_label() {
+    fn done_finalization_transitions_to_needs_review() {
         let store = MockStore::new(vec![make_worker(42, WorkerStatus::Running)]);
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new().with_pr("sipag/issue-42-test", 100);
@@ -432,7 +432,7 @@ mod tests {
                 repo: "test/repo".to_string(),
                 issue: 42,
                 remove: Some("in-progress".to_string()),
-                add: None,
+                add: Some("needs-review".to_string()),
             }
         );
     }
