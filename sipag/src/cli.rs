@@ -6,6 +6,7 @@ use sipag_core::{
     prompt::{format_duration, generate_task_id},
     repo,
     task::{self, default_sipag_dir, TaskStatus},
+    triage,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -103,6 +104,20 @@ pub enum Commands {
     /// Show queue state across all directories
     Status,
 
+    /// Review open issues against VISION.md and recommend CLOSE/ADJUST/KEEP/MERGE
+    Triage {
+        /// Repository in owner/repo format (e.g. Dorky-Robot/sipag)
+        repo: String,
+
+        /// Print report only — make no changes
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+
+        /// Apply all recommendations without confirmation
+        #[arg(long, conflicts_with = "dry_run")]
+        apply: bool,
+    },
+
     /// Print shell completion scripts for bash, zsh, or fish
     Completions {
         /// Shell type: bash, zsh, or fish
@@ -149,6 +164,11 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Triage {
+            repo,
+            dry_run,
+            apply,
+        }) => triage::run_triage(&repo, dry_run, apply),
         Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
             println!("sipag {VERSION}");
