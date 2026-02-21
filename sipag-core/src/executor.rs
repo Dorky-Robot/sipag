@@ -5,6 +5,10 @@ use std::process::{Command, Stdio};
 
 use crate::task::{append_ended, slugify, write_tracking_file};
 
+fn now_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 /// Check that Docker daemon is running and accessible.
 fn preflight_docker_running() -> Result<()> {
     let status = Command::new("docker")
@@ -140,6 +144,7 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         issue,
         &container_name,
         description,
+        &now_timestamp(),
     )?;
 
     let prompt = build_prompt(description, "", issue);
@@ -226,7 +231,7 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
             .context("Failed to spawn background worker")?;
     } else {
         let success = run_docker(&log_path);
-        let _ = append_ended(&tracking_file);
+        let _ = append_ended(&tracking_file, &now_timestamp());
         if success {
             if tracking_file.exists() {
                 fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
