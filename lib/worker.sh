@@ -13,6 +13,11 @@ WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
+WORKER_IN_PROGRESS_LABEL="in-progress"
+
+# Per-repo config overrides (set by worker_fetch_repo_config)
+WORKER_REPO_MODEL=""
+WORKER_REPO_PROMPT_EXTRA=""
 
 # Load config
 worker_load_config() {
@@ -24,13 +29,113 @@ worker_load_config() {
         value=$(echo "$value" | xargs)
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            batch_size) WORKER_BATCH_SIZE="$value" ;;
-            image) WORKER_IMAGE="$value" ;;
-            timeout) WORKER_TIMEOUT="$value" ;;
-            poll_interval) WORKER_POLL_INTERVAL="$value" ;;
-            work_label) WORKER_WORK_LABEL="$value" ;;
+            batch_size)        WORKER_BATCH_SIZE="$value" ;;
+            image)             WORKER_IMAGE="$value" ;;
+            timeout)           WORKER_TIMEOUT="$value" ;;
+            poll_interval)     WORKER_POLL_INTERVAL="$value" ;;
+            work_label)        WORKER_WORK_LABEL="$value" ;;
+            in_progress_label) WORKER_IN_PROGRESS_LABEL="$value" ;;
         esac
     done < "$config"
+}
+
+# Parse a simple string or integer value from a TOML file.
+# Usage: sipag_toml_get <file> <section> <key>
+# Returns empty string if the section or key is not found.
+sipag_toml_get() {
+    local file="$1" section="$2" key="$3"
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_s=1; next }
+        /^\[/         { in_s=0 }
+        in_s {
+            klen = length(key)
+            if (substr($0, 1, klen) == key) {
+                rest = substr($0, klen+1)
+                if (rest ~ /^[[:space:]]*=/) {
+                    sub(/^[[:space:]]*=[[:space:]]*/, "", rest)
+                    gsub(/^"|"$/, "", rest)
+                    print rest
+                    exit
+                }
+            }
+        }
+    ' "$file"
+}
+
+# Parse a triple-quoted multi-line string from a TOML file.
+# Usage: sipag_toml_get_multiline <file> <section> <key>
+# Returns empty string if the section or key is not found.
+sipag_toml_get_multiline() {
+    local file="$1" section="$2" key="$3"
+    awk -v section="[$section]" -v key="$key" '
+        $0 == section { in_s=1; next }
+        /^\[/         { in_s=0; in_v=0 }
+        in_s && !in_v {
+            klen = length(key)
+            if (substr($0, 1, klen) == key) {
+                rest = substr($0, klen+1)
+                if (rest ~ /^[[:space:]]*=[[:space:]]*"""/) {
+                    in_v=1
+                    sub(/^[[:space:]]*=[[:space:]]*"""/, "", rest)
+                    if (rest ~ /"""/) { sub(/""".*$/, "", rest); print rest; exit }
+                    if (length(rest) > 0) print rest
+                    next
+                }
+            }
+        }
+        in_v && /"""/ { sub(/""".*$/, ""); if (length($0) > 0) print; exit }
+        in_v          { print }
+    ' "$file"
+}
+
+# Fetch .sipag.toml from the repo root via GitHub API and apply per-repo config.
+# Silently does nothing if the file does not exist or cannot be fetched.
+# Overrides: WORKER_IMAGE, WORKER_TIMEOUT, WORKER_BATCH_SIZE, WORKER_WORK_LABEL,
+#            WORKER_IN_PROGRESS_LABEL, WORKER_REPO_MODEL, WORKER_REPO_PROMPT_EXTRA
+worker_fetch_repo_config() {
+    local repo="$1"
+    local tmpfile
+    tmpfile=$(mktemp /tmp/sipag-toml.XXXXXX)
+
+    # Fetch .sipag.toml from GitHub; silently skip if absent or on any error
+    if ! gh api "repos/${repo}/contents/.sipag.toml" \
+            --jq '.content' 2>/dev/null \
+            | base64 -d > "$tmpfile" 2>/dev/null \
+        || [[ ! -s "$tmpfile" ]]; then
+        rm -f "$tmpfile"
+        return 0
+    fi
+
+    local val
+
+    # [worker] section
+    val=$(sipag_toml_get "$tmpfile" "worker" "image")
+    [[ -n "$val" ]] && WORKER_IMAGE="$val"
+
+    val=$(sipag_toml_get "$tmpfile" "worker" "timeout")
+    [[ -n "$val" ]] && WORKER_TIMEOUT="$val"
+
+    val=$(sipag_toml_get "$tmpfile" "worker" "batch_size")
+    [[ -n "$val" ]] && WORKER_BATCH_SIZE="$val"
+
+    val=$(sipag_toml_get "$tmpfile" "worker" "model")
+    [[ -n "$val" ]] && WORKER_REPO_MODEL="$val"
+
+    # [labels] section
+    val=$(sipag_toml_get "$tmpfile" "labels" "work")
+    [[ -n "$val" ]] && WORKER_WORK_LABEL="$val"
+
+    val=$(sipag_toml_get "$tmpfile" "labels" "in_progress")
+    [[ -n "$val" ]] && WORKER_IN_PROGRESS_LABEL="$val"
+
+    # [prompts] section
+    WORKER_REPO_PROMPT_EXTRA=$(sipag_toml_get_multiline "$tmpfile" "prompts" "extra")
+
+    rm -f "$tmpfile"
+    echo "[sipag] Loaded per-repo config from .sipag.toml"
+    if [[ -n "$WORKER_IMAGE" ]];             then echo "[sipag]   image:          ${WORKER_IMAGE}"; fi
+    if [[ -n "$WORKER_REPO_MODEL" ]];        then echo "[sipag]   model:          ${WORKER_REPO_MODEL}"; fi
+    if [[ -n "$WORKER_REPO_PROMPT_EXTRA" ]]; then echo "[sipag]   extra prompt:   (set)"; fi
 }
 
 # Track issues we've already picked up
@@ -142,7 +247,7 @@ worker_find_prs_needing_iteration() {
 worker_reconcile() {
     local repo="$1"
     mapfile -t inprogress < <(gh issue list --repo "$repo" --state open \
-        --label "in-progress" --json number -q '.[].number' 2>/dev/null | sort -n)
+        --label "${WORKER_IN_PROGRESS_LABEL}" --json number -q '.[].number' 2>/dev/null | sort -n)
 
     [[ ${#inprogress[@]} -eq 0 ]] && return 0
 
@@ -205,7 +310,7 @@ worker_run_issue() {
     local title body branch slug pr_body prompt task_id start_time
 
     # Mark as in-progress so the spec is locked from edits
-    worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"
+    worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "$WORKER_IN_PROGRESS_LABEL"
 
     # Fetch the spec fresh right before starting (minimizes stale-spec window)
     title=$(gh issue view "$issue_num" --repo "$repo" --json title -q '.title')
@@ -242,6 +347,14 @@ Instructions:
 - The PR will be marked ready for review automatically when you finish
 - The PR should close issue #${issue_num}"
 
+    # Append per-repo extra instructions from .sipag.toml if present
+    if [[ -n "${WORKER_REPO_PROMPT_EXTRA:-}" ]]; then
+        prompt="${prompt}
+
+Project-specific requirements (from .sipag.toml):
+${WORKER_REPO_PROMPT_EXTRA}"
+    fi
+
     # Hook: worker started
     export SIPAG_EVENT="worker.started"
     export SIPAG_REPO="$repo"
@@ -256,6 +369,7 @@ Instructions:
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e SIPAG_MODEL="${WORKER_REPO_MODEL:-}" \
         -e PROMPT \
         -e BRANCH \
         -e ISSUE_TITLE \
@@ -274,7 +388,11 @@ Instructions:
                 --draft \
                 --head "$BRANCH"
             echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
-            claude --print --dangerously-skip-permissions -p "$PROMPT" \
+            if [ -n "$SIPAG_MODEL" ]; then
+                claude --print --dangerously-skip-permissions --model "$SIPAG_MODEL" -p "$PROMPT"
+            else
+                claude --print --dangerously-skip-permissions -p "$PROMPT"
+            fi \
                 && { gh pr ready "$BRANCH" --repo "'"${repo}"'" || true; \
                      echo "[sipag] PR marked ready for review"; }
         ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
@@ -285,7 +403,7 @@ Instructions:
 
     if [[ $exit_code -eq 0 ]]; then
         # Success: remove in-progress (PR's "Closes #N" handles the rest)
-        worker_transition_label "$repo" "$issue_num" "in-progress" ""
+        worker_transition_label "$repo" "$issue_num" "$WORKER_IN_PROGRESS_LABEL" ""
         echo "[#${issue_num}] DONE: $title"
 
         # Look up the PR opened by the worker
@@ -301,7 +419,7 @@ Instructions:
         sipag_run_hook "on-worker-completed"
     else
         # Failure: move back to approved for retry (draft PR stays open showing progress)
-        worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+        worker_transition_label "$repo" "$issue_num" "$WORKER_IN_PROGRESS_LABEL" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
 
         # Hook: worker failed
@@ -374,6 +492,7 @@ Instructions:
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e SIPAG_MODEL="${WORKER_REPO_MODEL:-}" \
         -e PROMPT \
         -e BRANCH \
         "$WORKER_IMAGE" \
@@ -383,7 +502,11 @@ Instructions:
             git config user.email "sipag@localhost"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
             git checkout "$BRANCH"
-            claude --print --dangerously-skip-permissions -p "$PROMPT"
+            if [ -n "$SIPAG_MODEL" ]; then
+                claude --print --dangerously-skip-permissions --model "$SIPAG_MODEL" -p "$PROMPT"
+            else
+                claude --print --dangerously-skip-permissions -p "$PROMPT"
+            fi
         ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
 
     local exit_code=$?
@@ -405,11 +528,22 @@ Instructions:
 worker_loop() {
     local repo="$1"
 
+    # Resolution order (most specific wins):
+    #   1. .sipag.toml in repo root  (per-repo)
+    #   2. ~/.sipag/config           (global)
+    #   3. SIPAG_* env vars
+    #   4. Defaults
+    worker_load_config
+    worker_fetch_repo_config "$repo"
+
     echo "sipag work"
     echo "Repo: ${repo}"
     echo "Label: ${WORKER_WORK_LABEL:-<all>}"
+    echo "In-progress label: ${WORKER_IN_PROGRESS_LABEL}"
     echo "Batch size: ${WORKER_BATCH_SIZE}"
     echo "Poll interval: ${WORKER_POLL_INTERVAL}s"
+    echo "Image: ${WORKER_IMAGE}"
+    [[ -n "$WORKER_REPO_MODEL" ]] && echo "Model: ${WORKER_REPO_MODEL}"
     echo "Logs: ${WORKER_LOG_DIR}/"
     echo "Started: $(date)"
     echo ""

@@ -63,6 +63,13 @@ Config (~/.sipag/config):
   image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
+  work_label=approved          Label that triggers workers (default: approved)
+  in_progress_label=in-progress Label applied while worker is running
+
+Per-repo config (.sipag.toml in repo root, overrides global):
+  [worker]  image, timeout, model, batch_size
+  [labels]  work, in_progress
+  [prompts] extra
 
 Environment:
   SIPAG_FILE              Task file path (default: ./tasks.md)

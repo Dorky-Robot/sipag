@@ -261,6 +261,8 @@ Simplify sipag to sandbox launcher
 
 ## Configuration
 
+### Global configuration
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIPAG_DIR` | `~/.sipag` | Data directory |
@@ -269,6 +271,49 @@ Simplify sipag to sandbox launcher
 | `SIPAG_MODEL` | _(claude default)_ | Model override |
 | `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |
 | `GH_TOKEN` | _(required)_ | Passed into container |
+
+Global defaults can also be set in `~/.sipag/config` (key=value format):
+
+```
+batch_size=4
+image=ghcr.io/dorky-robot/sipag-worker:latest
+timeout=1800
+poll_interval=120
+work_label=approved
+in_progress_label=in-progress
+```
+
+### Per-repo configuration (`.sipag.toml`)
+
+Repos can override worker settings by placing a `.sipag.toml` file in their root:
+
+```toml
+[worker]
+image = "ghcr.io/org/custom-worker:latest"  # custom Docker image for this repo
+timeout = 3600                               # seconds (default: 1800)
+model = "claude-sonnet-4-6"                  # model override for this repo
+batch_size = 2                               # parallel workers for this repo
+
+[labels]
+work = "ready"          # label that triggers workers (default: "approved")
+in_progress = "wip"     # label applied when worker picks up issue (default: "in-progress")
+
+[prompts]
+# Additional instructions appended to every worker prompt for this repo
+extra = """
+Always run the full test suite before opening a PR.
+Use conventional commits.
+"""
+```
+
+**Resolution order** (most specific wins):
+
+1. `.sipag.toml` in repo root — per-repo, highest priority
+2. `~/.sipag/config` — global defaults
+3. `SIPAG_*` environment variables
+4. Built-in defaults — lowest priority
+
+Workers fetch `.sipag.toml` from the GitHub API before spinning up containers. The file is optional — if absent, global and environment settings apply unchanged.
 
 ## Customizing behavior with CLAUDE.md
 
