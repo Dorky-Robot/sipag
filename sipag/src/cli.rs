@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
     executor::{self, generate_task_id, RunConfig},
+    init,
     repo,
     task::{self, default_sipag_dir, TaskStatus},
 };
@@ -188,12 +189,12 @@ fn sipag_dir() -> PathBuf {
 }
 
 fn cmd_init() -> Result<()> {
-    task::init_dirs(&sipag_dir())
+    init::init_dirs(&sipag_dir())
 }
 
 fn cmd_start() -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
@@ -235,7 +236,7 @@ fn cmd_start() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
 
-        let task = match task::parse_task_file(&task_file, TaskStatus::Queue) {
+        let task = match task::read_task_file(&task_file, TaskStatus::Queue) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error: failed to parse task file: {e}");
@@ -291,7 +292,7 @@ fn cmd_start() -> Result<()> {
 
 fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &str) -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
 
     let task_id = generate_task_id(description);
     println!("Task ID: {task_id}");
@@ -337,7 +338,7 @@ fn cmd_ps() -> Result<()> {
         paths.sort_by(|a, b| b.cmp(a)); // newest first
 
         for path in paths {
-            let task = match task::parse_task_file(&path, TaskStatus::Queue) {
+            let task = match task::read_task_file(&path, TaskStatus::Queue) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -435,11 +436,12 @@ fn cmd_add(title: &str, repo: &str, priority: &str) -> Result<()> {
 
     let dir = sipag_dir();
     if !dir.join("queue").exists() {
-        task::init_dirs(&dir).ok();
+        init::init_dirs(&dir).ok();
     }
     let filename = task::next_filename(&dir.join("queue"), title);
     let path = dir.join("queue").join(&filename);
-    task::write_task_file(&path, title, repo, priority, None)?;
+    let added = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    task::write_task_file(&path, title, repo, priority, None, &added)?;
     println!("Added: {title}");
 
     Ok(())
