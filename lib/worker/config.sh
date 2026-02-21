@@ -9,7 +9,7 @@
 # shellcheck disable=SC2034  # Variables consumed by other worker submodules
 
 SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
-WORKER_LOG_DIR="/tmp/sipag-backlog"
+WORKER_LOG_DIR="${SIPAG_DIR}/logs"
 
 # Defaults (overridden by worker_load_config)
 WORKER_BATCH_SIZE=4
@@ -18,6 +18,7 @@ WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
 WORKER_ONCE=0
+WORKER_REPO_SLUG=""
 
 # Load config
 worker_load_config() {
@@ -39,9 +40,23 @@ worker_load_config() {
 }
 
 # Initialize worker runtime state: log dir, seen file, timeout command, credentials
+# $1: repo in OWNER/REPO format (e.g. "Dorky-Robot/sipag")
 worker_init() {
-    mkdir -p "$WORKER_LOG_DIR"
-    WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+    local repo="${1:-}"
+
+    mkdir -p "${SIPAG_DIR}/workers"
+    mkdir -p "${SIPAG_DIR}/logs"
+    mkdir -p "${SIPAG_DIR}/seen"
+
+    WORKER_LOG_DIR="${SIPAG_DIR}/logs"
+
+    # Set per-repo seen file (OWNER--REPO format to avoid path separator issues)
+    if [[ -n "$repo" ]]; then
+        WORKER_REPO_SLUG="${repo//\//--}"  # Dorky-Robot/sipag → Dorky-Robot--sipag
+        WORKER_SEEN_FILE="${SIPAG_DIR}/seen/${WORKER_REPO_SLUG}"
+    else
+        WORKER_SEEN_FILE="${SIPAG_DIR}/seen/default"
+    fi
     touch "$WORKER_SEEN_FILE"
 
     # Resolve timeout command (gtimeout on macOS, timeout on Linux)

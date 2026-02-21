@@ -12,6 +12,65 @@
 
 # shellcheck disable=SC2154  # Globals defined in config.sh, sourced by worker.sh
 
+# Write initial worker state JSON to ~/.sipag/workers/
+# $1: repo slug (OWNER--REPO), $2: issue_num, $3: issue_title,
+# $4: branch, $5: container_name, $6: started_at, $7: log_path
+_worker_write_state() {
+    local repo_slug="$1" issue_num="$2" issue_title="$3"
+    local branch="$4" container_name="$5" started_at="$6" log_path="$7"
+    local state_file="${SIPAG_DIR}/workers/${repo_slug}--${issue_num}.json"
+    # shellcheck disable=SC2016  # jq variables ($repo etc.) are not shell variables
+    jq -n \
+        --arg repo "${repo_slug/--//}" \
+        --argjson issue_num "$issue_num" \
+        --arg issue_title "$issue_title" \
+        --arg branch "$branch" \
+        --arg container_name "$container_name" \
+        --arg started_at "$started_at" \
+        --arg log_path "$log_path" \
+        '{
+            repo: $repo,
+            issue_num: $issue_num,
+            issue_title: $issue_title,
+            branch: $branch,
+            container_name: $container_name,
+            pr_num: null,
+            pr_url: null,
+            status: "running",
+            started_at: $started_at,
+            ended_at: null,
+            duration_s: null,
+            exit_code: null,
+            log_path: $log_path
+        }' > "$state_file"
+}
+
+# Update worker state JSON on completion
+# $1: repo_slug, $2: issue_num, $3: status (done|failed), $4: exit_code,
+# $5: ended_at, $6: duration_s, $7: pr_num (optional), $8: pr_url (optional)
+_worker_update_state() {
+    local repo_slug="$1" issue_num="$2" status="$3" exit_code="$4"
+    local ended_at="$5" duration_s="$6" pr_num="${7:-}" pr_url="${8:-}"
+    local state_file="${SIPAG_DIR}/workers/${repo_slug}--${issue_num}.json"
+    [[ -f "$state_file" ]] || return 0
+    local tmp
+    tmp=$(mktemp)
+    jq \
+        --arg status "$status" \
+        --argjson exit_code "$exit_code" \
+        --arg ended_at "$ended_at" \
+        --argjson duration_s "$duration_s" \
+        --arg pr_num "$pr_num" \
+        --arg pr_url "$pr_url" \
+        '.status = $status |
+         .exit_code = $exit_code |
+         .ended_at = $ended_at |
+         .duration_s = $duration_s |
+         .pr_num = (if $pr_num == "" then null else ($pr_num | tonumber) end) |
+         .pr_url = (if $pr_url == "" then null else $pr_url end)' \
+        "$state_file" > "$tmp" && mv "$tmp" "$state_file"
+}
+
 # Run a single issue in a Docker container
 worker_run_issue() {
     local repo="$1"
@@ -55,10 +114,20 @@ ${body}
     export SIPAG_TASK_ID="$task_id"
     sipag_run_hook "on-worker-started"
 
+    local container_name="sipag-issue-${issue_num}"
+    local log_path="${WORKER_LOG_DIR}/${WORKER_REPO_SLUG}--${issue_num}.log"
+    local started_at
+    started_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     start_time=$(date +%s)
+
+    # Write initial worker state file
+    _worker_write_state \
+        "$WORKER_REPO_SLUG" "$issue_num" "$title" \
+        "$branch" "$container_name" "$started_at" "$log_path"
+
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
-        --name "sipag-issue-${issue_num}" \
+        --name "$container_name" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
@@ -116,11 +185,12 @@ ${body}
                 echo "[sipag] PR marked ready for review"
             fi
             exit "$CLAUDE_EXIT"
-        ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
+        ' > "$log_path" 2>&1
 
     local exit_code=$?
-    local duration
+    local duration ended_at
     duration=$(( $(date +%s) - start_time ))
+    ended_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
     if [[ $exit_code -eq 0 ]]; then
         # Success: remove in-progress (PR's "Closes #N" handles the rest)
@@ -145,6 +215,10 @@ ${body}
         fi
         pr_url=$(gh pr list --repo "$repo" --head "$branch" --json url -q '.[0].url' 2>/dev/null || true)
 
+        # Update worker state: done
+        _worker_update_state "$WORKER_REPO_SLUG" "$issue_num" "done" "$exit_code" \
+            "$ended_at" "$duration" "${pr_num:-}" "${pr_url:-}"
+
         # Hook: worker completed
         export SIPAG_EVENT="worker.completed"
         export SIPAG_PR_NUM="${pr_num:-}"
@@ -156,10 +230,14 @@ ${body}
         worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
 
+        # Update worker state: failed
+        _worker_update_state "$WORKER_REPO_SLUG" "$issue_num" "failed" "$exit_code" \
+            "$ended_at" "$duration"
+
         # Hook: worker failed
         export SIPAG_EVENT="worker.failed"
         export SIPAG_EXIT_CODE="$exit_code"
-        export SIPAG_LOG_PATH="${WORKER_LOG_DIR}/issue-${issue_num}.log"
+        export SIPAG_LOG_PATH="$log_path"
         sipag_run_hook "on-worker-failed"
     fi
 }
@@ -249,7 +327,7 @@ worker_run_pr_iteration() {
             kill $TAIL_PID 2>/dev/null || true
             wait $TAIL_PID 2>/dev/null || true
             exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
-        ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
+        ' > "${WORKER_LOG_DIR}/${WORKER_REPO_SLUG}--pr-${pr_num}-iter.log" 2>&1
 
     local exit_code=$?
     worker_pr_mark_done "$pr_num"

@@ -86,7 +86,7 @@ cmd_work() {
 		echo "Use 'sipag drain' to signal a graceful shutdown."
 		rm -f "${SIPAG_DIR}/drain"
 	fi
-	worker_init
+	worker_init "$repo"
 	worker_loop "$repo"
 }
 
