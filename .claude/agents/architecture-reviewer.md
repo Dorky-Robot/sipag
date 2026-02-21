@@ -40,40 +40,37 @@ tui/           # Binary: ratatui TUI, exec'd by `sipag tui`
 
 ## Bash Script Organization
 
-The bash layer has clear module responsibilities:
+The remaining bash scripts are shell-out only (called by the Rust CLI via `cmd_shell_script`):
 
 | File | Responsibility |
 |------|----------------|
-| `bin/sipag` | Entry point, subcommand dispatch (`work`, `next`, `list`, `add`) |
-| `lib/worker.sh` | Docker worker loop, GitHub polling, issue/PR lifecycle |
-| `lib/task.sh` | Markdown checklist parser: `parse_next`, `mark_done`, `list`, `add` |
-| `lib/run.sh` | `claude` invocation helper, respects `SIPAG_*` env vars |
-| `lib/notify.sh` | Notification helpers (OS notifications, webhooks) |
+| `lib/setup.sh` | Interactive setup wizard |
+| `lib/start.sh` | Agile session primer |
+| `lib/merge.sh` | PR merge session context |
+| `lib/refresh-docs.sh` | ARCHITECTURE.md/VISION.md refresh |
+| `lib/container/*.sh` | Container entrypoint scripts (embedded in Rust via `include_str!`) |
+
+The worker loop, GitHub polling, and Docker dispatch are fully implemented in Rust (`sipag-core/src/worker/`).
 
 ### Rules to enforce
 
-1. **`lib/task.sh` has no GitHub knowledge** — it operates only on local files. Any `gh` calls belong in `lib/worker.sh` or `bin/sipag`.
+1. **New worker logic goes in Rust** — `sipag-core/src/worker/` is the canonical worker implementation.
 
-2. **`lib/run.sh` has no Docker knowledge** — it wraps `claude` directly. Docker logic belongs in `lib/worker.sh`.
+2. **Container scripts are embedded** — `lib/container/*.sh` are the source files, embedded into Rust at compile time via `include_str!()`.
 
-3. **`bin/sipag` does not implement logic** — it sources the appropriate `lib/*.sh` file and dispatches. If it grows beyond ~50 lines of non-dispatch code, flag it.
-
-4. **No cross-sourcing between lib files** — `lib/task.sh` must not source `lib/worker.sh` and vice versa. Only `bin/sipag` orchestrates them.
-
-5. **Function naming convention**: functions in `lib/worker.sh` are prefixed `worker_`, in `lib/task.sh` they are prefixed `task_`, in `lib/notify.sh` they are prefixed `notify_`.
+3. **Shell-out scripts should shrink** — setup, start, merge, and refresh-docs are candidates for Rust ports.
 
 ### What to check
 
-- Does the PR move `gh` calls into `lib/task.sh`?
-- Does the PR add Docker invocations to `lib/run.sh`?
-- Are new functions named consistently with their module prefix?
-- Does `bin/sipag` grow imperative logic instead of delegating?
+- Does the PR add new bash scripts instead of Rust?
+- Does the PR modify `lib/container/*.sh` without checking that `dispatch.rs` still embeds the correct version?
+- Are new worker features added to `sipag-core/src/worker/` (correct) vs bash (wrong)?
 
 ---
 
 ## Worker Prompt Construction
 
-The worker prompt in `lib/worker.sh:worker_run_issue()` and `sipag-core/src/executor.rs:build_prompt()` is the primary interface between sipag and Claude Code. Review it carefully.
+The worker prompt in `sipag-core/src/prompt.rs:build_prompt()` is the primary interface between sipag and Claude Code. Review it carefully.
 
 ### Prompt injection risks
 

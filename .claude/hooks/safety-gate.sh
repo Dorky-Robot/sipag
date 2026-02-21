@@ -207,7 +207,7 @@ BASH_ALLOW_PATTERNS=(
 	'^git (add|commit|status|diff|log|branch|checkout|switch|stash|show|rev-parse|rev-list|ls-files|merge|rebase|cherry-pick|tag|fetch|pull|remote)'
 	'^git push( |$)'
 	'^(npm|yarn|pnpm) (test|run|exec)'
-	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|format|clippy)'
+	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|fmt|format|clippy|install)'
 	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false)( |$)'
 	'^mkdir '
 	'^(cp|mv) '
@@ -215,7 +215,10 @@ BASH_ALLOW_PATTERNS=(
 	'^pip install'
 	'^chmod [0-7]{3} '
 	'^node |^python |^ruby '
+	# Docker (non-privileged)
+	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|pull|build)'
 	# Development tools
+	'^shellcheck '
 	'^bats '
 	'^make (test|check|lint|fmt|dev|build|clean|install|all)( |$)'
 	'^gh (issue|pr|repo|release|workflow|run|auth|api)'
@@ -289,7 +292,7 @@ llm_evaluate() {
 # --- Main evaluation ---
 
 case "$tool_name" in
-Read | Glob | Grep | Task | TaskOutput | TaskStop | WebSearch | WebFetch | AskUserQuestion | Skill | NotebookEdit)
+Read | Glob | Grep | Task | TaskOutput | TaskStop | WebSearch | WebFetch | AskUserQuestion | Skill | NotebookEdit | EnterPlanMode | ExitPlanMode | EnterWorktree | TaskCreate | TaskGet | TaskUpdate | TaskList)
 	AUDIT_SUBJECT="$tool_name"
 	allow "Read-only tool: $tool_name"
 	;;
@@ -315,6 +318,26 @@ Bash)
 	AUDIT_SUBJECT="${cmd}"
 	if [[ -z "$cmd" ]]; then
 		deny "Empty bash command"
+	fi
+
+	# rm is allowed only within the project directory.
+	if echo "$cmd" | grep -qE '^rm '; then
+		# Extract file paths from rm command (skip flags like -f, -r, -rf).
+		local rm_ok=true
+		local arg
+		for arg in $cmd; do
+			[[ "$arg" == "rm" ]] && continue
+			[[ "$arg" == -* ]] && continue
+			if ! is_within_project "$arg"; then
+				rm_ok=false
+				break
+			fi
+		done
+		if $rm_ok; then
+			allow "rm within project directory"
+		else
+			deny "rm targets path outside project: $cmd"
+		fi
 	fi
 
 	if check_bash_allow "$cmd"; then

@@ -52,6 +52,8 @@ impl StateStore for FileStateStore {
             "duration_s": state.duration_s,
             "exit_code": state.exit_code,
             "log_path": state.log_path.as_ref().map(|p| p.display().to_string()),
+            "last_heartbeat": state.last_heartbeat,
+            "phase": state.phase,
         });
 
         let content = serde_json::to_string_pretty(&json)?;
@@ -213,6 +215,8 @@ mod tests {
             duration_s: Some(3600),
             exit_code: Some(0),
             log_path: None,
+            last_heartbeat: None,
+            phase: None,
         };
 
         store.save(&state).unwrap();

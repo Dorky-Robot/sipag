@@ -1,6 +1,23 @@
 //! Runtime configuration for sipag workers.
 //!
-//! Resolution order: env var > `~/.sipag/config` file > hardcoded default.
+//! Resolution order: **env var > `~/.sipag/config` file > hardcoded default**.
+//!
+//! ```text
+//! Field                   Env Var                      Config Key               Default
+//! ─────────────────────── ──────────────────────────── ──────────────────────── ────────
+//! batch_size              SIPAG_BATCH_SIZE             batch_size               1 (max 5)
+//! poll_interval           SIPAG_POLL_INTERVAL          poll_interval            120s
+//! work_label              SIPAG_WORK_LABEL             work_label               "approved"
+//! image                   SIPAG_IMAGE                  image                    ghcr.io/dorky-robot/sipag-worker:latest
+//! timeout                 SIPAG_TIMEOUT                timeout                  1800s
+//! auto_merge              —                            auto_merge               false
+//! doc_refresh_interval    SIPAG_DOC_REFRESH_INTERVAL   doc_refresh_interval     10
+//! state_max_age_days      SIPAG_STATE_MAX_AGE_DAYS     state_max_age_days       7
+//! once                    — (CLI --once flag only)     —                        false
+//! sipag_dir               SIPAG_DIR                    —                        ~/.sipag
+//! ```
+//!
+//! Credentials follow the same pattern — see [`Credentials`].
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
