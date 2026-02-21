@@ -28,8 +28,9 @@ pub fn render_detail(f: &mut Frame, app: &mut App) {
     );
     let outer_block = Block::default()
         .title(outer_title)
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+        .borders(Borders::ALL)
         .border_type(BorderType::Rounded);
+
     let content_area = outer_block.inner(chunks[0]);
     f.render_widget(outer_block, chunks[0]);
 

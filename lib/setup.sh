@@ -183,7 +183,7 @@ _setup_dirs() {
 
 	mkdir -p "$sipag_dir"
 
-	for subdir in queue running done failed hooks; do
+	for subdir in queue running "done" failed hooks; do
 		local dir="${sipag_dir}/${subdir}"
 		if [[ ! -d "$dir" ]]; then
 			mkdir -p "$dir"
@@ -193,7 +193,7 @@ _setup_dirs() {
 	done
 
 	if [[ $created -eq 0 ]]; then
-		_setup_ok "~/.sipag/ directories already exist"
+		_setup_ok "$HOME/.sipag/ directories already exist"
 	fi
 }
 
@@ -214,7 +214,7 @@ _setup_claude_permissions() {
 			fi
 		done
 		if [[ $all_present -eq 1 ]]; then
-			_setup_ok "~/.claude/settings.json already configured (skipped)"
+			_setup_ok "$HOME/.claude/settings.json already configured (skipped)"
 			return 0
 		fi
 	fi

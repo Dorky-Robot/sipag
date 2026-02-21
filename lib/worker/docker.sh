@@ -134,6 +134,7 @@ ${body}
 
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        --name "sipag-issue-${issue_num}" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
@@ -155,9 +156,19 @@ ${body}
                 --draft \
                 --head "$BRANCH"
             echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
-            claude --print --dangerously-skip-permissions -p "$PROMPT" \
-                && { gh pr ready "$BRANCH" --repo "'"${repo}"'" || true; \
-                     echo "[sipag] PR marked ready for review"; }
+            tmux new-session -d -s claude \
+                "claude --dangerously-skip-permissions -p \"\$PROMPT\" \
+                    && { gh pr ready \"\$BRANCH\" --repo \"'"${repo}"'\" || true; \
+                         echo \"[sipag] PR marked ready for review\"; }; \
+                 echo \$? > /tmp/.claude-exit"
+            touch /tmp/claude.log
+            tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
+            tail -f /tmp/claude.log &
+            TAIL_PID=$!
+            while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+            kill $TAIL_PID 2>/dev/null || true
+            wait $TAIL_PID 2>/dev/null || true
+            exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
         ' > "$log_path" 2>&1
 
     local exit_code=$?
@@ -263,6 +274,7 @@ worker_run_pr_iteration() {
 
     PROMPT="$prompt" BRANCH="$branch_name" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        --name "sipag-pr-${pr_num}" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
@@ -275,7 +287,17 @@ worker_run_pr_iteration() {
             git config user.email "sipag@localhost"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
             git checkout "$BRANCH"
-            claude --print --dangerously-skip-permissions -p "$PROMPT"
+            tmux new-session -d -s claude \
+                "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
+                 echo \$? > /tmp/.claude-exit"
+            touch /tmp/claude.log
+            tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
+            tail -f /tmp/claude.log &
+            TAIL_PID=$!
+            while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+            kill $TAIL_PID 2>/dev/null || true
+            wait $TAIL_PID 2>/dev/null || true
+            exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
         ' > "$log_path" 2>&1
 
     local exit_code=$?

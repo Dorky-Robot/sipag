@@ -22,7 +22,7 @@ source "${SIPAG_ROOT}/lib/preflight.sh"
 
 # --- Defaults ---
 
-WORKER_ONCE=0
+export WORKER_ONCE=0
 
 # --- Help ---
 
@@ -140,7 +140,7 @@ main() {
 			return 0
 			;;
 		--once)
-			WORKER_ONCE=1
+			export WORKER_ONCE=1
 			shift
 			;;
 		-*)

@@ -30,13 +30,7 @@ fn main() -> Result<()> {
     result
 }
 
-fn run<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut app::App,
-) -> Result<()>
-where
-    B::Error: Send + Sync + 'static,
-{
+fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut app::App) -> Result<()> {
     let tick = Duration::from_millis(200);
     let mut last_tick = Instant::now();
     let mut last_refresh = Instant::now();
@@ -48,9 +42,7 @@ where
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 // Ctrl-C always quits
-                if key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(());
                 }
                 if app.handle_key(key)? {

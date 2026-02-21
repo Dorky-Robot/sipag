@@ -3,14 +3,14 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::task::{TaskFile, TaskStatus};
 use crate::task::naming::slugify;
 use crate::task::parser::parse_task_content;
+use crate::task::{TaskFile, TaskStatus};
 
 /// Read a task file from disk and parse its content.
 pub fn read_task_file(path: &Path, status: TaskStatus) -> Result<TaskFile> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let name = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -233,8 +233,15 @@ mod tests {
     fn test_write_and_read_task_file() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("task.md");
-        write_task_file(&path, "My Task", "myrepo", "high", None, "2024-01-01T00:00:00Z")
-            .unwrap();
+        write_task_file(
+            &path,
+            "My Task",
+            "myrepo",
+            "high",
+            None,
+            "2024-01-01T00:00:00Z",
+        )
+        .unwrap();
         let task = read_task_file(&path, TaskStatus::Queue).unwrap();
         assert_eq!(task.title, "My Task");
         assert_eq!(task.repo, Some("myrepo".to_string()));
