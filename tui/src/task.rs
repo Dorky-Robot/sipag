@@ -17,6 +17,8 @@ pub struct Task {
     pub added: Option<DateTime<Utc>>,
     pub body: String,
     pub status: Status,
+    /// GitHub issue number (from frontmatter `issue:` field).
+    pub issue: Option<u32>,
     /// Absolute path to the `.md` file on disk (used to locate the companion `.log`).
     pub file_path: PathBuf,
     /// Docker container name for running tasks (used for attach).
@@ -38,6 +40,11 @@ impl From<TaskFile> for Task {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
 
+        let issue = tf
+            .issue
+            .as_deref()
+            .and_then(|s| s.trim_start_matches('#').parse::<u32>().ok());
+
         Task {
             id,
             title: tf.title,
@@ -47,6 +54,7 @@ impl From<TaskFile> for Task {
             added,
             body: tf.body,
             status: tf.status,
+            issue,
             file_path: tf.file_path,
             container: tf.container,
         }
@@ -135,6 +143,7 @@ mod tests {
         assert_eq!(task.priority, Some("high".to_string()));
         assert_eq!(task.body, "Some description");
         assert!(task.added.is_some());
+        assert_eq!(task.issue, None);
         assert_eq!(task.container, Some("sipag-container-123".to_string()));
     }
 
@@ -149,6 +158,7 @@ mod tests {
             added: None,
             body: String::new(),
             status: Status::Queue,
+            issue: None,
             file_path: std::path::PathBuf::new(),
             container: None,
         };
@@ -166,6 +176,7 @@ mod tests {
             added: None,
             body: String::new(),
             status: Status::Queue,
+            issue: None,
             file_path: std::path::PathBuf::from("/nonexistent/path.md"),
             container: None,
         };
@@ -191,6 +202,7 @@ mod tests {
             added: None,
             body: String::new(),
             status: Status::Running,
+            issue: None,
             file_path: md_path,
             container: None,
         };

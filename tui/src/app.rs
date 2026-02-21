@@ -196,10 +196,16 @@ impl App {
 
     fn handle_detail_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
+            KeyCode::Char('q') => return Ok(true),
             KeyCode::Esc => self.close_detail(),
             KeyCode::Char('j') | KeyCode::Down => self.scroll_log_down(),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_log_up(),
             KeyCode::Char('r') => self.retry_task(),
+            KeyCode::Char('a') => {
+                if let Some(container) = self.selected_container_name() {
+                    self.attach_request = Some(container);
+                }
+            }
             _ => {}
         }
         Ok(false)
@@ -250,6 +256,7 @@ mod tests {
             added: None,
             body: String::new(),
             status: TaskStatus::Queue,
+            issue: None,
             file_path: std::path::PathBuf::new(),
             container: None,
         };
