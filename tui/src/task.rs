@@ -19,6 +19,16 @@ pub struct Task {
     pub priority: Option<String>,
     pub source: Option<String>,
     pub added: Option<DateTime<Utc>>,
+    /// Completion timestamp (from `ended_at` in worker JSON).
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Duration in seconds (from worker JSON).
+    pub duration_s: Option<i64>,
+    /// Exit code (from worker JSON; set for done/failed tasks).
+    pub exit_code: Option<i64>,
+    /// PR number opened by this worker (from worker JSON; set when done).
+    pub pr_num: Option<u64>,
+    /// PR URL opened by this worker (from worker JSON; set when done).
+    pub pr_url: Option<String>,
     pub body: String,
     pub status: Status,
     /// GitHub issue number (from frontmatter `issue:` field or worker JSON `issue_num`).
@@ -59,6 +69,11 @@ impl From<TaskFile> for Task {
             priority: Some(tf.priority),
             source: tf.source,
             added,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
             body: tf.body,
             status: tf.status,
             issue,
@@ -72,6 +87,12 @@ impl From<TaskFile> for Task {
 impl From<WorkerState> for Task {
     fn from(w: WorkerState) -> Self {
         let added = w.started_at.as_deref().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+        });
+
+        let ended_at = w.ended_at.as_deref().and_then(|s| {
             chrono::DateTime::parse_from_rfc3339(s)
                 .ok()
                 .map(|dt| dt.with_timezone(&Utc))
@@ -98,6 +119,11 @@ impl From<WorkerState> for Task {
             priority: None,
             source: None,
             added,
+            ended_at,
+            duration_s: w.duration_s,
+            exit_code: w.exit_code,
+            pr_num: w.pr_num,
+            pr_url: w.pr_url,
             body: String::new(),
             status,
             issue: Some(issue_num),
@@ -112,24 +138,38 @@ impl From<WorkerState> for Task {
     }
 }
 
+/// Format a `DateTime<Utc>` as a human-readable age ("2d", "3h", "15m", "30s").
+fn format_since(dt: &DateTime<Utc>) -> String {
+    let secs = Utc::now().signed_duration_since(*dt).num_seconds().max(0);
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 impl Task {
-    /// Returns a human-readable age string like "2d", "3h", "15m", "30s".
+    /// Returns a human-readable age string like "2d", "3h", "15m", "30s"
+    /// based on when the task was started/added.
     pub fn format_age(&self) -> String {
-        let Some(added) = &self.added else {
-            return "-".to_string();
-        };
-        let now = Utc::now();
-        let dur = now.signed_duration_since(*added);
-        let secs = dur.num_seconds().max(0);
-        if secs < 60 {
-            format!("{}s", secs)
-        } else if secs < 3600 {
-            format!("{}m", secs / 60)
-        } else if secs < 86400 {
-            format!("{}h", secs / 3600)
-        } else {
-            format!("{}d", secs / 86400)
-        }
+        self.added
+            .as_ref()
+            .map(format_since)
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    /// Returns a human-readable age string based on when the task ended.
+    /// Falls back to `format_age()` (start time) if `ended_at` is not set.
+    pub fn format_ended_age(&self) -> String {
+        self.ended_at
+            .as_ref()
+            .or(self.added.as_ref())
+            .map(format_since)
+            .unwrap_or_else(|| "-".to_string())
     }
 
     /// Returns the last 30 lines of the log file.
@@ -204,6 +244,11 @@ mod tests {
         assert_eq!(task.issue, None);
         assert_eq!(task.container, Some("sipag-container-123".to_string()));
         assert_eq!(task.log_path, None);
+        assert_eq!(task.ended_at, None);
+        assert_eq!(task.duration_s, None);
+        assert_eq!(task.exit_code, None);
+        assert_eq!(task.pr_num, None);
+        assert_eq!(task.pr_url, None);
     }
 
     #[test]
@@ -234,6 +279,8 @@ mod tests {
         assert_eq!(task.status, Status::Running);
         assert_eq!(task.container, Some("sipag-issue-42".to_string()));
         assert!(task.log_path.is_some());
+        assert_eq!(task.ended_at, None);
+        assert_eq!(task.pr_num, None);
     }
 
     #[test]
@@ -257,6 +304,40 @@ mod tests {
         let task = Task::from(w);
         assert_eq!(task.status, Status::Done);
         assert_eq!(task.log_path, None);
+        assert!(task.ended_at.is_some());
+        assert_eq!(task.duration_s, Some(263));
+        assert_eq!(task.exit_code, Some(0));
+        assert_eq!(task.pr_num, Some(163));
+        assert_eq!(
+            task.pr_url,
+            Some("https://github.com/Dorky-Robot/sipag/pull/163".to_string())
+        );
+    }
+
+    #[test]
+    fn from_worker_state_failed() {
+        use sipag_core::worker::WorkerState;
+        let w = WorkerState {
+            repo: "Dorky-Robot/sipag".to_string(),
+            issue_num: 7,
+            issue_title: "Broken task".to_string(),
+            branch: "sipag/issue-7-broken".to_string(),
+            container_name: "sipag-issue-7".to_string(),
+            pr_num: None,
+            pr_url: None,
+            status: sipag_core::worker::WorkerStatus::Failed,
+            started_at: Some("2024-01-15T10:00:00Z".to_string()),
+            ended_at: Some("2024-01-15T10:05:00Z".to_string()),
+            duration_s: Some(300),
+            exit_code: Some(1),
+            log_path: None,
+        };
+        let task = Task::from(w);
+        assert_eq!(task.status, Status::Failed);
+        assert!(task.ended_at.is_some());
+        assert_eq!(task.duration_s, Some(300));
+        assert_eq!(task.exit_code, Some(1));
+        assert_eq!(task.pr_num, None);
     }
 
     #[test]
@@ -268,6 +349,11 @@ mod tests {
             priority: None,
             source: None,
             added: None,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
             body: String::new(),
             status: Status::Queue,
             issue: None,
@@ -279,6 +365,58 @@ mod tests {
     }
 
     #[test]
+    fn format_ended_age_uses_ended_at() {
+        // ended_at is set → uses ended_at
+        let ended = Utc::now() - chrono::Duration::hours(2);
+        let task = Task {
+            id: 1,
+            title: "test".to_string(),
+            repo: None,
+            priority: None,
+            source: None,
+            added: Some(Utc::now() - chrono::Duration::hours(3)),
+            ended_at: Some(ended),
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
+            body: String::new(),
+            status: Status::Done,
+            issue: None,
+            file_path: std::path::PathBuf::new(),
+            container: None,
+            log_path: None,
+        };
+        // Should be approximately "2h"
+        assert_eq!(task.format_ended_age(), "2h");
+    }
+
+    #[test]
+    fn format_ended_age_falls_back_to_added() {
+        // ended_at is None → falls back to added
+        let task = Task {
+            id: 1,
+            title: "test".to_string(),
+            repo: None,
+            priority: None,
+            source: None,
+            added: Some(Utc::now() - chrono::Duration::minutes(5)),
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
+            body: String::new(),
+            status: Status::Running,
+            issue: None,
+            file_path: std::path::PathBuf::new(),
+            container: None,
+            log_path: None,
+        };
+        assert_eq!(task.format_ended_age(), "5m");
+    }
+
+    #[test]
     fn log_lines_missing_file() {
         let task = Task {
             id: 1,
@@ -287,6 +425,11 @@ mod tests {
             priority: None,
             source: None,
             added: None,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
             body: String::new(),
             status: Status::Queue,
             issue: None,
@@ -314,6 +457,11 @@ mod tests {
             priority: None,
             source: None,
             added: None,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
             body: String::new(),
             status: Status::Running,
             issue: None,
@@ -340,6 +488,11 @@ mod tests {
             priority: None,
             source: None,
             added: None,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
             body: String::new(),
             status: Status::Running,
             issue: None,

@@ -1,4 +1,4 @@
-use crate::app::App;
+use crate::app::{App, ListMode};
 use crate::task::Status;
 use ratatui::{
     layout::{Alignment, Constraint, Layout},
@@ -19,7 +19,9 @@ pub fn render_list(f: &mut Frame, app: &App) {
     ])
     .split(area);
 
-    // Count tasks by status
+    let is_archive = app.list_mode == ListMode::Archive;
+
+    // Count tasks by status (for header display)
     let queue_count = app
         .tasks
         .iter()
@@ -42,16 +44,24 @@ pub fn render_list(f: &mut Frame, app: &App) {
         .count();
 
     // ── Header bar ────────────────────────────────────────────────────────────
-    let header_base = format!(
-        " sipag Status [All]  running: {}  done: {}  failed: {}  queue: {}",
-        running_count, done_count, failed_count, queue_count
-    );
+    let mode_label = if is_archive { "[Archive]" } else { "[Active]" };
+    let header_base = if is_archive {
+        format!(
+            " sipag {}  done: {}  failed: {}",
+            mode_label, done_count, failed_count
+        )
+    } else {
+        format!(
+            " sipag {}  running: {}  queue: {}",
+            mode_label, running_count, queue_count
+        )
+    };
     let header_style = Style::default()
         .fg(Color::White)
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
 
-    let header_line = if app.draining {
+    let header_line = if !is_archive && app.draining {
         Line::from(vec![
             Span::styled(header_base, header_style),
             Span::styled(
@@ -70,12 +80,13 @@ pub fn render_list(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     // ── Table column headers ──────────────────────────────────────────────────
+    let since_label = if is_archive { "ENDED" } else { "SINCE" };
     let col_header = Row::new(vec![
         Cell::from("REPO"),
         Cell::from("ISSUE"),
         Cell::from("TITLE"),
         Cell::from("STATUS"),
-        Cell::from("SINCE"),
+        Cell::from(since_label),
     ])
     .style(
         Style::default()
@@ -102,12 +113,18 @@ pub fn render_list(f: &mut Frame, app: &App) {
                 .unwrap_or_else(|| "-".to_string());
             let repo = task.repo.as_deref().unwrap_or("-");
 
+            let age_str = if is_archive {
+                task.format_ended_age()
+            } else {
+                task.format_age()
+            };
+
             Row::new(vec![
                 Cell::from(repo.to_string()),
                 Cell::from(issue_str),
                 Cell::from(task.title.clone()),
                 Cell::from(task.status.name()).style(status_style),
-                Cell::from(task.format_age()),
+                Cell::from(age_str),
             ])
             .height(1)
         })
@@ -119,11 +136,16 @@ pub fn render_list(f: &mut Frame, app: &App) {
         Constraint::Length(7),  // ISSUE
         Constraint::Min(20),    // TITLE (flexible)
         Constraint::Length(10), // STATUS
-        Constraint::Length(10), // SINCE
+        Constraint::Length(10), // SINCE / ENDED
     ];
 
     if app.tasks.is_empty() {
-        let empty = Paragraph::new("\nNo workers running.\n\nStart with:  sipag work <owner/repo>")
+        let empty_msg = if is_archive {
+            "\nNo archived workers.\n\nCompleted workers will appear here."
+        } else {
+            "\nNo workers running.\n\nStart with:  sipag work <owner/repo>"
+        };
+        let empty = Paragraph::new(empty_msg)
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::TOP));
@@ -139,13 +161,16 @@ pub fn render_list(f: &mut Frame, app: &App) {
     }
 
     // ── Footer bar ────────────────────────────────────────────────────────────
-    let selected_task = app.tasks.get(app.selected);
-    let has_running = selected_task.is_some_and(|t| t.status == Status::Running);
-
-    let footer_text = if has_running {
-        " [↑↓/j] nav  [Enter] details  [a] attach  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
+    let footer_text = if is_archive {
+        " [Tab/a] active  [↑↓/j] nav  [Enter] details  [x] dismiss  [q] quit"
     } else {
-        " [↑↓/j] nav  [Enter] details  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
+        let selected_task = app.tasks.get(app.selected);
+        let has_running = selected_task.is_some_and(|t| t.status == Status::Running);
+        if has_running {
+            " [Tab] archive  [↑↓/j] nav  [Enter] details  [a] attach  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
+        } else {
+            " [Tab/a] archive  [↑↓/j] nav  [Enter] details  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
+        }
     };
 
     let footer = Paragraph::new(Line::from(footer_text))

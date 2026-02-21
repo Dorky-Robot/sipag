@@ -1,9 +1,21 @@
 use anyhow::Result;
+use chrono::Utc;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sipag_core::worker::{list_workers, mark_worker_failed};
 use std::{fs, path::PathBuf};
 
 use crate::task::{Status, Task};
+
+// ── ListMode ──────────────────────────────────────────────────────────────────
+
+/// Which subset of workers is shown in the list view.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ListMode {
+    /// Show only active workers: running and recovering (Queue/Running status).
+    Active,
+    /// Show completed workers: done and failed. Auto-hides old entries.
+    Archive,
+}
 
 // ── View ──────────────────────────────────────────────────────────────────────
 
@@ -30,12 +42,20 @@ pub struct App {
     pub attach_request: Option<String>,
     /// True when `~/.sipag/drain` exists (workers won't pick up new issues).
     pub draining: bool,
+    /// Whether the list is showing active (running) or archived (done/failed) workers.
+    pub list_mode: ListMode,
+    /// Archive entries older than this many days are automatically hidden (default: 7).
+    pub archive_max_age_days: u64,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         let sipag_dir = Self::resolve_sipag_dir();
         let draining = sipag_dir.join("drain").exists();
+        let archive_max_age_days = std::env::var("SIPAG_ARCHIVE_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7);
         let mut app = Self {
             sipag_dir,
             tasks: vec![],
@@ -45,6 +65,8 @@ impl App {
             log_scroll: 0,
             attach_request: None,
             draining,
+            list_mode: ListMode::Active,
+            archive_max_age_days,
         };
         app.refresh_tasks()?;
         Ok(app)
@@ -62,7 +84,28 @@ impl App {
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
         let workers = list_workers(&self.sipag_dir).unwrap_or_default();
-        self.tasks = workers.into_iter().map(Task::from).collect();
+        let all_tasks: Vec<Task> = workers.into_iter().map(Task::from).collect();
+
+        let now = Utc::now();
+        let max_age = chrono::Duration::days(self.archive_max_age_days as i64);
+
+        self.tasks = match self.list_mode {
+            ListMode::Active => all_tasks
+                .into_iter()
+                .filter(|t| t.status == Status::Queue || t.status == Status::Running)
+                .collect(),
+            ListMode::Archive => all_tasks
+                .into_iter()
+                .filter(|t| t.status == Status::Done || t.status == Status::Failed)
+                .filter(|t| {
+                    // Auto-hide entries older than max_age.
+                    // If ended_at is not set, keep the entry visible.
+                    t.ended_at
+                        .is_none_or(|ended| now.signed_duration_since(ended) < max_age)
+                })
+                .collect(),
+        };
+
         // Clamp selection
         if self.tasks.is_empty() {
             self.selected = 0;
@@ -87,6 +130,16 @@ impl App {
     }
 
     // ── View transitions ──────────────────────────────────────────────────────
+
+    /// Toggle between the Active and Archive list modes.
+    pub fn toggle_list_mode(&mut self) {
+        self.list_mode = match self.list_mode {
+            ListMode::Active => ListMode::Archive,
+            ListMode::Archive => ListMode::Active,
+        };
+        self.selected = 0;
+        let _ = self.refresh_tasks();
+    }
 
     /// Open the detail view for the currently selected task.
     pub fn open_detail(&mut self) {
@@ -166,6 +219,43 @@ impl App {
         }
 
         self.close_detail();
+    }
+
+    /// Remove the worker state JSON file for the selected done/failed task,
+    /// dismissing it from the archive.
+    ///
+    /// Only operates on worker-JSON tasks (where `file_path` is empty).
+    pub fn dismiss_selected(&mut self) -> Result<()> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+        let task = &self.tasks[self.selected];
+        if task.status != Status::Done && task.status != Status::Failed {
+            return Ok(());
+        }
+
+        // Worker-JSON tasks are identified by an empty file_path.
+        // Only those have a workers/*.json file to delete.
+        if !task.file_path.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        if let (Some(repo), Some(issue_num)) = (task.repo.clone(), task.issue) {
+            let repo_slug = repo.replace('/', "--");
+            let json_path = self
+                .sipag_dir
+                .join("workers")
+                .join(format!("{}--{}.json", repo_slug, issue_num));
+            let _ = fs::remove_file(&json_path);
+        }
+
+        // If dismissing from the detail view, go back to the list.
+        if matches!(self.view, View::Detail) {
+            self.view = View::List;
+        }
+
+        self.refresh_tasks()?;
+        Ok(())
     }
 
     /// Create the drain signal file (`~/.sipag/drain`).
@@ -260,14 +350,20 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return Ok(true),
+            KeyCode::Tab => self.toggle_list_mode(),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Up => self.select_prev(),
             KeyCode::Enter => self.open_detail(),
             KeyCode::Char('a') => {
                 if let Some(container) = self.selected_container_name() {
+                    // Running task selected: attach to its container.
                     self.attach_request = Some(container);
+                } else {
+                    // No running task selected: toggle between active/archive.
+                    self.toggle_list_mode();
                 }
             }
+            KeyCode::Char('x') | KeyCode::Delete => self.dismiss_selected()?,
             KeyCode::Char('d') => self.drain()?,
             KeyCode::Char('r') => self.resume()?,
             KeyCode::Char('k') => self.kill_selected()?,
@@ -289,6 +385,7 @@ impl App {
                     self.attach_request = Some(container);
                 }
             }
+            KeyCode::Char('x') | KeyCode::Delete => self.dismiss_selected()?,
             _ => {}
         }
         Ok(false)
@@ -307,6 +404,43 @@ impl App {
 mod tests {
     use super::*;
     use sipag_core::task::TaskStatus;
+
+    fn make_task(n: u32, status: TaskStatus) -> Task {
+        Task {
+            id: n,
+            title: format!("Task {}", n),
+            repo: None,
+            priority: None,
+            source: None,
+            added: None,
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            pr_num: None,
+            pr_url: None,
+            body: String::new(),
+            status,
+            issue: None,
+            file_path: std::path::PathBuf::new(),
+            container: None,
+            log_path: None,
+        }
+    }
+
+    fn make_app_with_tasks(tasks: Vec<Task>) -> App {
+        App {
+            sipag_dir: std::path::PathBuf::new(),
+            tasks,
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+            list_mode: ListMode::Active,
+            archive_max_age_days: 7,
+        }
+    }
 
     #[test]
     fn task_status_symbols() {
@@ -327,34 +461,11 @@ mod tests {
 
     #[test]
     fn select_next_and_prev() {
-        use crate::task::Task;
-        use sipag_core::task::TaskStatus;
-
-        let make_task = |n: u32| Task {
-            id: n,
-            title: format!("Task {}", n),
-            repo: None,
-            priority: None,
-            source: None,
-            added: None,
-            body: String::new(),
-            status: TaskStatus::Queue,
-            issue: None,
-            file_path: std::path::PathBuf::new(),
-            container: None,
-            log_path: None,
-        };
-
-        let mut app = App {
-            sipag_dir: std::path::PathBuf::new(),
-            tasks: vec![make_task(1), make_task(2), make_task(3)],
-            selected: 0,
-            view: View::List,
-            log_lines: vec![],
-            log_scroll: 0,
-            attach_request: None,
-            draining: false,
-        };
+        let mut app = make_app_with_tasks(vec![
+            make_task(1, TaskStatus::Queue),
+            make_task(2, TaskStatus::Queue),
+            make_task(3, TaskStatus::Queue),
+        ]);
 
         app.select_next();
         assert_eq!(app.selected, 1);
@@ -408,6 +519,139 @@ mod tests {
     }
 
     #[test]
+    fn refresh_tasks_active_mode_filters_terminal() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir(&workers_dir).unwrap();
+
+        let running_json = r#"{"repo":"test/repo","issue_num":1,"issue_title":"Running","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"running","started_at":null,"ended_at":null,"duration_s":null,"exit_code":null,"log_path":null}"#;
+        let done_json = r#"{"repo":"test/repo","issue_num":2,"issue_title":"Done","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"done","started_at":null,"ended_at":null,"duration_s":null,"exit_code":null,"log_path":null}"#;
+
+        let mut f = std::fs::File::create(workers_dir.join("test--repo--1.json")).unwrap();
+        writeln!(f, "{}", running_json).unwrap();
+        let mut f = std::fs::File::create(workers_dir.join("test--repo--2.json")).unwrap();
+        writeln!(f, "{}", done_json).unwrap();
+
+        std::env::set_var("SIPAG_DIR", dir.path().to_str().unwrap());
+        let app = App::new().expect("App::new() should succeed");
+        std::env::remove_var("SIPAG_DIR");
+
+        // Active mode (default): only running task visible
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn toggle_list_mode_switches_visible_tasks() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir(&workers_dir).unwrap();
+
+        let running_json = r#"{"repo":"test/repo","issue_num":1,"issue_title":"Running","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"running","started_at":null,"ended_at":null,"duration_s":null,"exit_code":null,"log_path":null}"#;
+        let done_json = r#"{"repo":"test/repo","issue_num":2,"issue_title":"Done","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"done","started_at":"2024-01-15T10:00:00Z","ended_at":"2024-01-15T10:05:00Z","duration_s":300,"exit_code":0,"log_path":null}"#;
+
+        let mut f = std::fs::File::create(workers_dir.join("test--repo--1.json")).unwrap();
+        writeln!(f, "{}", running_json).unwrap();
+        let mut f = std::fs::File::create(workers_dir.join("test--repo--2.json")).unwrap();
+        writeln!(f, "{}", done_json).unwrap();
+
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+            list_mode: ListMode::Active,
+            // Use a large max_age so the fixture's hardcoded 2024 date is not pruned.
+            archive_max_age_days: 99999,
+        };
+        app.refresh_tasks().unwrap();
+
+        // Active mode: only running
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].status, TaskStatus::Running);
+
+        app.toggle_list_mode();
+
+        // Archive mode: only done (within age threshold)
+        assert_eq!(app.list_mode, ListMode::Archive);
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn archive_auto_hides_old_entries() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir(&workers_dir).unwrap();
+
+        // A done task that ended 10 days ago (older than default 7 days)
+        let old_done_json = r#"{"repo":"test/repo","issue_num":3,"issue_title":"Old Done","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"done","started_at":"2000-01-01T00:00:00Z","ended_at":"2000-01-01T01:00:00Z","duration_s":3600,"exit_code":0,"log_path":null}"#;
+
+        let mut f = std::fs::File::create(workers_dir.join("test--repo--3.json")).unwrap();
+        writeln!(f, "{}", old_done_json).unwrap();
+
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+            list_mode: ListMode::Archive,
+            archive_max_age_days: 7,
+        };
+        app.refresh_tasks().unwrap();
+
+        // Old entry should be hidden
+        assert_eq!(app.tasks.len(), 0);
+    }
+
+    #[test]
+    fn dismiss_selected_removes_worker_json() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir(&workers_dir).unwrap();
+
+        let done_json = r#"{"repo":"test/repo","issue_num":5,"issue_title":"Done task","branch":"b","container_name":"c","pr_num":null,"pr_url":null,"status":"done","started_at":"2024-01-15T10:00:00Z","ended_at":"2024-01-15T10:05:00Z","duration_s":300,"exit_code":0,"log_path":null}"#;
+        let json_path = workers_dir.join("test--repo--5.json");
+        let mut f = std::fs::File::create(&json_path).unwrap();
+        writeln!(f, "{}", done_json).unwrap();
+
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+            list_mode: ListMode::Archive,
+            // Use a large max_age so the fixture's hardcoded 2024 date is not pruned.
+            archive_max_age_days: 99999,
+        };
+        app.refresh_tasks().unwrap();
+        assert_eq!(app.tasks.len(), 1);
+
+        app.dismiss_selected().unwrap();
+
+        // JSON file removed
+        assert!(!json_path.exists());
+        // Task list now empty
+        assert_eq!(app.tasks.len(), 0);
+    }
+
+    #[test]
     fn drain_creates_file_and_resume_removes_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App {
@@ -419,6 +663,8 @@ mod tests {
             log_scroll: 0,
             attach_request: None,
             draining: false,
+            list_mode: ListMode::Active,
+            archive_max_age_days: 7,
         };
 
         assert!(!app.draining);
@@ -443,6 +689,8 @@ mod tests {
             log_scroll: 0,
             attach_request: None,
             draining: false,
+            list_mode: ListMode::Active,
+            archive_max_age_days: 7,
         };
 
         // Should not panic or error when drain file does not exist
@@ -452,23 +700,8 @@ mod tests {
 
     #[test]
     fn kill_selected_noop_on_non_running() {
-        use crate::task::Task;
-
         let dir = tempfile::tempdir().unwrap();
-        let task = Task {
-            id: 1,
-            title: "Test".to_string(),
-            repo: None,
-            priority: None,
-            source: None,
-            added: None,
-            body: String::new(),
-            status: Status::Queue,
-            issue: None,
-            file_path: std::path::PathBuf::new(),
-            container: Some("sipag-issue-1".to_string()),
-            log_path: None,
-        };
+        let task = make_task(1, Status::Queue);
         let mut app = App {
             sipag_dir: dir.path().to_path_buf(),
             tasks: vec![task],
@@ -478,6 +711,8 @@ mod tests {
             log_scroll: 0,
             attach_request: None,
             draining: false,
+            list_mode: ListMode::Active,
+            archive_max_age_days: 7,
         };
 
         // Should not error — non-running task is ignored
