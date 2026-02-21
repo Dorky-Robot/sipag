@@ -25,3 +25,27 @@ pub fn init_dirs(sipag_dir: &Path) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_init_dirs() {
+        let dir = TempDir::new().unwrap();
+        init_dirs(dir.path()).unwrap();
+        assert!(dir.path().join("queue").exists());
+        assert!(dir.path().join("running").exists());
+        assert!(dir.path().join("done").exists());
+        assert!(dir.path().join("failed").exists());
+    }
+
+    #[test]
+    fn test_init_dirs_idempotent() {
+        let dir = TempDir::new().unwrap();
+        init_dirs(dir.path()).unwrap();
+        // Should not fail on second call
+        init_dirs(dir.path()).unwrap();
+    }
+}

@@ -5,6 +5,10 @@ use std::process::{Command, Stdio};
 
 use crate::task::{append_ended, slugify, write_tracking_file};
 
+fn now_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 /// Check that Docker daemon is running and accessible.
 fn preflight_docker_running() -> Result<()> {
     let status = Command::new("docker")
@@ -140,6 +144,7 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         issue,
         &container_name,
         description,
+        &now_timestamp(),
     )?;
 
     let prompt = build_prompt(description, "", issue);
@@ -226,7 +231,7 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
             .context("Failed to spawn background worker")?;
     } else {
         let success = run_docker(&log_path);
-        let _ = append_ended(&tracking_file);
+        let _ = append_ended(&tracking_file, &now_timestamp());
         if success {
             if tracking_file.exists() {
                 fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
@@ -336,52 +341,6 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     }
 
     Ok(())
-}
-
-/// Run claude directly (non-Docker mode, for the `next` command).
-pub fn run_claude(title: &str, body: &str) -> Result<()> {
-    let mut prompt = title.to_string();
-    if let Ok(prefix) = std::env::var("SIPAG_PROMPT_PREFIX") {
-        prompt = format!("{prefix}\n\n{prompt}");
-    }
-    if !body.is_empty() {
-        prompt.push_str(&format!("\n\n{body}"));
-    }
-
-    let mut args = vec!["--print".to_string()];
-    let skip_perms = std::env::var("SIPAG_SKIP_PERMISSIONS").unwrap_or_else(|_| "1".to_string());
-    if skip_perms == "1" {
-        args.push("--dangerously-skip-permissions".to_string());
-    }
-    if let Ok(model) = std::env::var("SIPAG_MODEL") {
-        args.push("--model".to_string());
-        args.push(model);
-    }
-    if let Ok(extra) = std::env::var("SIPAG_CLAUDE_ARGS") {
-        for arg in extra.split_whitespace() {
-            args.push(arg.to_string());
-        }
-    }
-    args.push("-p".to_string());
-    args.push(prompt);
-
-    let timeout = std::env::var("SIPAG_TIMEOUT")
-        .unwrap_or_else(|_| "600".to_string())
-        .parse::<u64>()
-        .unwrap_or(600);
-
-    let status = Command::new("timeout")
-        .arg(timeout.to_string())
-        .arg("claude")
-        .args(&args)
-        .status()
-        .context("Failed to run claude")?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        anyhow::bail!("claude exited with non-zero status: {}", status)
-    }
 }
 
 /// Generate a task ID from the current timestamp and a slugified description.
