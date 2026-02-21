@@ -48,8 +48,8 @@ pub struct TaskFile {
 
 /// Parse a task file with optional YAML frontmatter.
 pub fn parse_task_file(path: &Path, status: TaskStatus) -> Result<TaskFile> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     let name = path
         .file_stem()
@@ -108,7 +108,10 @@ pub fn parse_task_file(path: &Path, status: TaskStatus) -> Result<TaskFile> {
 
     // Collect remaining lines as body, trimming leading/trailing blank lines
     let remaining = &lines[i..];
-    let start = remaining.iter().position(|l| !l.is_empty()).unwrap_or(remaining.len());
+    let start = remaining
+        .iter()
+        .position(|l| !l.is_empty())
+        .unwrap_or(remaining.len());
     let end = remaining
         .iter()
         .rposition(|l| !l.is_empty())
@@ -211,7 +214,9 @@ pub fn write_tracking_file(
     if let Some(iss) = issue {
         content.push_str(&format!("issue: {iss}\n"));
     }
-    content.push_str(&format!("started: {started}\ncontainer: {container}\n---\n{description}\n"));
+    content.push_str(&format!(
+        "started: {started}\ncontainer: {container}\n---\n{description}\n"
+    ));
     fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
@@ -289,8 +294,8 @@ pub struct ChecklistItem {
 
 /// Parse all checklist items from a markdown file with `- [ ]` / `- [x]` format.
 pub fn parse_checklist(path: &Path) -> Result<Vec<ChecklistItem>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     let mut items = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -345,8 +350,8 @@ pub fn next_checklist_item(path: &Path) -> Result<Option<ChecklistItem>> {
 
 /// Mark a checklist item as done at the given 1-indexed line number.
 pub fn mark_checklist_done(path: &Path, line_num: usize) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
 
     let idx = line_num.saturating_sub(1);
@@ -564,7 +569,11 @@ mod tests {
     fn test_next_checklist_item() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("tasks.md");
-        fs::write(&path, "- [x] Done task\n- [ ] First pending\n- [ ] Second pending\n").unwrap();
+        fs::write(
+            &path,
+            "- [x] Done task\n- [ ] First pending\n- [ ] Second pending\n",
+        )
+        .unwrap();
         let item = next_checklist_item(&path).unwrap().unwrap();
         assert_eq!(item.title, "First pending");
         assert_eq!(item.line_num, 2);

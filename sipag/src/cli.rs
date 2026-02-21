@@ -52,6 +52,9 @@ pub enum Commands {
     Logs {
         /// Task ID
         id: String,
+        /// Follow log output in real-time (like tail -f); exits when task finishes
+        #[arg(short = 'f', long)]
+        follow: bool,
     },
 
     /// Kill a running container and move task to failed/
@@ -171,7 +174,7 @@ pub fn run(cli: Cli) -> Result<()> {
             description,
         }) => cmd_run(&repo, issue.as_deref(), background, &description),
         Some(Commands::Ps) => cmd_ps(),
-        Some(Commands::Logs { id }) => cmd_logs(&id),
+        Some(Commands::Logs { id, follow }) => cmd_logs(&id, follow),
         Some(Commands::Kill { id }) => cmd_kill(&id),
         Some(Commands::Add {
             title,
@@ -222,7 +225,8 @@ fn cmd_start() -> Result<()> {
     let queue_dir = dir.join("queue");
     let running_dir = dir.join("running");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -319,7 +323,8 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let task_id = generate_task_id(description);
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -415,16 +420,66 @@ fn compute_duration(task: &task::TaskFile, now: &chrono::DateTime<chrono::Utc>) 
     }
 }
 
-fn cmd_logs(task_id: &str) -> Result<()> {
+fn cmd_logs(task_id: &str, follow: bool) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
     let dir = sipag_dir();
+
+    // Locate the log file across all status directories
+    let mut log_path = None;
+    let mut is_running = false;
     for status_dir in &["running", "done", "failed"] {
-        let log_file = dir.join(status_dir).join(format!("{task_id}.log"));
-        if log_file.exists() {
-            print!("{}", fs::read_to_string(&log_file)?);
-            return Ok(());
+        let candidate = dir.join(status_dir).join(format!("{task_id}.log"));
+        if candidate.exists() {
+            log_path = Some(candidate);
+            is_running = *status_dir == "running";
+            break;
         }
     }
-    bail!("Error: no log found for task '{task_id}'")
+
+    let log_path = log_path.ok_or_else(|| anyhow::anyhow!("no log found for task '{task_id}'"))?;
+
+    if !follow || !is_running {
+        // Simple one-shot dump
+        print!("{}", fs::read_to_string(&log_path)?);
+        return Ok(());
+    }
+
+    // Follow mode: stream new bytes as they are written, exit when task leaves running/
+    let mut file = fs::File::open(&log_path)?;
+    let mut pos = 0u64;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    loop {
+        // Read any new bytes since last check (fd stays valid even after rename on Linux)
+        file.seek(SeekFrom::Start(pos))?;
+        let mut buf = Vec::new();
+        let n = file.read_to_end(&mut buf)?;
+        if n > 0 {
+            out.write_all(&buf)?;
+            out.flush()?;
+            pos += n as u64;
+        }
+
+        // Exit once the task is no longer in running/ (tracking file was moved/removed)
+        let tracking_file = dir.join("running").join(format!("{task_id}.md"));
+        if !tracking_file.exists() {
+            // One final read to drain any bytes written just before the rename
+            file.seek(SeekFrom::Start(pos))?;
+            let mut buf = Vec::new();
+            let n = file.read_to_end(&mut buf)?;
+            if n > 0 {
+                out.write_all(&buf)?;
+                out.flush()?;
+            }
+            break;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    Ok(())
 }
 
 fn cmd_kill(task_id: &str) -> Result<()> {
@@ -617,7 +672,12 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
 
 fn cmd_status() -> Result<()> {
     let dir = sipag_dir();
-    let labels = [("Queue", "queue"), ("Running", "running"), ("Done", "done"), ("Failed", "failed")];
+    let labels = [
+        ("Queue", "queue"),
+        ("Running", "running"),
+        ("Done", "done"),
+        ("Failed", "failed"),
+    ];
 
     for (label, subdir) in &labels {
         let d = dir.join(subdir);
