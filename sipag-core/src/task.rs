@@ -278,98 +278,6 @@ pub fn list_tasks(sipag_dir: &Path) -> Result<Vec<TaskFile>> {
     Ok(tasks)
 }
 
-/// A single item in a markdown checklist file.
-#[derive(Debug, Clone)]
-pub struct ChecklistItem {
-    pub line_num: usize, // 1-indexed
-    pub title: String,
-    pub body: String,
-    pub done: bool,
-}
-
-/// Parse all checklist items from a markdown file with `- [ ]` / `- [x]` format.
-pub fn parse_checklist(path: &Path) -> Result<Vec<ChecklistItem>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-
-    let mut items = Vec::new();
-    let lines: Vec<&str> = content.lines().collect();
-    let n = lines.len();
-    let mut i = 0;
-
-    while i < n {
-        let line = lines[i];
-        if let Some(stripped) = line.strip_prefix("- [ ] ") {
-            let title = stripped.to_string();
-            let line_num = i + 1;
-            // Collect indented body lines (2+ spaces)
-            let mut body_lines = Vec::new();
-            i += 1;
-            while i < n {
-                let next = lines[i];
-                if next.starts_with("  ") || next.starts_with('\t') {
-                    body_lines.push(next.trim().to_string());
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            let body = body_lines.join("\n");
-            items.push(ChecklistItem {
-                line_num,
-                title,
-                body,
-                done: false,
-            });
-        } else if let Some(stripped) = line.strip_prefix("- [x] ") {
-            items.push(ChecklistItem {
-                line_num: i + 1,
-                title: stripped.to_string(),
-                body: String::new(),
-                done: true,
-            });
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-
-    Ok(items)
-}
-
-/// Find the first pending (unchecked) checklist item in a file.
-pub fn next_checklist_item(path: &Path) -> Result<Option<ChecklistItem>> {
-    let items = parse_checklist(path)?;
-    Ok(items.into_iter().find(|item| !item.done))
-}
-
-/// Mark a checklist item as done at the given 1-indexed line number.
-pub fn mark_checklist_done(path: &Path, line_num: usize) -> Result<()> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-
-    let idx = line_num.saturating_sub(1);
-    if idx < lines.len() {
-        lines[idx] = lines[idx].replacen("- [ ] ", "- [x] ", 1);
-    }
-
-    fs::write(path, lines.join("\n") + "\n")
-        .with_context(|| format!("Failed to write {}", path.display()))
-}
-
-/// Append a new pending checklist item to a file (creates file if missing).
-pub fn append_checklist_item(path: &Path, title: &str) -> Result<()> {
-    let line = format!("- [ ] {title}\n");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    file.write_all(line.as_bytes())?;
-    Ok(())
-}
-
 /// Return the default sipag data directory (~/.sipag or $SIPAG_DIR).
 pub fn default_sipag_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SIPAG_DIR") {
@@ -381,13 +289,6 @@ pub fn default_sipag_dir() -> PathBuf {
     PathBuf::from(".sipag")
 }
 
-/// Return the default task file path (./tasks.md or $SIPAG_FILE).
-pub fn default_sipag_file() -> PathBuf {
-    if let Ok(f) = std::env::var("SIPAG_FILE") {
-        return PathBuf::from(f);
-    }
-    PathBuf::from("tasks.md")
-}
 
 #[cfg(test)]
 mod tests {
@@ -539,57 +440,6 @@ mod tests {
         write_task_file(&path, "My Task", "myrepo", "medium", Some("github#42")).unwrap();
         let task = parse_task_file(&path, TaskStatus::Queue).unwrap();
         assert_eq!(task.source, Some("github#42".to_string()));
-    }
-
-    #[test]
-    fn test_parse_checklist() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("tasks.md");
-        fs::write(
-            &path,
-            "- [x] Done task\n- [ ] Pending task\n  some body\n- [ ] Another task\n",
-        )
-        .unwrap();
-        let items = parse_checklist(&path).unwrap();
-        assert_eq!(items.len(), 3);
-        assert!(items[0].done);
-        assert_eq!(items[0].title, "Done task");
-        assert!(!items[1].done);
-        assert_eq!(items[1].title, "Pending task");
-        assert_eq!(items[1].body, "some body");
-        assert!(!items[2].done);
-    }
-
-    #[test]
-    fn test_next_checklist_item() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("tasks.md");
-        fs::write(&path, "- [x] Done task\n- [ ] First pending\n- [ ] Second pending\n").unwrap();
-        let item = next_checklist_item(&path).unwrap().unwrap();
-        assert_eq!(item.title, "First pending");
-        assert_eq!(item.line_num, 2);
-    }
-
-    #[test]
-    fn test_mark_checklist_done() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("tasks.md");
-        fs::write(&path, "- [x] Done\n- [ ] Pending\n- [ ] Another\n").unwrap();
-        mark_checklist_done(&path, 2).unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("- [x] Pending"));
-        assert!(content.contains("- [ ] Another"));
-    }
-
-    #[test]
-    fn test_append_checklist_item() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("tasks.md");
-        append_checklist_item(&path, "New task").unwrap();
-        append_checklist_item(&path, "Another task").unwrap();
-        let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("- [ ] New task"));
-        assert!(content.contains("- [ ] Another task"));
     }
 
     #[test]
