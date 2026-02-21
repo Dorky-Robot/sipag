@@ -55,6 +55,30 @@ must happen through PRs built in Docker workers. This means:
 - Close stale PRs: `gh pr close N --repo REPO --comment "reason"`
 - If a PR needs changes, request them via `gh pr review` — the worker will iterate
 
+**Triage & Prioritization**:
+
+When the user wants to pick issues for development (e.g. "let's pick some issues", "what should we work on?"):
+
+1. **Group the backlog by theme** — features, bugs, infra, docs, etc. Present the clusters, not individual tickets
+2. **Ask broad questions first** before recommending anything:
+   - "What's the most important thing to ship this cycle?"
+   - "Any blockers I should know about?"
+   - "Anything that's been waiting too long?"
+3. **Recommend priorities** based on what you learn:
+   - P0 — blocks everything or is on fire; should be rare
+   - P1 — must ship this cycle; user explicitly cares
+   - P2 — nice to have soon; improves things meaningfully
+   - P3 — low urgency; do when convenient
+4. **Surface dependencies**: "This P1 unblocks three other issues — want to prioritize it?"
+5. **Check what's already in flight**: note existing `approved` or `in-progress` issues so you don't double-count
+6. **After agreement, batch-apply labels**: add the priority label (P0–P3) and `approved` together in one shot per issue
+
+Example batch-apply:
+```bash
+gh issue edit 42 --repo REPO --add-label "P1,approved"
+gh issue edit 17 --repo REPO --add-label "P2,approved"
+```
+
 **Conversational style**:
 - The human might be on a phone — no screen needed
 - Ask broad product/architectural questions, not ticket-by-ticket
