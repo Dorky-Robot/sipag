@@ -210,6 +210,96 @@ EOF
 20" ]]
 }
 
+# --- worker_find_prs_needing_iteration: jq filter logic ---
+# These tests run the jq filter from worker_find_prs_needing_iteration directly
+# against realistic PR JSON to verify the date-anchored detection logic.
+
+# Extract the jq filter used by worker_find_prs_needing_iteration so tests
+# can apply it to synthetic data without needing a live GitHub connection.
+PR_ITER_JQ='
+  .[] |
+  (
+      if (.commits | length) > 0
+      then .commits[-1].committedDate
+      else "1970-01-01T00:00:00Z"
+      end
+  ) as $last_push |
+  select(
+      ((.reviews // []) | map(select(.state == "CHANGES_REQUESTED" and .submittedAt > $last_push)) | length > 0) or
+      ((.comments // []) | map(select(.createdAt > $last_push)) | length > 0)
+  ) |
+  .number
+'
+
+@test "jq filter: CHANGES_REQUESTED review after last commit triggers iteration" {
+  local json='[{"number":10,
+    "reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2024-01-02T00:00:00Z"}],
+    "commits":[{"committedDate":"2024-01-01T00:00:00Z"}],
+    "comments":[]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ "$result" == "10" ]]
+}
+
+@test "jq filter: CHANGES_REQUESTED review before last commit does not trigger iteration" {
+  # Reviewer requested changes, worker pushed a fix — review is now stale
+  local json='[{"number":11,
+    "reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2024-01-01T00:00:00Z"}],
+    "commits":[{"committedDate":"2024-01-02T00:00:00Z"}],
+    "comments":[]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: comment after last commit triggers iteration" {
+  local json='[{"number":12,
+    "reviews":[],
+    "commits":[{"committedDate":"2024-01-01T00:00:00Z"}],
+    "comments":[{"createdAt":"2024-01-02T00:00:00Z","author":{"login":"reviewer"},"body":"please fix"}]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ "$result" == "12" ]]
+}
+
+@test "jq filter: comment before last commit does not trigger iteration" {
+  # Comment was posted before the worker's last push — already addressed
+  local json='[{"number":13,
+    "reviews":[],
+    "commits":[{"committedDate":"2024-01-02T00:00:00Z"}],
+    "comments":[{"createdAt":"2024-01-01T00:00:00Z","author":{"login":"reviewer"},"body":"old comment"}]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: PR with no commits uses epoch as baseline so any feedback triggers iteration" {
+  local json='[{"number":14,
+    "reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2024-01-01T00:00:00Z"}],
+    "commits":[],
+    "comments":[]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ "$result" == "14" ]]
+}
+
+@test "jq filter: APPROVED review does not trigger iteration" {
+  local json='[{"number":15,
+    "reviews":[{"state":"APPROVED","submittedAt":"2024-01-02T00:00:00Z"}],
+    "commits":[{"committedDate":"2024-01-01T00:00:00Z"}],
+    "comments":[]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: only the latest commit date is used as baseline" {
+  # Second commit is after the CHANGES_REQUESTED review — worker already addressed it
+  local json='[{"number":16,
+    "reviews":[{"state":"CHANGES_REQUESTED","submittedAt":"2024-01-02T00:00:00Z"}],
+    "commits":[
+      {"committedDate":"2024-01-01T00:00:00Z"},
+      {"committedDate":"2024-01-03T00:00:00Z"}
+    ],
+    "comments":[]}]'
+  result=$(echo "$json" | jq -r "$PR_ITER_JQ")
+  [[ -z "$result" ]]
+}
+
 # --- worker_slugify ---
 
 @test "worker_slugify lowercases title" {
@@ -304,4 +394,105 @@ EOF
   chmod +x "${TEST_TMPDIR}/bin/gh"
   run worker_has_open_pr "owner/repo" 5
   [[ "$status" -ne 0 ]]
+}
+
+# --- sipag_run_hook ---
+
+@test "sipag_run_hook: silently skips missing hook" {
+  run sipag_run_hook "on-nonexistent-hook"
+  [[ "$status" -eq 0 ]]
+}
+
+@test "sipag_run_hook: silently skips non-executable hook" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  echo "#!/usr/bin/env bash" > "${SIPAG_DIR}/hooks/on-worker-started"
+  # intentionally NOT chmod +x
+  run sipag_run_hook "on-worker-started"
+  [[ "$status" -eq 0 ]]
+}
+
+@test "sipag_run_hook: runs executable hook" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local marker="${TEST_TMPDIR}/hook-ran"
+  cat > "${SIPAG_DIR}/hooks/on-worker-completed" <<HOOK
+#!/usr/bin/env bash
+touch "${marker}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-worker-completed"
+  sipag_run_hook "on-worker-completed"
+  # wait for background hook (up to 2s)
+  local i=0
+  while [[ ! -f "$marker" && $i -lt 20 ]]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  [[ -f "$marker" ]]
+}
+
+@test "sipag_run_hook: hook inherits exported env vars" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local output_file="${TEST_TMPDIR}/hook-env"
+  cat > "${SIPAG_DIR}/hooks/on-worker-started" <<HOOK
+#!/usr/bin/env bash
+echo "\${SIPAG_EVENT}" > "${output_file}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-worker-started"
+  export SIPAG_EVENT="worker.started"
+  sipag_run_hook "on-worker-started"
+  # wait for background hook (up to 2s)
+  local i=0
+  while [[ ! -f "$output_file" && $i -lt 20 ]]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  grep -q "worker.started" "$output_file"
+}
+
+# --- WORKER_ONCE ---
+
+@test "WORKER_ONCE defaults to 0" {
+  [[ "$WORKER_ONCE" == "0" ]]
+}
+
+@test "worker_loop --once: exits after cycle with no work" {
+  # Mock gh to return empty results for all calls
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+# Return empty JSON array for all gh calls (no issues, no PRs)
+echo '[]'
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  # Initialize worker state without running the real worker_init (avoids gh auth call)
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  touch "$WORKER_SEEN_FILE"
+  WORKER_GH_TOKEN="test-token"
+  WORKER_OAUTH_TOKEN=""
+  WORKER_API_KEY=""
+  WORKER_TIMEOUT_CMD=""
+  WORKER_ONCE=1
+
+  # worker_loop should exit after one cycle (no infinite sleep)
+  run worker_loop "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "--once"
+}
+
+@test "worker_loop --once flag: --once message appears in output" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+echo '[]'
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
+  touch "$WORKER_SEEN_FILE"
+  WORKER_GH_TOKEN="test-token"
+  WORKER_OAUTH_TOKEN=""
+  WORKER_API_KEY=""
+  WORKER_TIMEOUT_CMD=""
+  WORKER_ONCE=1
+
+  run worker_loop "owner/repo"
+  assert_output_contains "--once:"
 }

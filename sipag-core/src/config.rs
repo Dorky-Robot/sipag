@@ -5,8 +5,6 @@ use std::path::PathBuf;
 pub struct Config {
     /// Base directory for sipag state (~/.sipag by default).
     pub sipag_dir: PathBuf,
-    /// Legacy task file (./tasks.md by default).
-    pub sipag_file: PathBuf,
     /// Docker image to use for task execution.
     pub image: String,
     /// Per-task timeout in seconds.
@@ -33,11 +31,8 @@ impl Default for Config {
 
         Self {
             sipag_dir: sipag_dir.clone(),
-            sipag_file: std::env::var("SIPAG_FILE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("./tasks.md")),
             image: std::env::var("SIPAG_IMAGE")
-                .unwrap_or_else(|_| "sipag-worker:latest".to_string()),
+                .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string()),
             timeout: std::env::var("SIPAG_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())

@@ -1,0 +1,13 @@
+# _typos.toml — spelling whitelist for sipag
+#
+# Domain-specific terms and proper nouns that typos should not flag.
+# Documentation: https://github.com/crate-ci/typos/blob/master/docs/reference.md
+
+[default.extend-words]
+# Project names and stack components
+sipag = "sipag"   # this project
+kubo  = "kubo"    # chain-of-thought planner in the dorky robot stack
+tao   = "tao"     # decision layer in the dorky robot stack
+
+# Common technical abbreviations used in this codebase
+# (add more here as needed)

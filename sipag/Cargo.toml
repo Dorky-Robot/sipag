@@ -11,7 +11,5 @@ path = "src/main.rs"
 [dependencies]
 sipag-core = { path = "../sipag-core" }
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = "0.28"
 chrono = "0.4"
 anyhow = "1"
