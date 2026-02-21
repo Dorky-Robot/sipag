@@ -75,10 +75,17 @@ worker_find_prs_needing_iteration() {
 # open issues. Uses GitHub's timeline API to find an exact cross-reference from
 # a merged PR — avoids the false positives produced by "gh pr list --search"
 # fuzzy matching (e.g. searching for #66 returning PRs that mention #6).
+#
+# Also detects orphaned branches (sipag/issue-* with commits but no open PR)
+# and creates recovery PRs for them, so no branch is left without a PR after
+# a worker run that failed during PR creation.
 worker_reconcile() {
     local repo="$1"
     mapfile -t inprogress < <(gh issue list --repo "$repo" --state open \
         --label "in-progress" --json number -q '.[].number' 2>/dev/null | sort -n)
+
+    # Detect and recover orphaned branches every cycle, regardless of in-progress count
+    worker_reconcile_orphaned_branches "$repo"
 
     [[ ${#inprogress[@]} -eq 0 ]] && return 0
 
@@ -99,6 +106,62 @@ worker_reconcile() {
         echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${merged_pr} (${pr_title})"
         gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${merged_pr}" 2>/dev/null
         worker_mark_seen "$issue"
+    done
+}
+
+# Scan for sipag/issue-* branches that have commits ahead of main but no open PR.
+# Creates recovery PRs for any orphaned branches found. This runs every reconciliation
+# cycle to catch workers that pushed commits but failed to create the PR.
+worker_reconcile_orphaned_branches() {
+    local repo="$1"
+
+    # List all sipag/issue-* branches (capped at 100; covers any realistic backlog)
+    local -a branches
+    mapfile -t branches < <(gh api "repos/${repo}/branches?per_page=100" \
+        --jq '.[].name | select(startswith("sipag/issue-"))' 2>/dev/null)
+
+    for branch in "${branches[@]}"; do
+        # Skip if an open PR already exists for this branch
+        local open_pr
+        open_pr=$(gh pr list --repo "$repo" --head "$branch" --state open \
+            --json number -q '.[0].number' 2>/dev/null || true)
+        [[ -n "$open_pr" ]] && continue
+
+        # Skip if branch has no commits ahead of main
+        local ahead_by
+        ahead_by=$(gh api "repos/${repo}/compare/main...${branch}" \
+            --jq '.ahead_by' 2>/dev/null || echo "0")
+        [[ "${ahead_by:-0}" -le 0 ]] && continue
+
+        # Extract issue number from branch pattern sipag/issue-NNN-slug
+        local issue_num
+        issue_num=$(echo "$branch" | sed -n 's|^sipag/issue-\([0-9]*\)-.*$|\1|p')
+        [[ -z "$issue_num" ]] && continue
+
+        # Fetch issue details to build the recovery PR
+        local pr_title issue_body recovery_body
+        pr_title=$(gh issue view "$issue_num" --repo "$repo" --json title \
+            -q '.title' 2>/dev/null || echo "")
+        [[ -z "$pr_title" ]] && pr_title="$branch"
+        issue_body=$(gh issue view "$issue_num" --repo "$repo" --json body \
+            -q '.body' 2>/dev/null || echo "")
+
+        recovery_body="Closes #${issue_num}
+
+${issue_body}
+
+---
+*This PR was created by sipag worker reconciliation (recovered orphaned branch).*"
+
+        echo "[$(date +%H:%M:%S)] Orphaned branch detected: ${branch} (issue #${issue_num}: ${pr_title})"
+        if gh pr create --repo "$repo" \
+                --title "$pr_title" \
+                --body "$recovery_body" \
+                --head "$branch" 2>/dev/null; then
+            echo "[$(date +%H:%M:%S)] Recovery PR created for branch ${branch}"
+        else
+            echo "[$(date +%H:%M:%S)] WARNING: Could not create recovery PR for ${branch}"
+        fi
     done
 }
 
