@@ -211,7 +211,17 @@ cmd_status() {
 }
 
 cmd_merge() {
-	local repo="${1:?Usage: sipag merge <owner/repo>}"
+	local repo="${1:-}"
+	if [[ -z "$repo" ]]; then
+		repo=$(git remote get-url origin 2>/dev/null || true)
+		repo="${repo%.git}"
+		repo="${repo#https://github.com/}"
+		repo="${repo#git@github.com:}"
+	fi
+	if [[ -z "$repo" ]]; then
+		echo "Error: Not in a git repo. Usage: sipag merge <owner/repo>"
+		return 1
+	fi
 	merge_run "$repo"
 }
 
