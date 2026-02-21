@@ -6,9 +6,10 @@
 # all handled here; GitHub queries come from github.sh, dedup from dedup.sh.
 #
 # Depends on globals set by config.sh:
-#   WORKER_WORK_LABEL, WORKER_TIMEOUT_CMD, WORKER_TIMEOUT,
+#   WORKER_WORK_LABEL, WORKER_IN_PROGRESS_LABEL, WORKER_TIMEOUT_CMD, WORKER_TIMEOUT,
 #   WORKER_OAUTH_TOKEN, WORKER_API_KEY, WORKER_GH_TOKEN,
-#   WORKER_IMAGE, WORKER_LOG_DIR, SIPAG_DIR
+#   WORKER_IMAGE, WORKER_LOG_DIR, SIPAG_DIR,
+#   WORKER_REPO_MODEL, WORKER_REPO_PROMPT_EXTRA
 
 # shellcheck disable=SC2154  # Globals defined in config.sh, sourced by worker.sh
 
@@ -19,7 +20,7 @@ worker_run_issue() {
     local title body branch slug pr_body prompt task_id start_time
 
     # Mark as in-progress so the spec is locked from edits
-    worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"
+    worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "$WORKER_IN_PROGRESS_LABEL"
 
     # Fetch the spec fresh right before starting (minimizes stale-spec window)
     title=$(gh issue view "$issue_num" --repo "$repo" --json title -q '.title')
@@ -47,6 +48,14 @@ ${body}
     prompt="${prompt//${_tpl_branch}/${branch}}"
     prompt="${prompt//${_tpl_issue_num}/${issue_num}}"
 
+    # Append per-repo extra instructions from .sipag.toml [prompts] if present
+    if [[ -n "${WORKER_REPO_PROMPT_EXTRA:-}" ]]; then
+        prompt="${prompt}
+
+Project-specific requirements (from .sipag.toml):
+${WORKER_REPO_PROMPT_EXTRA}"
+    fi
+
     # Hook: worker started
     export SIPAG_EVENT="worker.started"
     export SIPAG_REPO="$repo"
@@ -61,6 +70,7 @@ ${body}
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e SIPAG_MODEL="${WORKER_REPO_MODEL:-}" \
         -e PROMPT \
         -e BRANCH \
         -e ISSUE_TITLE \
@@ -79,7 +89,11 @@ ${body}
                 --draft \
                 --head "$BRANCH"
             echo "[sipag] Draft PR opened: branch=$BRANCH issue='"${issue_num}"'"
-            claude --print --dangerously-skip-permissions -p "$PROMPT" \
+            if [ -n "$SIPAG_MODEL" ]; then
+                claude --print --dangerously-skip-permissions --model "$SIPAG_MODEL" -p "$PROMPT"
+            else
+                claude --print --dangerously-skip-permissions -p "$PROMPT"
+            fi \
                 && { gh pr ready "$BRANCH" --repo "'"${repo}"'" || true; \
                      echo "[sipag] PR marked ready for review"; }
         ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
@@ -90,7 +104,7 @@ ${body}
 
     if [[ $exit_code -eq 0 ]]; then
         # Success: remove in-progress (PR's "Closes #N" handles the rest)
-        worker_transition_label "$repo" "$issue_num" "in-progress" ""
+        worker_transition_label "$repo" "$issue_num" "$WORKER_IN_PROGRESS_LABEL" ""
         echo "[#${issue_num}] DONE: $title"
 
         # Look up the PR opened by the worker
@@ -106,7 +120,7 @@ ${body}
         sipag_run_hook "on-worker-completed"
     else
         # Failure: move back to approved for retry (draft PR stays open showing progress)
-        worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+        worker_transition_label "$repo" "$issue_num" "$WORKER_IN_PROGRESS_LABEL" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
 
         # Hook: worker failed
@@ -181,6 +195,7 @@ worker_run_pr_iteration() {
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e SIPAG_MODEL="${WORKER_REPO_MODEL:-}" \
         -e PROMPT \
         -e BRANCH \
         "$WORKER_IMAGE" \
@@ -190,7 +205,11 @@ worker_run_pr_iteration() {
             git config user.email "sipag@localhost"
             git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
             git checkout "$BRANCH"
-            claude --print --dangerously-skip-permissions -p "$PROMPT"
+            if [ -n "$SIPAG_MODEL" ]; then
+                claude --print --dangerously-skip-permissions --model "$SIPAG_MODEL" -p "$PROMPT"
+            else
+                claude --print --dangerously-skip-permissions -p "$PROMPT"
+            fi
         ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
 
     local exit_code=$?

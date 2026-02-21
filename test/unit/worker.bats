@@ -473,3 +473,236 @@ GHEOF
   run worker_loop "owner/repo"
   assert_output_contains "--once:"
 }
+
+# --- WORKER_IN_PROGRESS_LABEL default ---
+
+@test "default in_progress_label is 'in-progress'" {
+  [[ "$WORKER_IN_PROGRESS_LABEL" == "in-progress" ]]
+}
+
+@test "worker_load_config reads in_progress_label from config file" {
+  echo "in_progress_label=wip" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_IN_PROGRESS_LABEL" == "wip" ]]
+}
+
+@test "worker_load_config: in_progress_label does not affect other defaults" {
+  echo "in_progress_label=doing" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_IN_PROGRESS_LABEL" == "doing" ]]
+  [[ "$WORKER_WORK_LABEL" == "approved" ]]
+}
+
+# --- sipag_toml_get (python3 tomllib) ---
+
+@test "sipag_toml_get returns string value from section" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[worker]
+image = "ghcr.io/org/custom-worker:latest"
+timeout = 3600
+EOF
+  result=$(sipag_toml_get "$tmpfile" "worker" "image")
+  [[ "$result" == "ghcr.io/org/custom-worker:latest" ]]
+}
+
+@test "sipag_toml_get returns integer value from section" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[worker]
+timeout = 3600
+EOF
+  result=$(sipag_toml_get "$tmpfile" "worker" "timeout")
+  [[ "$result" == "3600" ]]
+}
+
+@test "sipag_toml_get returns empty for missing key" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[worker]
+timeout = 3600
+EOF
+  result=$(sipag_toml_get "$tmpfile" "worker" "model")
+  [[ -z "$result" ]]
+}
+
+@test "sipag_toml_get returns empty for missing section" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[worker]
+image = "ghcr.io/org/custom-worker:latest"
+EOF
+  result=$(sipag_toml_get "$tmpfile" "labels" "work")
+  [[ -z "$result" ]]
+}
+
+@test "sipag_toml_get does not bleed across sections" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[labels]
+work = "ready"
+
+[worker]
+image = "my-image:latest"
+EOF
+  result=$(sipag_toml_get "$tmpfile" "worker" "work")
+  [[ -z "$result" ]]
+}
+
+@test "sipag_toml_get reads value from second section" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[worker]
+image = "base:latest"
+
+[labels]
+work = "ready"
+in_progress = "wip"
+EOF
+  result=$(sipag_toml_get "$tmpfile" "labels" "work")
+  [[ "$result" == "ready" ]]
+  result2=$(sipag_toml_get "$tmpfile" "labels" "in_progress")
+  [[ "$result2" == "wip" ]]
+}
+
+@test "sipag_toml_get returns multi-line string value" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[prompts]
+extra = """
+Always run the full test suite before opening a PR.
+Use conventional commits.
+"""
+EOF
+  result=$(sipag_toml_get "$tmpfile" "prompts" "extra")
+  [[ "$result" == *"Always run the full test suite"* ]]
+  [[ "$result" == *"Use conventional commits."* ]]
+}
+
+@test "sipag_toml_get returns empty for missing multi-line key" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[prompts]
+EOF
+  result=$(sipag_toml_get "$tmpfile" "prompts" "extra")
+  [[ -z "$result" ]]
+}
+
+@test "sipag_toml_get multi-line does not bleed across sections" {
+  local tmpfile="${TEST_TMPDIR}/test.toml"
+  cat > "$tmpfile" <<'EOF'
+[prompts]
+extra = """
+Some prompt text.
+"""
+
+[worker]
+image = "my-image:latest"
+EOF
+  result=$(sipag_toml_get "$tmpfile" "prompts" "extra")
+  [[ "$result" == *"Some prompt text."* ]]
+  [[ "$result" != *"image"* ]]
+}
+
+# --- worker_fetch_repo_config ---
+
+@test "worker_fetch_repo_config: silently does nothing when .sipag.toml absent" {
+  # Mock gh to return failure (file not found)
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_fetch_repo_config "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ -z "$output" ]]
+}
+
+@test "worker_fetch_repo_config: applies image from .sipag.toml" {
+  local toml_b64
+  toml_b64=$(printf '[worker]\nimage = "ghcr.io/org/custom:v1"\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  WORKER_IMAGE="default-image:latest"
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_IMAGE" == "ghcr.io/org/custom:v1" ]]
+}
+
+@test "worker_fetch_repo_config: applies work label from .sipag.toml" {
+  local toml_b64
+  toml_b64=$(printf '[labels]\nwork = "ready"\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_WORK_LABEL" == "ready" ]]
+}
+
+@test "worker_fetch_repo_config: applies in_progress label from .sipag.toml" {
+  local toml_b64
+  toml_b64=$(printf '[labels]\nin_progress = "wip"\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_IN_PROGRESS_LABEL" == "wip" ]]
+}
+
+@test "worker_fetch_repo_config: applies model from .sipag.toml" {
+  local toml_b64
+  toml_b64=$(printf '[worker]\nmodel = "claude-sonnet-4-6"\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_REPO_MODEL" == "claude-sonnet-4-6" ]]
+}
+
+@test "worker_fetch_repo_config: applies extra prompt from .sipag.toml" {
+  local toml_b64
+  toml_b64=$(printf '[prompts]\nextra = """\nAlways run tests.\n"""\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_REPO_PROMPT_EXTRA" == *"Always run tests."* ]]
+}
+
+@test "worker_fetch_repo_config: per-repo overrides global config" {
+  # Set global config values
+  echo "work_label=approved" > "${SIPAG_DIR}/config"
+  echo "image=global-image:latest" >> "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_WORK_LABEL" == "approved" ]]
+  [[ "$WORKER_IMAGE" == "global-image:latest" ]]
+
+  # Per-repo config overrides
+  local toml_b64
+  toml_b64=$(printf '[worker]\nimage = "per-repo-image:v2"\n[labels]\nwork = "ready"\n' | base64)
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+printf '%s' "${toml_b64}"
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_fetch_repo_config "owner/repo"
+  [[ "$WORKER_IMAGE" == "per-repo-image:v2" ]]
+  [[ "$WORKER_WORK_LABEL" == "ready" ]]
+}

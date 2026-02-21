@@ -78,7 +78,7 @@ worker_find_prs_needing_iteration() {
 worker_reconcile() {
     local repo="$1"
     mapfile -t inprogress < <(gh issue list --repo "$repo" --state open \
-        --label "in-progress" --json number -q '.[].number' 2>/dev/null | sort -n)
+        --label "${WORKER_IN_PROGRESS_LABEL}" --json number -q '.[].number' 2>/dev/null | sort -n)
 
     [[ ${#inprogress[@]} -eq 0 ]] && return 0
 

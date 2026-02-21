@@ -15,11 +15,22 @@
 worker_loop() {
     local repo="$1"
 
+    # Resolution order (most specific wins):
+    #   1. .sipag.toml in repo root  (per-repo)
+    #   2. ~/.sipag/config           (global)
+    #   3. SIPAG_* env vars
+    #   4. Hardcoded defaults
+    worker_load_config
+    worker_fetch_repo_config "$repo"
+
     echo "sipag work"
     echo "Repo: ${repo}"
     echo "Label: ${WORKER_WORK_LABEL:-<all>}"
+    echo "In-progress label: ${WORKER_IN_PROGRESS_LABEL}"
     echo "Batch size: ${WORKER_BATCH_SIZE}"
     echo "Poll interval: ${WORKER_POLL_INTERVAL}s"
+    echo "Image: ${WORKER_IMAGE}"
+    if [[ -n "$WORKER_REPO_MODEL" ]]; then echo "Model: ${WORKER_REPO_MODEL}"; fi
     echo "Logs: ${WORKER_LOG_DIR}/"
     echo "Started: $(date)"
     echo ""
