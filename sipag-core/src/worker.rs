@@ -3,21 +3,18 @@
 //! Domain model:
 //!   - `WorkerStatus` — enum for worker lifecycle states
 //!   - `WorkerState`  — entity representing a single worker's state
-//!   - `auto_merge`   — typed auto-merge service (replaces lib/worker/merge.sh)
 //!   - `decision`     — pure functions for issue dispatch and finalization logic
-//!   - `dedup`        — typed replacements for lib/worker/dedup.sh
 //!   - `ports`        — trait boundaries (ContainerRuntime, GitHubGateway, StateStore)
 //!   - `recovery`     — orchestration: recover and finalize active workers
 //!   - `store`        — filesystem adapter for state persistence
 //!
 //! Worker loop (replaces `bin/sipag` + `lib/worker/*.sh`):
-//!   - `config`   — runtime config loaded from env vars and `~/.sipag/config`
 //!   - `github`   — GitHub operations via the `gh` CLI
 //!   - `dispatch` — Docker container dispatch for issue and PR workers
 //!   - `poll`     — main polling loop (`sipag work`)
+//!
+//! Configuration lives in `crate::config::WorkerConfig` (not in this module).
 
-pub mod auto_merge;
-pub mod config;
 pub mod decision;
 pub mod dedup;
 pub mod dispatch;
