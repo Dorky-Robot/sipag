@@ -50,6 +50,7 @@ const BASH_SCRIPT: &str = r#"git clone "$REPO_URL" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
 tmux new-session -d -s claude "claude --dangerously-skip-permissions -p \"$PROMPT\"; echo \$? > /tmp/.claude-exit"
+tmux set-option -t claude history-limit 50000
 touch /tmp/claude.log
 tmux pipe-pane -t claude -o 'cat >> /tmp/claude.log'
 tail -f /tmp/claude.log &

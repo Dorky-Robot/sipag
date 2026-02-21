@@ -419,6 +419,7 @@ ${body}
             tmux new-session -d -s claude \
                 "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
                  echo \$? > /tmp/.claude-exit"
+            tmux set-option -t claude history-limit 50000
             touch /tmp/claude.log
             tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
             tail -f /tmp/claude.log &
@@ -582,6 +583,7 @@ worker_run_pr_iteration() {
             tmux new-session -d -s claude \
                 "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
                  echo \$? > /tmp/.claude-exit"
+            tmux set-option -t claude history-limit 50000
             touch /tmp/claude.log
             tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
             tail -f /tmp/claude.log &
@@ -667,6 +669,7 @@ worker_run_conflict_fix() {
             tmux new-session -d -s claude \
                 "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
                  echo \$? > /tmp/.claude-exit"
+            tmux set-option -t claude history-limit 50000
             touch /tmp/claude.log
             tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
             tail -f /tmp/claude.log &
