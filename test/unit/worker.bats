@@ -285,6 +285,103 @@ EOF
 
 # --- sipag_run_hook ---
 
+# --- auto_merge defaults ---
+
+@test "default auto_merge is 'false'" {
+  [[ "$WORKER_AUTO_MERGE" == "false" ]]
+}
+
+@test "default auto_merge_method is 'merge'" {
+  [[ "$WORKER_AUTO_MERGE_METHOD" == "merge" ]]
+}
+
+# --- worker_load_config: auto_merge ---
+
+@test "worker_load_config reads auto_merge from config file" {
+  echo "auto_merge=true" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_AUTO_MERGE" == "true" ]]
+}
+
+@test "worker_load_config reads auto_merge_method from config file" {
+  echo "auto_merge_method=squash" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_AUTO_MERGE_METHOD" == "squash" ]]
+}
+
+@test "worker_load_config reads auto_merge and auto_merge_method together" {
+  cat > "${SIPAG_DIR}/config" <<'EOF'
+auto_merge=true
+auto_merge_method=squash
+EOF
+  worker_load_config
+  [[ "$WORKER_AUTO_MERGE" == "true" ]]
+  [[ "$WORKER_AUTO_MERGE_METHOD" == "squash" ]]
+}
+
+# --- worker_enable_auto_merge ---
+
+@test "worker_enable_auto_merge skips when auto_merge is false" {
+  WORKER_AUTO_MERGE="false"
+  # Create a mock gh that fails if called
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh called unexpectedly: $*" >&2
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_enable_auto_merge "owner/repo" "42"
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_enable_auto_merge skips when pr_num is empty" {
+  WORKER_AUTO_MERGE="true"
+  # Create a mock gh that fails if called
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+echo "gh called unexpectedly: $*" >&2
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_enable_auto_merge "owner/repo" ""
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_enable_auto_merge calls gh pr merge with --auto --merge by default" {
+  WORKER_AUTO_MERGE="true"
+  WORKER_AUTO_MERGE_METHOD="merge"
+  local captured_args="${TEST_TMPDIR}/gh-args"
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" > "${captured_args}"
+exit 0
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_enable_auto_merge "owner/repo" "7"
+  [[ "$status" -eq 0 ]]
+  grep -q "\-\-auto" "${captured_args}"
+  grep -q "\-\-merge" "${captured_args}"
+  grep -q "\-\-delete-branch" "${captured_args}"
+}
+
+@test "worker_enable_auto_merge calls gh pr merge with --squash when method is squash" {
+  WORKER_AUTO_MERGE="true"
+  WORKER_AUTO_MERGE_METHOD="squash"
+  local captured_args="${TEST_TMPDIR}/gh-args"
+  cat > "${TEST_TMPDIR}/bin/gh" <<EOF
+#!/usr/bin/env bash
+echo "\$*" > "${captured_args}"
+exit 0
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+  run worker_enable_auto_merge "owner/repo" "7"
+  [[ "$status" -eq 0 ]]
+  grep -q "\-\-auto" "${captured_args}"
+  grep -q "\-\-squash" "${captured_args}"
+}
+
+# --- sipag_run_hook ---
+
 @test "sipag_run_hook: silently skips missing hook" {
   run sipag_run_hook "on-nonexistent-hook"
   [[ "$status" -eq 0 ]]

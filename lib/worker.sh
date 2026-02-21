@@ -13,6 +13,8 @@ WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
+WORKER_AUTO_MERGE="${SIPAG_AUTO_MERGE:-false}"
+WORKER_AUTO_MERGE_METHOD="${SIPAG_AUTO_MERGE_METHOD:-merge}"
 
 # Load config
 worker_load_config() {
@@ -29,6 +31,8 @@ worker_load_config() {
             timeout) WORKER_TIMEOUT="$value" ;;
             poll_interval) WORKER_POLL_INTERVAL="$value" ;;
             work_label) WORKER_WORK_LABEL="$value" ;;
+            auto_merge) WORKER_AUTO_MERGE="$value" ;;
+            auto_merge_method) WORKER_AUTO_MERGE_METHOD="$value" ;;
         esac
     done < "$config"
 }
@@ -175,6 +179,21 @@ worker_transition_label() {
     [[ -n "$to_label" ]]   && gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null
 }
 
+# Enable GitHub native auto-merge on a PR if auto_merge is configured.
+# Merge method defaults to merge commit; squash is also supported.
+# Rebase is intentionally excluded (forward-commit philosophy).
+worker_enable_auto_merge() {
+    local repo="$1" pr_num="$2"
+    [[ "$WORKER_AUTO_MERGE" == "true" ]] || return 0
+    [[ -n "$pr_num" ]] || return 0
+
+    local method_flag="--merge"
+    [[ "$WORKER_AUTO_MERGE_METHOD" == "squash" ]] && method_flag="--squash"
+
+    echo "[PR #${pr_num}] Enabling auto-merge (${WORKER_AUTO_MERGE_METHOD:-merge})..."
+    gh pr merge "$pr_num" --repo "$repo" --auto "$method_flag" --delete-branch 2>/dev/null || true
+}
+
 # Run a lifecycle hook script if it exists and is executable.
 # Hooks live in ${SIPAG_DIR}/hooks/<name>. They run asynchronously so they
 # never block the worker. Env vars must be exported by the caller before
@@ -292,6 +311,9 @@ Instructions:
         local pr_num pr_url
         pr_num=$(gh pr list --repo "$repo" --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
         pr_url=$(gh pr list --repo "$repo" --head "$branch" --json url -q '.[0].url' 2>/dev/null || true)
+
+        # Enable auto-merge if configured
+        worker_enable_auto_merge "$repo" "${pr_num:-}"
 
         # Hook: worker completed
         export SIPAG_EVENT="worker.completed"

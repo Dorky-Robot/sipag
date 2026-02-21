@@ -7,7 +7,15 @@
 merge_run() {
     local repo="$1"
 
+    # Load config so auto_merge settings are reflected in context
+    worker_load_config
+
     echo "=== sipag: loading merge context for ${repo} ==="
+    echo ""
+
+    echo "## Auto-merge config"
+    echo "auto_merge=${WORKER_AUTO_MERGE:-false}"
+    echo "auto_merge_method=${WORKER_AUTO_MERGE_METHOD:-merge}"
     echo ""
 
     echo "## Open Pull Requests"

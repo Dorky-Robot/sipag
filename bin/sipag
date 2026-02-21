@@ -63,6 +63,8 @@ Config (~/.sipag/config):
   image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
+  auto_merge=false             Enable GitHub auto-merge on worker PRs (default: false)
+  auto_merge_method=merge      Merge method: merge (default) or squash (never rebase)
 
 Environment:
   SIPAG_FILE              Task file path (default: ./tasks.md)
