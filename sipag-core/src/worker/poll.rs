@@ -1,6 +1,6 @@
 //! Main worker polling loop — Rust replacement for `lib/worker/loop.sh`.
 //!
-//! Called by `sipag work <repos...>`. Continuously polls GitHub for approved
+//! Called by `sipag work <repos...>`. Continuously polls GitHub for ready
 //! issues, dispatches Docker workers, and handles recovery/finalization.
 
 use std::collections::HashSet;
@@ -15,7 +15,7 @@ use super::dispatch::{
 };
 use super::github::{
     count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
-    list_approved_issues, reconcile_merged_prs,
+    list_labeled_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -76,6 +76,10 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     let mut prs_iterating: HashSet<u64> = HashSet::new();
     let mut prs_fixing_conflict: HashSet<u64> = HashSet::new();
 
+    // ── Session progress counter for event-driven reminders ───────────────
+    let mut completed_this_session: u64 = 0;
+    const REMINDER_THRESHOLD: u64 = 10;
+
     loop {
         // ── Drain check ──────────────────────────────────────────────────────
         if sipag_dir.join("drain").exists() {
@@ -93,12 +97,28 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             recover_and_finalize(&docker_runtime, &gh_gateway, &store, &cfg.work_label)
         {
             for outcome in &cycle_outcomes {
-                if let RecoveryOutcome::StaleHeartbeat { issue_num } = outcome {
-                    println!(
-                        "[{}] WARNING: worker for issue #{issue_num} has a stale heartbeat (no update in 10+ min)",
-                        hms()
-                    );
+                match outcome {
+                    RecoveryOutcome::StaleHeartbeat { issue_num } => {
+                        println!(
+                            "[{}] WARNING: worker for issue #{issue_num} has a stale heartbeat (no update in 10+ min)",
+                            hms()
+                        );
+                    }
+                    RecoveryOutcome::Finalized { .. } => {
+                        completed_this_session += 1;
+                    }
+                    _ => {}
                 }
+            }
+            if completed_this_session >= REMINDER_THRESHOLD {
+                println!(
+                    "[sipag] {} issues processed this session. Stay the sipag way — see CLAUDE.md.",
+                    completed_this_session
+                );
+                println!(
+                    "[sipag] Review PRs: `gh pr diff N`. Merge: `gh pr merge N --squash --delete-branch`."
+                );
+                completed_this_session = 0;
             }
         }
 
@@ -147,7 +167,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             }
 
             // ── Approved issues ──────────────────────────────────────────────
-            let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+            let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
 
             let mut new_issues: Vec<u64> = Vec::new();
             for issue_num in &all_issues {
@@ -210,7 +230,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "?".to_string());
                 println!(
-                    "[{}] [{}] {} approved, {} open total, {} PRs open. No work.",
+                    "[{}] [{}] {} ready, {} open total, {} PRs open. No work.",
                     hms(),
                     repo,
                     all_issues.len(),
