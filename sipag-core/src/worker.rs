@@ -5,6 +5,7 @@
 //!   - `WorkerState`  — entity representing a single worker's state
 //!   - `auto_merge`   — typed auto-merge service (replaces lib/worker/merge.sh)
 //!   - `decision`     — pure functions for issue dispatch and finalization logic
+//!   - `dedup`        — typed replacements for lib/worker/dedup.sh
 //!   - `ports`        — trait boundaries (ContainerRuntime, GitHubGateway, StateStore)
 //!   - `recovery`     — orchestration: recover and finalize active workers
 //!   - `store`        — filesystem adapter for state persistence
@@ -18,6 +19,7 @@
 pub mod auto_merge;
 pub mod config;
 pub mod decision;
+pub mod dedup;
 pub mod dispatch;
 pub mod github;
 pub mod poll;
