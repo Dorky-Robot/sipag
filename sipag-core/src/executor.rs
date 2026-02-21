@@ -146,7 +146,12 @@ fn exec_and_finalize(
         &log_path,
     );
 
-    let _ = append_ended(&tracking_file, &now_timestamp());
+    if let Err(e) = append_ended(&tracking_file, &now_timestamp()) {
+        eprintln!(
+            "sipag: failed to append ended timestamp to {}: {e}",
+            tracking_file.display()
+        );
+    }
 
     if success {
         if tracking_file.exists() {

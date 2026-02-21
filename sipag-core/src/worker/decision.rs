@@ -33,7 +33,7 @@ pub enum FinalizationResult {
 ///
 /// Encodes the decision tree:
 ///   1. done → skip (already completed)
-///   2. running/recovering → skip (in flight)
+///   2. enqueued/running/recovering → skip (in flight)
 ///   3. failed → dispatch (re-try)
 ///   4. no state + has PR → skip (record as done separately)
 ///   5. no state + no PR → dispatch (new work)
@@ -43,7 +43,7 @@ pub fn decide_issue_action(
 ) -> IssueAction {
     match worker_status {
         Some(WorkerStatus::Done) => IssueAction::Skip(SkipReason::AlreadyCompleted),
-        Some(WorkerStatus::Running | WorkerStatus::Recovering) => {
+        Some(WorkerStatus::Enqueued | WorkerStatus::Running | WorkerStatus::Recovering) => {
             IssueAction::Skip(SkipReason::InFlight)
         }
         Some(WorkerStatus::Failed) => IssueAction::Dispatch,
@@ -85,6 +85,14 @@ mod tests {
         assert_eq!(
             decide_issue_action(Some(WorkerStatus::Done), true),
             IssueAction::Skip(SkipReason::AlreadyCompleted)
+        );
+    }
+
+    #[test]
+    fn enqueued_issue_is_skipped() {
+        assert_eq!(
+            decide_issue_action(Some(WorkerStatus::Enqueued), false),
+            IssueAction::Skip(SkipReason::InFlight)
         );
     }
 
@@ -170,6 +178,7 @@ mod tests {
     #[test]
     fn all_issue_action_combinations() {
         let statuses = [
+            Some(WorkerStatus::Enqueued),
             Some(WorkerStatus::Running),
             Some(WorkerStatus::Recovering),
             Some(WorkerStatus::Done),
