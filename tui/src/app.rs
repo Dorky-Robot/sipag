@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sipag_core::task::list_tasks;
+use sipag_core::worker::list_workers;
 use std::{fs, path::PathBuf};
 
 use crate::task::{Status, Task};
@@ -57,8 +57,8 @@ impl App {
     // ── Task list ─────────────────────────────────────────────────────────────
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
-        let task_files = list_tasks(&self.sipag_dir).unwrap_or_default();
-        self.tasks = task_files.into_iter().map(Task::from).collect();
+        let workers = list_workers(&self.sipag_dir).unwrap_or_default();
+        self.tasks = workers.into_iter().map(Task::from).collect();
         // Clamp selection
         if self.tasks.is_empty() {
             self.selected = 0;
@@ -112,6 +112,9 @@ impl App {
     // ── Actions ───────────────────────────────────────────────────────────────
 
     /// Move the selected failed task back to queue/ and return to the list view.
+    ///
+    /// No-op for worker-JSON tasks (identified by an empty `file_path`); those
+    /// must be retried via `sipag retry` in the Rust CLI.
     pub fn retry_task(&mut self) {
         if self.tasks.is_empty() {
             return;
@@ -122,6 +125,11 @@ impl App {
         }
 
         let file_path = task.file_path.clone();
+
+        // Worker-JSON tasks have no backing .md file — skip the file rename.
+        if file_path.as_os_str().is_empty() {
+            return;
+        }
 
         // file_path = ~/.sipag/failed/NNN-task.md
         // parent     = ~/.sipag/failed/
@@ -259,6 +267,7 @@ mod tests {
             issue: None,
             file_path: std::path::PathBuf::new(),
             container: None,
+            log_path: None,
         };
 
         let mut app = App {
@@ -285,5 +294,40 @@ mod tests {
         // Cannot go before first
         app.select_prev();
         assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn refresh_tasks_reads_worker_json() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir(&workers_dir).unwrap();
+
+        let json = r#"{
+            "repo": "Dorky-Robot/sipag",
+            "issue_num": 42,
+            "issue_title": "Fix the thing",
+            "branch": "sipag/issue-42-fix-the-thing",
+            "container_name": "sipag-issue-42",
+            "pr_num": null,
+            "pr_url": null,
+            "status": "running",
+            "started_at": "2024-01-15T10:30:00Z",
+            "ended_at": null,
+            "duration_s": null,
+            "exit_code": null,
+            "log_path": null
+        }"#;
+
+        let mut f = std::fs::File::create(workers_dir.join("Dorky-Robot--sipag--42.json")).unwrap();
+        writeln!(f, "{}", json).unwrap();
+
+        std::env::set_var("SIPAG_DIR", dir.path().to_str().unwrap());
+        let app = App::new().expect("App::new() should succeed");
+        std::env::remove_var("SIPAG_DIR");
+
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].issue, Some(42));
+        assert_eq!(app.tasks[0].status, TaskStatus::Running);
     }
 }

@@ -3,7 +3,8 @@ use chrono::{DateTime, Utc};
 
 /// Build the Claude prompt for a task.
 pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
-    let mut prompt = format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
+    let mut prompt =
+        format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
     if !body.is_empty() {
         prompt.push_str(body);
         prompt.push('\n');
@@ -116,7 +117,8 @@ mod tests {
     #[test]
     fn test_generate_task_id_truncates_long_slug() {
         let now = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        let long_description = "this is a very long description that exceeds thirty characters easily";
+        let long_description =
+            "this is a very long description that exceeds thirty characters easily";
         let id = generate_task_id(long_description, now);
         // slug portion should be at most 30 chars
         let slug_part = id.strip_prefix("20240101000000-").unwrap();

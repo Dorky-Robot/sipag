@@ -111,11 +111,8 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     let (top_rect, log_rect) = if app.log_lines.is_empty() {
         (content_area, Rect::default())
     } else {
-        let splits = Layout::vertical([
-            Constraint::Length(top_height_clamped),
-            Constraint::Min(0),
-        ])
-        .split(content_area);
+        let splits = Layout::vertical([Constraint::Length(top_height_clamped), Constraint::Min(0)])
+            .split(content_area);
         (splits[0], splits[1])
     };
 
