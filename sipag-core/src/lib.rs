@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod docker;
 pub mod executor;
+pub mod hooks;
 pub mod init;
 pub mod prompt;
 pub mod repo;
