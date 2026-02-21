@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# sipag — task queue feeder for Claude Code
-#
-# Reads a markdown checklist, feeds the next unchecked item to claude,
-# marks it done, moves on.
+# sipag — autonomous dev agent powered by Claude Code
 
 set -euo pipefail
 
@@ -12,10 +9,6 @@ SIPAG_VERSION="2.0.0"
 SIPAG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Source libraries
-# shellcheck source=../lib/task.sh
-source "${SIPAG_ROOT}/lib/task.sh"
-# shellcheck source=../lib/run.sh
-source "${SIPAG_ROOT}/lib/run.sh"
 # shellcheck source=../lib/worker.sh
 source "${SIPAG_ROOT}/lib/worker.sh"
 # shellcheck source=../lib/setup.sh
@@ -29,9 +22,6 @@ source "${SIPAG_ROOT}/lib/preflight.sh"
 
 # --- Defaults ---
 
-SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
-CONTINUE=0
-DRY_RUN=0
 WORKER_ONCE=0
 
 # --- Help ---
@@ -41,23 +31,17 @@ usage() {
 sipag — autonomous dev agent powered by Claude Code
 
 Usage:
-  sipag start <owner/repo>       Prime session for agile workflow
+  sipag start <owner/repo>           Prime session for agile workflow
   sipag work <owner/repo> [--once]   Pick up approved issues, code in Docker
-  sipag merge <owner/repo>       Conversational PR merge session
-  sipag next [-c] [-n] [-f]     Run next task from a markdown checklist
-  sipag list [-f path]           Print all tasks with status
-  sipag add "task" [-f path]     Append task to checklist
-  sipag setup                    Configure sipag and Claude Code permissions
-  sipag version                  Print version
-  sipag help                     Show this help
+  sipag merge <owner/repo>           Conversational PR merge session
+  sipag setup                        Configure sipag and Claude Code permissions
+  sipag version                      Print version
+  sipag help                         Show this help
 
 Agile workflow:
   start → (converse, triage, refine, approve) → work → merge
 
 Flags:
-  -c, --continue     After completing, loop to the next task
-  -n, --dry-run      Show what would run, don't invoke claude
-  -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
       --once         (work) Process one polling cycle and exit (useful for testing)
 
 Config (~/.sipag/config):
@@ -67,7 +51,6 @@ Config (~/.sipag/config):
   poll_interval=120            Seconds between polling for new issues
 
 Environment:
-  SIPAG_FILE              Task file path (default: ./tasks.md)
   SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
   SIPAG_MODEL             Model override
   SIPAG_PROMPT_PREFIX     Prepended to every prompt
@@ -77,57 +60,6 @@ EOF
 }
 
 # --- Commands ---
-
-cmd_next() {
-	while true; do
-		if ! task_parse_next "$SIPAG_FILE"; then
-			echo "No pending tasks in ${SIPAG_FILE}"
-			return 0
-		fi
-
-		echo "==> Task ${TASK_LINE}: ${TASK_TITLE}"
-
-		if [[ $DRY_RUN -eq 1 ]]; then
-			if [[ -n "$TASK_BODY" ]]; then
-				echo ""
-				echo "$TASK_BODY"
-			fi
-			echo ""
-			echo "(dry run — skipping claude)"
-			return 0
-		fi
-
-		if run_claude "$TASK_TITLE" "$TASK_BODY"; then
-			task_mark_done "$SIPAG_FILE" "$TASK_LINE"
-			echo "==> Done: ${TASK_TITLE}"
-		else
-			local rc=$?
-			echo "==> Failed (exit ${rc}): ${TASK_TITLE}"
-			return $rc
-		fi
-
-		if [[ $CONTINUE -eq 0 ]]; then
-			return 0
-		fi
-
-		echo ""
-	done
-}
-
-cmd_list() {
-	task_list "$SIPAG_FILE"
-}
-
-cmd_add() {
-	if [[ $# -eq 0 ]]; then
-		echo "Usage: sipag add \"task text\" [-f path]"
-		return 1
-	fi
-
-	local text="$1"
-	task_add "$SIPAG_FILE" "$text"
-	echo "Added: ${text}"
-}
 
 cmd_start() {
 	local repo="${1:?Usage: sipag start <owner/repo>}"
@@ -164,7 +96,6 @@ cmd_version() {
 
 main() {
 	local command=""
-	local add_text=""
 
 	local work_repo=""
 	local start_repo=""
@@ -200,22 +131,6 @@ main() {
 				shift
 			fi
 			;;
-		next)
-			command="next"
-			shift
-			;;
-		list)
-			command="list"
-			shift
-			;;
-		add)
-			command="add"
-			shift
-			if [[ $# -gt 0 && "$1" != -* ]]; then
-				add_text="$1"
-				shift
-			fi
-			;;
 		version | --version)
 			cmd_version
 			return 0
@@ -223,19 +138,6 @@ main() {
 		help | --help | -h)
 			usage
 			return 0
-			;;
-		-c | --continue)
-			CONTINUE=1
-			shift
-			;;
-		-n | --dry-run)
-			DRY_RUN=1
-			shift
-			;;
-		-f | --file)
-			shift
-			SIPAG_FILE="${1:?--file requires a path}"
-			shift
 			;;
 		--once)
 			WORKER_ONCE=1
@@ -258,9 +160,10 @@ main() {
 		esac
 	done
 
-	# Default command
+	# Default: show help
 	if [[ -z "$command" ]]; then
-		command="next"
+		usage
+		return 0
 	fi
 
 	case "$command" in
@@ -268,9 +171,6 @@ main() {
 	setup) cmd_setup ;;
 	work) cmd_work "$work_repo" ;;
 	merge) cmd_merge "$merge_repo" ;;
-	next) cmd_next ;;
-	list) cmd_list ;;
-	add) cmd_add "$add_text" ;;
 	esac
 }
 
