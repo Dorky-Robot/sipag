@@ -28,6 +28,8 @@ source "${SIPAG_ROOT}/lib/start.sh"
 source "${SIPAG_ROOT}/lib/merge.sh"
 # shellcheck source=../lib/preflight.sh
 source "${SIPAG_ROOT}/lib/preflight.sh"
+# shellcheck source=../lib/doctor.sh
+source "${SIPAG_ROOT}/lib/doctor.sh"
 
 # --- Defaults ---
 
@@ -47,6 +49,7 @@ Usage:
   sipag resume                         Clear drain signal so workers continue polling
   sipag merge <owner/repo>             Conversational PR merge session
   sipag setup                          Configure sipag and Claude Code permissions
+  sipag doctor                         Diagnose setup problems and print fix commands
   sipag version                        Print version
   sipag help                           Show this help
 
@@ -236,6 +239,10 @@ cmd_merge() {
 	merge_run "$repo"
 }
 
+cmd_doctor() {
+	doctor_run
+}
+
 cmd_version() {
 	echo "sipag ${SIPAG_VERSION}"
 }
@@ -291,6 +298,10 @@ main() {
 				shift
 			fi
 			;;
+		doctor)
+			command="doctor"
+			shift
+			;;
 		version | --version)
 			cmd_version
 			return 0
@@ -335,6 +346,7 @@ main() {
 	case "$command" in
 	start) cmd_start "$start_repo" ;;
 	setup) cmd_setup ;;
+	doctor) cmd_doctor ;;
 	work) cmd_work "$work_repo" ;;
 	drain) cmd_drain ;;
 	resume) cmd_resume ;;
