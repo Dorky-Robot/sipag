@@ -136,7 +136,8 @@ worker_recover() {
                 fi
 
                 if [[ "$exit_code" -eq 0 ]]; then
-                    worker_transition_label "$repo" "$issue_num" "in-progress" ""
+                    worker_issue_is_open "$repo" "$issue_num" && \
+                        worker_transition_label "$repo" "$issue_num" "in-progress" ""
                     local pr_num pr_url
                     pr_num=$(gh pr list --repo "$repo" --head "$branch" --state open \
                         --json number -q '.[0].number' 2>/dev/null || true)
@@ -146,7 +147,8 @@ worker_recover() {
                         "$ended_at" "$duration_s" "${pr_num:-}" "${pr_url:-}"
                     echo "[#${issue_num}] Recovery: container exited OK → done"
                 else
-                    worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+                    worker_issue_is_open "$repo" "$issue_num" && \
+                        worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
                     _worker_update_state "$repo_slug" "$issue_num" "failed" "$exit_code" \
                         "$ended_at" "$duration_s"
                     echo "[#${issue_num}] Recovery: container exited ${exit_code} → failed"
@@ -163,15 +165,20 @@ worker_recover() {
             pr_num=$(gh pr list --repo "$repo" --head "$branch" --state all \
                 --json number -q '.[0].number' 2>/dev/null || true)
 
+            local issue_open
+            worker_issue_is_open "$repo" "$issue_num" && issue_open=1 || issue_open=0
+
             if [[ -n "$pr_num" ]]; then
                 pr_url=$(gh pr list --repo "$repo" --head "$branch" --state all \
                     --json url -q '.[0].url' 2>/dev/null || true)
-                worker_transition_label "$repo" "$issue_num" "in-progress" ""
+                [[ "$issue_open" -eq 1 ]] && \
+                    worker_transition_label "$repo" "$issue_num" "in-progress" ""
                 _worker_update_state "$repo_slug" "$issue_num" "done" "0" \
                     "$ended_at" "0" "${pr_num:-}" "${pr_url:-}"
                 echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} → done (PR #${pr_num})"
             else
-                worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+                [[ "$issue_open" -eq 1 ]] && \
+                    worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
                 _worker_update_state "$repo_slug" "$issue_num" "failed" "1" "$ended_at" "0"
                 echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} → failed (no PR found)"
             fi
