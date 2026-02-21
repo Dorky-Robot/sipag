@@ -5,3 +5,4 @@ pub mod init;
 pub mod prompt;
 pub mod repo;
 pub mod task;
+pub mod worker;

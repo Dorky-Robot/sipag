@@ -20,10 +20,26 @@ pub fn render_list(f: &mut Frame, app: &App) {
     .split(area);
 
     // Count tasks by status
-    let queue_count = app.tasks.iter().filter(|t| t.status == Status::Queue).count();
-    let running_count = app.tasks.iter().filter(|t| t.status == Status::Running).count();
-    let done_count = app.tasks.iter().filter(|t| t.status == Status::Done).count();
-    let failed_count = app.tasks.iter().filter(|t| t.status == Status::Failed).count();
+    let queue_count = app
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Queue)
+        .count();
+    let running_count = app
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Running)
+        .count();
+    let done_count = app
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Done)
+        .count();
+    let failed_count = app
+        .tasks
+        .iter()
+        .filter(|t| t.status == Status::Failed)
+        .count();
 
     // ── Header bar ────────────────────────────────────────────────────────────
     let header_text = format!(
