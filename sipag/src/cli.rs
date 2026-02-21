@@ -204,7 +204,7 @@ pub enum RepoCommands {
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        None | Some(Commands::Tui) => {
+        None | Some(Commands::Tui) | Some(Commands::Status) => {
             let status = std::process::Command::new("sipag-tui")
                 .status()
                 .with_context(|| "Failed to exec sipag-tui — is it installed?")?;
@@ -268,7 +268,6 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Show { name }) => cmd_show(&name),
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
-        Some(Commands::Status) => cmd_status(),
         Some(Commands::BgExec {
             task_id,
             repo_url,
@@ -849,54 +848,5 @@ fn cmd_completions(shell: &str) -> Result<()> {
         _ => bail!("Unknown shell '{shell}'. Use: bash, zsh, or fish"),
     };
     print!("{script}");
-    Ok(())
-}
-
-fn cmd_status() -> Result<()> {
-    let dir = sipag_dir();
-    let workers = sipag_core::worker::list_workers(&dir)?;
-
-    if workers.is_empty() {
-        println!("No workers found. Run 'sipag work <owner/repo>' to start.");
-        return Ok(());
-    }
-
-    println!(
-        "{:<24} {:<7} {:<9} {:<10} BRANCH",
-        "REPO", "ISSUE", "STATUS", "DURATION"
-    );
-
-    let mut enqueued = 0usize;
-    let mut running = 0usize;
-    let mut done = 0usize;
-    let mut failed = 0usize;
-
-    for w in &workers {
-        let duration = sipag_core::worker::format_worker_duration(w.duration_s);
-        let branch_col = sipag_core::worker::branch_display(w);
-
-        println!(
-            "{:<24} {:<7} {:<9} {:<10} {}",
-            w.repo,
-            format!("#{}", w.issue_num),
-            w.status,
-            duration,
-            branch_col,
-        );
-
-        match w.status.as_str() {
-            "enqueued" => enqueued += 1,
-            "running" => running += 1,
-            "done" => done += 1,
-            "failed" => failed += 1,
-            _ => {}
-        }
-    }
-
-    println!(
-        "\n{} enqueued · {} running · {} done · {} failed",
-        enqueued, running, done, failed
-    );
-
     Ok(())
 }
