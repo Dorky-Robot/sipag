@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
-    executor::{self, generate_task_id, RunConfig},
+    executor::{self, RunConfig},
+    prompt::{format_duration, generate_task_id},
     repo,
     task::{self, default_sipag_dir, default_sipag_file, TaskStatus},
 };
@@ -316,7 +317,7 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let dir = sipag_dir();
     task::init_dirs(&dir).ok();
 
-    let task_id = generate_task_id(description);
+    let task_id = generate_task_id(description, chrono::Utc::now());
     println!("Task ID: {task_id}");
 
     let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
@@ -410,7 +411,7 @@ fn compute_duration(task: &task::TaskFile, now: &chrono::DateTime<chrono::Utc>) 
         Some(start) => {
             let end = ended.unwrap_or(*now);
             let secs = (end - start).num_seconds();
-            executor::format_duration(secs)
+            format_duration(secs)
         }
     }
 }
