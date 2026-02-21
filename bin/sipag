@@ -58,7 +58,7 @@ Flags:
 
 Config (~/.sipag/config):
   batch_size=4                 Max parallel Docker containers
-  image=sipag-worker:latest    Docker image for workers
+  image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
 

@@ -9,7 +9,7 @@ WORKER_LOG_DIR="/tmp/sipag-backlog"
 
 # Defaults (overridden by config)
 WORKER_BATCH_SIZE=4
-WORKER_IMAGE="sipag-worker:latest"
+WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"

@@ -156,10 +156,13 @@ For interactive sessions: open a terminal, run `sipag`, and use the TUI to inspe
 
 ### Docker image
 
-Worker containers use `sipag-worker:latest`. After changing anything that affects the worker environment, rebuild:
+Worker containers use `ghcr.io/dorky-robot/sipag-worker:latest`, published automatically to GHCR via the `Publish Worker Image` GitHub Actions workflow on every release and on Dockerfile/lib changes to main.
+
+To test with a locally built image:
 
 ```bash
-docker build -t sipag-worker:latest .
+docker build -t sipag-worker:local .
+SIPAG_IMAGE=sipag-worker:local sipag work <owner/repo>
 ```
 
 ### Running tests
