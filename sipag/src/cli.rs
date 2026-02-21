@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
     executor::{self, generate_task_id, RunConfig},
-    repo,
+    init, repo,
     repository::{FileTaskRepository, TaskRepository},
     task::{self, default_sipag_dir, Task, TaskStatus},
 };
@@ -189,16 +189,17 @@ fn sipag_dir() -> PathBuf {
 }
 
 fn cmd_init() -> Result<()> {
-    task::init_dirs(&sipag_dir())
+    init::init_dirs(&sipag_dir())
 }
 
 fn cmd_start() -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -235,12 +236,13 @@ fn cmd_start() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
 
-        let parsed = match task::parse_task_file(&task_file, TaskStatus::Queue) {
+        let parsed = match task::read_task_file(&task_file, TaskStatus::Queue) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error: failed to parse task file: {e}");
                 let mut domain_task = Task::with_status(task_name.clone(), TaskStatus::Queue);
-                let _ = task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
+                let _ =
+                    task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
                 println!("==> Failed: {task_name}");
                 processed += 1;
                 continue;
@@ -253,7 +255,8 @@ fn cmd_start() -> Result<()> {
             Err(e) => {
                 eprintln!("Error: {e}");
                 let mut domain_task = Task::with_status(task_name.clone(), TaskStatus::Queue);
-                let _ = task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
+                let _ =
+                    task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
                 println!("==> Failed: {task_name}");
                 processed += 1;
                 continue;
@@ -293,12 +296,13 @@ fn cmd_start() -> Result<()> {
 
 fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &str) -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
 
     let task_id = generate_task_id(description);
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -339,7 +343,7 @@ fn cmd_ps() -> Result<()> {
         paths.sort_by(|a, b| b.cmp(a)); // newest first
 
         for path in paths {
-            let task = match task::parse_task_file(&path, TaskStatus::Queue) {
+            let task = match task::read_task_file(&path, TaskStatus::Queue) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -436,11 +440,12 @@ fn cmd_add(title: &str, repo: &str, priority: &str) -> Result<()> {
 
     let dir = sipag_dir();
     if !dir.join("queue").exists() {
-        task::init_dirs(&dir).ok();
+        init::init_dirs(&dir).ok();
     }
     let filename = task::next_filename(&dir.join("queue"), title);
     let path = dir.join("queue").join(&filename);
-    task::write_task_file(&path, title, repo, priority, None)?;
+    let added = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    task::write_task_file(&path, title, repo, priority, None, &added)?;
     println!("Added: {title}");
 
     Ok(())
@@ -515,7 +520,12 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
 
 fn cmd_status() -> Result<()> {
     let dir = sipag_dir();
-    let labels = [("Queue", "queue"), ("Running", "running"), ("Done", "done"), ("Failed", "failed")];
+    let labels = [
+        ("Queue", "queue"),
+        ("Running", "running"),
+        ("Done", "done"),
+        ("Failed", "failed"),
+    ];
 
     for (label, subdir) in &labels {
         let d = dir.join(subdir);

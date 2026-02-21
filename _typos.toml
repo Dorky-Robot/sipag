@@ -5,9 +5,10 @@
 
 [default.extend-words]
 # Project names and stack components
-sipag = "sipag"   # this project
-kubo  = "kubo"    # chain-of-thought planner in the dorky robot stack
-tao   = "tao"     # decision layer in the dorky robot stack
+sipag   = "sipag"     # this project
+kubo    = "kubo"      # chain-of-thought planner in the dorky robot stack
+tao     = "tao"       # decision layer in the dorky robot stack
+ratatui = "ratatui"   # TUI framework crate (not "ratatouille")
 
 # Common technical abbreviations used in this codebase
 # (add more here as needed)

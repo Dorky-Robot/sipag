@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
 
-use crate::task::{parse_task_file, Task, TaskId, TaskStatus};
+use crate::task::{read_task_file, Task, TaskId, TaskStatus};
 
 // ── Trait ─────────────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ impl TaskRepository for FileTaskRepository {
         let (path, status) = self
             .find_task(id)
             .ok_or_else(|| anyhow::anyhow!("task '{}' not found", id))?;
-        let task_file = parse_task_file(&path, status)?;
+        let task_file = read_task_file(&path, status)?;
         Ok(Task::from(task_file))
     }
 
@@ -89,7 +89,7 @@ impl TaskRepository for FileTaskRepository {
         paths.sort();
         let tasks = paths
             .into_iter()
-            .filter_map(|p| parse_task_file(&p, status.clone()).ok())
+            .filter_map(|p| read_task_file(&p, status.clone()).ok())
             .map(Task::from)
             .collect();
         Ok(tasks)
@@ -120,8 +120,13 @@ impl TaskRepository for FileTaskRepository {
         let to_log = to_dir.join(format!("{}.log", task.id));
 
         if from_md.exists() {
-            std::fs::rename(&from_md, &to_md)
-                .with_context(|| format!("Failed to move {} to {}", from_md.display(), to_md.display()))?;
+            std::fs::rename(&from_md, &to_md).with_context(|| {
+                format!(
+                    "Failed to move {} to {}",
+                    from_md.display(),
+                    to_md.display()
+                )
+            })?;
         }
 
         // For Failed → Queue retries, remove the old log so the retry starts fresh.
@@ -131,8 +136,13 @@ impl TaskRepository for FileTaskRepository {
                 let _ = std::fs::remove_file(&from_log);
             }
         } else if from_log.exists() {
-            std::fs::rename(&from_log, &to_log)
-                .with_context(|| format!("Failed to move {} to {}", from_log.display(), to_log.display()))?;
+            std::fs::rename(&from_log, &to_log).with_context(|| {
+                format!(
+                    "Failed to move {} to {}",
+                    from_log.display(),
+                    to_log.display()
+                )
+            })?;
         }
 
         Ok(())
@@ -160,10 +170,16 @@ fn write_task_to_file(task: &Task, path: &std::path::Path) -> Result<()> {
         content.push_str(&format!("container: {container}\n"));
     }
     if let Some(created) = task.created {
-        content.push_str(&format!("added: {}\n", created.format("%Y-%m-%dT%H:%M:%SZ")));
+        content.push_str(&format!(
+            "added: {}\n",
+            created.format("%Y-%m-%dT%H:%M:%SZ")
+        ));
     }
     if let Some(started) = task.started {
-        content.push_str(&format!("started: {}\n", started.format("%Y-%m-%dT%H:%M:%SZ")));
+        content.push_str(&format!(
+            "started: {}\n",
+            started.format("%Y-%m-%dT%H:%M:%SZ")
+        ));
     }
     if let Some(ended) = task.ended {
         content.push_str(&format!("ended: {}\n", ended.format("%Y-%m-%dT%H:%M:%SZ")));
@@ -176,8 +192,7 @@ fn write_task_to_file(task: &Task, path: &std::path::Path) -> Result<()> {
         content.push_str(&task.description);
         content.push('\n');
     }
-    std::fs::write(path, content)
-        .with_context(|| format!("Failed to write {}", path.display()))
+    std::fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -185,7 +200,8 @@ fn write_task_to_file(task: &Task, path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{init_dirs, write_task_file};
+    use crate::init::init_dirs;
+    use crate::task::write_task_file;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, FileTaskRepository) {
@@ -210,6 +226,7 @@ mod tests {
             "myrepo",
             "high",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
         let task = repo.get(&"001-fix-bug".to_string()).unwrap();
@@ -233,10 +250,12 @@ mod tests {
             "myrepo",
             "high",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
-        repo.transition(&mut task, TaskStatus::Running, now()).unwrap();
+        repo.transition(&mut task, TaskStatus::Running, now())
+            .unwrap();
 
         assert_eq!(task.status, TaskStatus::Running);
         assert!(!dir.path().join("queue/001-fix-bug.md").exists());
@@ -252,7 +271,11 @@ mod tests {
             "---\nrepo: myrepo\nstarted: 2024-01-01T12:00:00Z\ncontainer: sipag-001-fix-bug\n---\nFix the bug\n",
         )
         .unwrap();
-        std::fs::write(dir.path().join("running/001-fix-bug.log"), "some log output").unwrap();
+        std::fs::write(
+            dir.path().join("running/001-fix-bug.log"),
+            "some log output",
+        )
+        .unwrap();
 
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
         repo.transition(&mut task, TaskStatus::Done, now()).unwrap();
@@ -274,7 +297,8 @@ mod tests {
         .unwrap();
 
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
-        repo.transition(&mut task, TaskStatus::Failed, now()).unwrap();
+        repo.transition(&mut task, TaskStatus::Failed, now())
+            .unwrap();
 
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(dir.path().join("failed/001-fix-bug.md").exists());
@@ -291,7 +315,8 @@ mod tests {
         std::fs::write(dir.path().join("failed/001-fix-bug.log"), "old log").unwrap();
 
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
-        repo.transition(&mut task, TaskStatus::Queue, now()).unwrap();
+        repo.transition(&mut task, TaskStatus::Queue, now())
+            .unwrap();
 
         assert_eq!(task.status, TaskStatus::Queue);
         assert!(dir.path().join("queue/001-fix-bug.md").exists());
@@ -309,11 +334,13 @@ mod tests {
             "myrepo",
             "high",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
 
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
-        repo.transition(&mut task, TaskStatus::Failed, now()).unwrap();
+        repo.transition(&mut task, TaskStatus::Failed, now())
+            .unwrap();
 
         assert_eq!(task.status, TaskStatus::Failed);
         assert!(!dir.path().join("queue/001-fix-bug.md").exists());
@@ -329,6 +356,7 @@ mod tests {
             "myrepo",
             "high",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
         let mut task = repo.get(&"001-fix-bug".to_string()).unwrap();
@@ -345,6 +373,7 @@ mod tests {
             "repo1",
             "medium",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
         write_task_file(
@@ -353,6 +382,7 @@ mod tests {
             "repo2",
             "high",
             None,
+            "2024-01-01T00:00:00Z",
         )
         .unwrap();
         let tasks = repo.list_by_status(&TaskStatus::Queue).unwrap();
@@ -362,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_save_task() {
-        let (dir, repo) = setup();
+        let (_dir, repo) = setup();
         let task = Task {
             id: "001-fix-bug".to_string(),
             title: "Fix the bug".to_string(),

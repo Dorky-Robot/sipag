@@ -13,13 +13,13 @@
 ignore = []
 
 # Warn (not block) on unmaintained crates.
-unmaintained = "warn"
+unmaintained = "workspace"
 
 # Warn on crates yanked from crates.io.
 yanked = "warn"
 
 # Warn on unsound code advisories.
-unsound = "warn"
+unsound = "workspace"
 
 [licenses]
 # Allow common permissive and weak-copyleft licenses.
@@ -35,17 +35,6 @@ allow = [
     "CC0-1.0",
 ]
 
-# Reject strong copyleft licenses that could affect binary distribution.
-deny = [
-    "GPL-1.0",
-    "GPL-2.0",
-    "GPL-3.0",
-    "LGPL-2.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
-    "AGPL-1.0",
-    "AGPL-3.0",
-]
 
 [bans]
 # Reject multiple versions of the same crate (can be loosened per-crate below).

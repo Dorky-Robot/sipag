@@ -6,6 +6,10 @@ use std::process::{Command, Stdio};
 use crate::repository::{FileTaskRepository, TaskRepository};
 use crate::task::{append_ended, slugify, write_tracking_file, Task, TaskStatus};
 
+fn now_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 /// Check that Docker daemon is running and accessible.
 fn preflight_docker_running() -> Result<()> {
     let status = Command::new("docker")
@@ -73,7 +77,8 @@ fn preflight_auth(sipag_dir: &Path) -> Result<()> {
 
 /// Build the Claude prompt for a task.
 pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
-    let mut prompt = format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
+    let mut prompt =
+        format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
     if !body.is_empty() {
         prompt.push_str(body);
         prompt.push('\n');
@@ -139,6 +144,7 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         issue,
         &container_name,
         description,
+        &now_timestamp(),
     )?;
 
     let prompt = build_prompt(description, "", issue);
@@ -159,7 +165,15 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
     let bash_script = r#"git clone "$REPO_URL" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
-claude --print --dangerously-skip-permissions -p "$PROMPT""#;
+tmux new-session -d -s claude "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+touch /tmp/claude.log
+tmux pipe-pane -t claude -o 'cat >> /tmp/claude.log'
+tail -f /tmp/claude.log &
+TAIL_PID=$!
+while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+kill $TAIL_PID 2>/dev/null || true
+wait $TAIL_PID 2>/dev/null || true
+exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)""#;
 
     let run_docker = |log_file: &Path| -> bool {
         let log_out = match File::create(log_file) {
@@ -225,7 +239,7 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
             .context("Failed to spawn background worker")?;
     } else {
         let success = run_docker(&log_path);
-        let _ = append_ended(&tracking_file);
+        let _ = append_ended(&tracking_file, &now_timestamp());
 
         let repo = FileTaskRepository::new(sipag_dir.to_path_buf());
         let mut task = Task::with_status(task_id.to_string(), TaskStatus::Running);
@@ -274,7 +288,15 @@ pub fn run_bg_exec(
     let bash_script = r#"git clone "$REPO_URL" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
-claude --print --dangerously-skip-permissions -p "$PROMPT""#;
+tmux new-session -d -s claude "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+touch /tmp/claude.log
+tmux pipe-pane -t claude -o 'cat >> /tmp/claude.log'
+tail -f /tmp/claude.log &
+TAIL_PID=$!
+while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+kill $TAIL_PID 2>/dev/null || true
+wait $TAIL_PID 2>/dev/null || true
+exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)""#;
 
     let log_out = File::create(&log_path).context("Failed to create log file")?;
     let log_err = log_out.try_clone()?;
@@ -306,7 +328,7 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     }
 
     let success = cmd.status().map(|s| s.success()).unwrap_or(false);
-    let _ = append_ended(&tracking_file);
+    let _ = append_ended(&tracking_file, &now_timestamp());
 
     let repo = FileTaskRepository::new(sipag_dir.to_path_buf());
     let mut task = Task::with_status(task_id.to_string(), TaskStatus::Running);
