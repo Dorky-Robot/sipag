@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Label management helper ──────────────────────────────────────────────────
+# The container owns label transitions so they happen atomically with the work.
+# ISSUE_NUM and WORK_LABEL are passed via env vars from the host.
+transition_label() {
+    local remove="${1:-}" add="${2:-}"
+    if [[ -z "${ISSUE_NUM:-}" ]]; then return 0; fi
+    if [[ -n "$remove" ]]; then
+        gh issue edit "$ISSUE_NUM" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+    fi
+    if [[ -n "$add" ]]; then
+        gh issue edit "$ISSUE_NUM" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+    fi
+}
+
+# ── Start: transition approved → in-progress ─────────────────────────────────
+transition_label "${WORK_LABEL:-approved}" "in-progress"
+
 sipag-state phase "cloning repo" || true
 
 git clone "https://github.com/${REPO}.git" /work && cd /work
@@ -84,6 +101,12 @@ if [[ "$CLAUDE_EXIT" -eq 0 ]]; then
             sipag-state pr "$pr_num" "$pr_url" || true
         fi
     fi
+
+    # Success: remove in-progress label (issue will be closed when PR merges via "Closes #N").
+    transition_label "in-progress" ""
+else
+    # Failure: remove in-progress, restore work label for retry.
+    transition_label "in-progress" "${WORK_LABEL:-approved}"
 fi
 
 sipag-state finish "$CLAUDE_EXIT" || true

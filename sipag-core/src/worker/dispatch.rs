@@ -109,10 +109,7 @@ pub fn dispatch_issue_worker(
     };
     store.save(&enqueued_state)?;
 
-    // 2. Transition label: work_label → in-progress.
-    let _ = github::transition_label(repo, issue_num, Some(&cfg.work_label), Some("in-progress"));
-
-    // 3. Fetch issue details.
+    // 2. Fetch issue details (label transition is handled inside the container).
     let (title, body) = github::get_issue_details(repo, issue_num)
         .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
 
@@ -154,9 +151,11 @@ pub fn dispatch_issue_worker(
     store.save(&running_state)?;
 
     // 6. Run Docker container (blocking).
+    //    The container handles label transitions (approved → in-progress → done/restored).
     let start = Instant::now();
     let workers_dir = sipag_dir.join("workers");
     let state_filename = format!("{repo_slug}--{issue_num}.json");
+    let issue_num_str = issue_num.to_string();
     let success = run_worker_container(
         &container_name,
         repo,
@@ -172,17 +171,19 @@ pub fn dispatch_issue_worker(
         ISSUE_CONTAINER_SCRIPT,
         &log_path,
         Some((&workers_dir, &state_filename)),
+        &[
+            ("ISSUE_NUM", &issue_num_str),
+            ("WORK_LABEL", &cfg.work_label),
+        ],
     );
     let duration_s = start.elapsed().as_secs() as i64;
     let ended_at = now_utc();
 
-    // 7. Update state and manage labels.
+    // 7. Update state file. Label transitions are handled by the container itself.
     if success {
-        // Find the PR that was created.
+        // Find the PR that was created (container may have already recorded it
+        // in the state file, but confirm via GitHub for reliability).
         let pr = github::find_pr_for_branch(repo, &branch).unwrap_or(None);
-
-        // Remove in-progress label.
-        let _ = github::transition_label(repo, issue_num, Some("in-progress"), None);
 
         let mut done_state = running_state.clone();
         done_state.status = WorkerStatus::Done;
@@ -196,10 +197,6 @@ pub fn dispatch_issue_worker(
         store.save(&done_state)?;
         println!("[#{issue_num}] DONE: {title}");
     } else {
-        // Return issue to work_label for retry.
-        let _ =
-            github::transition_label(repo, issue_num, Some("in-progress"), Some(&cfg.work_label));
-
         let mut fail_state = running_state.clone();
         fail_state.status = WorkerStatus::Failed;
         fail_state.ended_at = Some(ended_at);
@@ -320,6 +317,7 @@ pub fn dispatch_pr_iteration(
         ITERATION_CONTAINER_SCRIPT,
         &log_path,
         None,
+        &[],
     );
 
     if success {
@@ -399,6 +397,7 @@ pub fn dispatch_conflict_fix(
         CONFLICT_FIX_CONTAINER_SCRIPT,
         &log_path,
         None,
+        &[],
     );
 
     if success {
@@ -422,6 +421,9 @@ fn now_utc() -> String {
 /// workers directory is bind-mounted into the container and `STATE_FILE` is set
 /// so the container can self-report heartbeats, phases, and PR info.
 ///
+/// `extra_env` passes additional environment variables to the container
+/// (e.g. `ISSUE_NUM`, `WORK_LABEL` for label management).
+///
 /// Returns `true` on success (exit 0), `false` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn run_worker_container(
@@ -439,6 +441,7 @@ fn run_worker_container(
     script: &str,
     log_path: &PathBuf,
     state_mount: Option<(&Path, &str)>,
+    extra_env: &[(&str, &str)],
 ) -> bool {
     let log_out = match File::create(log_path) {
         Ok(f) => f,
@@ -472,6 +475,11 @@ fn run_worker_container(
             .arg(format!("{}:/sipag-state", workers_dir.display()))
             .arg("-e")
             .arg(format!("STATE_FILE=/sipag-state/{state_filename}"));
+    }
+
+    // Extra env vars (e.g. ISSUE_NUM, WORK_LABEL for container-side label management).
+    for (key, value) in extra_env {
+        cmd.arg("-e").arg(format!("{key}={value}"));
     }
 
     cmd // Repository identity
