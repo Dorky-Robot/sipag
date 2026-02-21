@@ -128,6 +128,16 @@ worker_reconcile_orphaned_branches() {
             --json number -q '.[0].number' 2>/dev/null || true)
         [[ -n "$open_pr" ]] && continue
 
+        # Skip and clean up if a merged PR already exists for this branch
+        local merged_pr
+        merged_pr=$(gh pr list --repo "$repo" --head "$branch" --state merged \
+            --json number -q '.[0].number' 2>/dev/null || true)
+        if [[ -n "$merged_pr" ]]; then
+            echo "[$(date +%H:%M:%S)] Branch ${branch} already merged via PR #${merged_pr} — deleting stale branch"
+            gh api -X DELETE "repos/${repo}/git/refs/heads/${branch}" 2>/dev/null || true
+            continue
+        fi
+
         # Skip if branch has no commits ahead of main
         local ahead_by
         ahead_by=$(gh api "repos/${repo}/compare/main...${branch}" \
