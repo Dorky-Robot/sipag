@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod config;
 pub mod docker;
 pub mod executor;
 pub mod init;
