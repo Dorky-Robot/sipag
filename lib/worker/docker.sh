@@ -468,3 +468,81 @@ worker_run_pr_iteration() {
         echo "[PR #${pr_num}] FAILED iteration (exit ${exit_code}): $title"
     fi
 }
+
+# Fix a PR with merge conflicts by merging main forward into the branch.
+# If the merge is clean (no conflicts), pushes the merge commit automatically.
+# If there are conflicts, runs Claude to resolve them.
+#
+# Always merges forward — never rebases, never force-pushes.
+#
+# $1: repo in OWNER/REPO format
+# $2: pr_num — the conflicted PR to fix
+worker_run_conflict_fix() {
+    local repo="$1"
+    local pr_num="$2"
+    local title branch_name pr_body prompt
+
+    worker_conflict_fix_mark_running "$pr_num"
+
+    title=$(gh pr view "$pr_num" --repo "$repo" --json title -q '.title' 2>/dev/null)
+    branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
+
+    echo "[PR #${pr_num}] Merging main forward: $title (branch: $branch_name)"
+
+    pr_body=$(gh pr view "$pr_num" --repo "$repo" --json body -q '.body' 2>/dev/null || true)
+
+    # Load prompt from template and substitute placeholders
+    local _tpl_pr_num='{{PR_NUM}}' _tpl_pr_title='{{PR_TITLE}}'
+    local _tpl_branch='{{BRANCH}}' _tpl_pr_body='{{PR_BODY}}'
+    prompt=$(<"${_SIPAG_WORKER_LIB}/prompts/worker-conflict-fix.md")
+    prompt="${prompt//${_tpl_pr_num}/${pr_num}}"
+    prompt="${prompt//${_tpl_pr_title}/${title}}"
+    prompt="${prompt//${_tpl_branch}/${branch_name}}"
+    prompt="${prompt//${_tpl_pr_body}/${pr_body}}"
+
+    PROMPT="$prompt" BRANCH="$branch_name" \
+        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        --name "sipag-conflict-${pr_num}" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
+        -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e PROMPT \
+        -e BRANCH \
+        "$WORKER_IMAGE" \
+        bash -c '
+            git clone "https://github.com/'"${repo}"'.git" /work && cd /work
+            git config user.name "sipag"
+            git config user.email "sipag@localhost"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
+            git checkout "$BRANCH"
+            git fetch origin main
+            if git merge origin/main --no-edit; then
+                # Clean merge — no conflicts, push the merge commit
+                git push origin "$BRANCH"
+                echo "[sipag] Merged main into $BRANCH (no conflicts)"
+                exit 0
+            fi
+            # Conflicts detected — run Claude to resolve them
+            echo "[sipag] Conflicts detected in $BRANCH, running Claude to resolve..."
+            tmux new-session -d -s claude \
+                "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
+                 echo \$? > /tmp/.claude-exit"
+            touch /tmp/claude.log
+            tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
+            tail -f /tmp/claude.log &
+            TAIL_PID=$!
+            while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+            kill $TAIL_PID 2>/dev/null || true
+            wait $TAIL_PID 2>/dev/null || true
+            exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
+        ' > "${WORKER_LOG_DIR}/${WORKER_REPO_SLUG}--pr-${pr_num}-conflict-fix.log" 2>&1
+
+    local exit_code=$?
+    worker_conflict_fix_mark_done "$pr_num"
+
+    if [[ $exit_code -eq 0 ]]; then
+        echo "[PR #${pr_num}] Conflict fix done: $title"
+    else
+        echo "[PR #${pr_num}] Conflict fix FAILED (exit ${exit_code}): $title"
+    fi
+}

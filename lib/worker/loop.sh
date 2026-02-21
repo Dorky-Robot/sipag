@@ -60,6 +60,37 @@ worker_loop() {
             # Auto-merge clean sipag PRs (prevents conflict cascades)
             worker_auto_merge "$repo"
 
+            # Fix stale PRs with merge conflicts by merging main forward (never rebase).
+            # Runs before processing new issues so the backlog stays unblocked.
+            local -a conflicted_prs=()
+            mapfile -t conflicted_prs < <(worker_find_conflicted_prs "$repo")
+            local -a prs_to_fix_conflicts=()
+            local cf_pr_num
+            for cf_pr_num in "${conflicted_prs[@]}"; do
+                if worker_conflict_fix_is_running "$cf_pr_num"; then
+                    echo "[$(date +%H:%M:%S)] Skipping PR #${cf_pr_num} conflict fix (already in progress)"
+                    continue
+                fi
+                if worker_pr_is_running "$cf_pr_num"; then
+                    echo "[$(date +%H:%M:%S)] Skipping PR #${cf_pr_num} conflict fix (iteration in progress)"
+                    continue
+                fi
+                prs_to_fix_conflicts+=("$cf_pr_num")
+            done
+
+            if [[ ${#prs_to_fix_conflicts[@]} -gt 0 ]]; then
+                echo "[$(date +%H:%M:%S)] Found ${#prs_to_fix_conflicts[@]} PR(s) with conflicts to fix: ${prs_to_fix_conflicts[*]}"
+                found_work=1
+                local pids=()
+                for cf_pr_num in "${prs_to_fix_conflicts[@]}"; do
+                    worker_run_conflict_fix "$repo" "$cf_pr_num" &
+                    pids+=($!)
+                done
+                for pid in "${pids[@]}"; do
+                    wait "$pid" 2>/dev/null || true
+                done
+            fi
+
             # Fetch open issues with the work label
             local -a label_args=()
             [[ -n "$WORKER_WORK_LABEL" ]] && label_args=(--label "$WORKER_WORK_LABEL")
@@ -106,6 +137,10 @@ worker_loop() {
             for pr_num in "${prs_needing_changes[@]}"; do
                 if worker_pr_is_running "$pr_num"; then
                     echo "[$(date +%H:%M:%S)] Skipping PR #${pr_num} iteration (already in progress)"
+                    continue
+                fi
+                if worker_conflict_fix_is_running "$pr_num"; then
+                    echo "[$(date +%H:%M:%S)] Skipping PR #${pr_num} iteration (conflict fix in progress)"
                     continue
                 fi
                 prs_to_iterate+=("$pr_num")

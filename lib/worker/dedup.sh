@@ -106,3 +106,17 @@ worker_pr_mark_running() {
 worker_pr_mark_done() {
     rm -f "${WORKER_LOG_DIR}/pr-${1}-running"
 }
+
+# Track PR conflict-fix state using temp files (reset on process restart).
+# Prevents duplicate conflict-fix workers for the same PR.
+worker_conflict_fix_is_running() {
+    [[ -f "${WORKER_LOG_DIR}/pr-${1}-conflict-fix-running" ]]
+}
+
+worker_conflict_fix_mark_running() {
+    touch "${WORKER_LOG_DIR}/pr-${1}-conflict-fix-running"
+}
+
+worker_conflict_fix_mark_done() {
+    rm -f "${WORKER_LOG_DIR}/pr-${1}-conflict-fix-running"
+}
