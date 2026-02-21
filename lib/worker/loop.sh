@@ -25,6 +25,12 @@ worker_loop() {
     echo ""
 
     while true; do
+        # Check drain signal before picking up new work
+        if [[ -f "${SIPAG_DIR}/drain" ]]; then
+            echo "[$(date +%H:%M:%S)] Drain signal detected. Finishing in-flight work, not picking up new issues."
+            break
+        fi
+
         # Reconcile: close issues that already have merged PRs
         worker_reconcile "$repo"
 
