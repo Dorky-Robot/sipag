@@ -12,7 +12,6 @@ pub use sipag_core::task::TaskStatus as Status;
 pub struct Task {
     /// Numeric ID extracted from the filename prefix (e.g. `003-fix.md` → 3)
     /// or the issue number for worker-JSON tasks.
-    #[allow(dead_code)]
     pub id: u32,
     pub title: String,
     pub repo: Option<String>,

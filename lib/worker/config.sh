@@ -24,6 +24,8 @@ WORKER_ONCE=0
 WORKER_AUTO_MERGE=true
 WORKER_DOC_REFRESH_INTERVAL="${SIPAG_DOC_REFRESH_INTERVAL:-10}"
 WORKER_REPO_SLUG=""
+# Age in days after which terminal state files (done/failed) are pruned on startup.
+WORKER_STATE_MAX_AGE_DAYS="${SIPAG_STATE_MAX_AGE_DAYS:-7}"
 
 # Load config
 worker_load_config() {
@@ -45,6 +47,7 @@ worker_load_config() {
             work_label) WORKER_WORK_LABEL="$value" ;;
             auto_merge) WORKER_AUTO_MERGE="$value" ;;
             doc_refresh_interval) WORKER_DOC_REFRESH_INTERVAL="$value" ;;
+            state_max_age_days) WORKER_STATE_MAX_AGE_DAYS="$value" ;;
         esac
     done < "$config"
 }
