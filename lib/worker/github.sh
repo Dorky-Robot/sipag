@@ -107,6 +107,13 @@ worker_reconcile() {
         echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${merged_pr} (${pr_title})"
         gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${merged_pr}" 2>/dev/null
         worker_mark_state_done "$repo" "$issue" "$merged_pr" "${pr_url:-}"
+
+        # Delete the source branch for the merged PR to prevent stale branch accumulation
+        local branch_name
+        branch_name=$(gh pr view "$merged_pr" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null || true)
+        if [[ -n "$branch_name" ]]; then
+            gh api -X DELETE "repos/${repo}/git/refs/heads/${branch_name}" 2>/dev/null || true
+        fi
     done
 }
 
