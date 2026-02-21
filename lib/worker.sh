@@ -109,14 +109,16 @@ worker_has_open_pr() {
 }
 
 # Find open PRs that need another worker pass:
-#   - formal CHANGES_REQUESTED review, OR
+#   - a CHANGES_REQUESTED review submitted AFTER the most recent commit, OR
 #   - any PR comment posted after the most recent commit
-# This covers the common case where the PR author cannot request changes on
-# their own PR, so feedback arrives as plain comments rather than reviews.
+# Both conditions are anchored to the last commit date so that feedback already
+# addressed by a worker (which pushed new commits) does not re-trigger iteration.
+# This also covers the case where the PR author cannot formally request changes
+# on their own PR, so feedback arrives as plain comments instead.
 worker_find_prs_needing_iteration() {
     local repo="$1"
     gh pr list --repo "$repo" --state open \
-        --json number,reviewDecision,commits,comments \
+        --json number,reviews,commits,comments \
         --jq '
             .[] |
             (
@@ -126,7 +128,7 @@ worker_find_prs_needing_iteration() {
                 end
             ) as $last_push |
             select(
-                (.reviewDecision == "CHANGES_REQUESTED") or
+                ((.reviews // []) | map(select(.state == "CHANGES_REQUESTED" and .submittedAt > $last_push)) | length > 0) or
                 ((.comments // []) | map(select(.createdAt > $last_push)) | length > 0)
             ) |
             .number
@@ -339,6 +341,15 @@ worker_run_pr_iteration() {
         --jq '([.reviews[] | select(.state == "CHANGES_REQUESTED") | "Review by \(.author.login):\n\(.body)"] +
                [.comments[] | "Comment by \(.author.login):\n\(.body)"]) | join("\n---\n")' 2>/dev/null || true)
 
+    # Inline code review comments (line-level feedback on the diff, via REST API)
+    local inline_comments
+    inline_comments=$(gh api "repos/${repo}/pulls/${pr_num}/comments" \
+        --jq '[.[] | "Inline comment on \(.path) line \(.line // "?") by \(.user.login):\n\(.body)"] | join("\n---\n")' 2>/dev/null || true)
+    if [[ -n "$inline_comments" ]]; then
+        [[ -n "$review_feedback" ]] && review_feedback+=$'\n---\n'
+        review_feedback+="$inline_comments"
+    fi
+
     # Capture current diff (capped to avoid overwhelming the prompt)
     pr_diff=$(gh pr diff "$pr_num" --repo "$repo" 2>/dev/null | head -c 50000 || true)
 
@@ -355,11 +366,12 @@ ${review_feedback}
 
 Instructions:
 - You are on branch ${branch_name} which already has work in progress
-- Read the review feedback carefully
+- Read the review feedback carefully and address every point raised
 - Make targeted changes that address the feedback
 - Do NOT rewrite the PR from scratch — make surgical fixes
-- Commit with a message that references the feedback
-- Push to the same branch (git push origin ${branch_name})"
+- Run \`make dev\` (fmt + clippy + test) before committing to validate your changes
+- Commit with a message that references the feedback (do NOT amend existing commits)
+- Push to the same branch (git push origin ${branch_name}) — do NOT force push"
 
     # Hook: PR iteration started
     export SIPAG_EVENT="pr-iteration.started"
@@ -462,7 +474,30 @@ worker_loop() {
             continue
         fi
 
-        # Process new issues in batches
+        # PR iterations take priority over new issues: fix what is already in flight first.
+        if [[ ${#prs_to_iterate[@]} -gt 0 ]]; then
+            echo "[$(date +%H:%M:%S)] Found ${#prs_to_iterate[@]} PRs needing iteration: ${prs_to_iterate[*]}"
+
+            for ((i = 0; i < ${#prs_to_iterate[@]}; i += WORKER_BATCH_SIZE)); do
+                local iter_batch=("${prs_to_iterate[@]:i:WORKER_BATCH_SIZE}")
+                echo "--- PR iteration batch: ${iter_batch[*]} ---"
+
+                local pids=()
+                for pr_num in "${iter_batch[@]}"; do
+                    worker_run_pr_iteration "$repo" "$pr_num" &
+                    pids+=($!)
+                done
+
+                for pid in "${pids[@]}"; do
+                    wait "$pid" 2>/dev/null || true
+                done
+
+                echo "--- PR iteration batch complete ---"
+                echo ""
+            done
+        fi
+
+        # Process new issues in batches (after PR iterations)
         if [[ ${#new_issues[@]} -gt 0 ]]; then
             echo "[$(date +%H:%M:%S)] Found ${#new_issues[@]} new issues: ${new_issues[*]}"
 
@@ -485,29 +520,6 @@ worker_loop() {
                 done
 
                 echo "--- Batch complete ---"
-                echo ""
-            done
-        fi
-
-        # Process PR iterations in batches
-        if [[ ${#prs_to_iterate[@]} -gt 0 ]]; then
-            echo "[$(date +%H:%M:%S)] Found ${#prs_to_iterate[@]} PRs needing iteration: ${prs_to_iterate[*]}"
-
-            for ((i = 0; i < ${#prs_to_iterate[@]}; i += WORKER_BATCH_SIZE)); do
-                local iter_batch=("${prs_to_iterate[@]:i:WORKER_BATCH_SIZE}")
-                echo "--- PR iteration batch: ${iter_batch[*]} ---"
-
-                local pids=()
-                for pr_num in "${iter_batch[@]}"; do
-                    worker_run_pr_iteration "$repo" "$pr_num" &
-                    pids+=($!)
-                done
-
-                for pid in "${pids[@]}"; do
-                    wait "$pid" 2>/dev/null || true
-                done
-
-                echo "--- PR iteration batch complete ---"
                 echo ""
             done
         fi
