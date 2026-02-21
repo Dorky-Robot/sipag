@@ -78,7 +78,7 @@ echo "      ✓ No clippy warnings"
 # ── 6. Shell lint (BLOCKING) ─────────────────────────────────────────────────
 step "[6/6] Shell lint (shellcheck)"
 if command -v shellcheck >/dev/null 2>&1; then
-    if ! shellcheck bin/sipag lib/*.sh; then
+    if ! shellcheck bin/sipag lib/*.sh lib/worker/*.sh; then
         fail "shellcheck errors — commit blocked. Fix shell script issues before committing."
     fi
     echo "      ✓ Shell scripts OK"
