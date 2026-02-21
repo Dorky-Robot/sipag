@@ -30,6 +30,11 @@ worker_loop() {
     echo "Started: $(date)"
     echo ""
 
+    # Recover orphaned containers from a previous worker process crash.
+    # Runs once before the first poll cycle so state files and labels are
+    # consistent before we start dispatching new work.
+    worker_recover
+
     while true; do
         # Check drain signal before picking up new work
         if [[ -f "${SIPAG_DIR}/drain" ]]; then
