@@ -57,7 +57,7 @@ worker_auto_merge() {
 
         echo "[$(date +%H:%M:%S)] Auto-merging PR #${pr_num}: ${title}"
 
-        if gh pr merge "$pr_num" --repo "$repo" --squash --subject "$title" 2>/dev/null; then
+        if gh pr merge "$pr_num" --repo "$repo" --squash --delete-branch --subject "$title" 2>/dev/null; then
             echo "[$(date +%H:%M:%S)] Merged PR #${pr_num}"
             export SIPAG_EVENT="pr.auto-merged"
             export SIPAG_PR_NUM="$pr_num"

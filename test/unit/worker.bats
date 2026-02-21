@@ -482,6 +482,28 @@ GHEOF
   assert_output_not_contains "Orphaned branch detected"
 }
 
+@test "worker_reconcile_orphaned_branches: deletes branch when merged PR exists instead of creating recovery PR" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"branches"*"per_page"* ]]; then
+  printf 'sipag/issue-5-fix-bug\n'
+elif [[ "$args" == *"pr list"*"--state open"* ]]; then
+  printf ''
+elif [[ "$args" == *"pr list"*"--state merged"* ]]; then
+  printf '10\n'
+elif [[ "$args" == "api"* ]]; then
+  exit 0
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_reconcile_orphaned_branches "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Orphaned branch detected"
+  assert_output_not_contains "Recovery PR created"
+}
+
 @test "worker_reconcile_orphaned_branches: handles empty branch list" {
   cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
 #!/usr/bin/env bash
@@ -662,6 +684,28 @@ GHEOF
   [[ "$status" -eq 0 ]]
   assert_output_contains "Auto-merging PR #42"
   assert_output_contains "Merged PR #42"
+}
+
+@test "worker_auto_merge: passes --delete-branch flag to gh pr merge" {
+  WORKER_AUTO_MERGE=true
+  local merge_args_file="${TEST_TMPDIR}/merge-args"
+  cat > "${TEST_TMPDIR}/bin/gh" <<GHEOF
+#!/usr/bin/env bash
+args="\$*"
+if [[ "\$args" == *"pr list"* ]]; then
+  echo "42"
+elif [[ "\$args" == *"pr view"* ]]; then
+  echo "feat: add awesome feature"
+elif [[ "\$args" == *"pr merge"* ]]; then
+  echo "\$args" > "${merge_args_file}"
+  exit 0
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  [[ "$status" -eq 0 ]]
+  grep -q -- "--delete-branch" "${merge_args_file}"
 }
 
 @test "worker_auto_merge: logs failure when merge command fails" {

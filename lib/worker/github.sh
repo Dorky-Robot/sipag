@@ -106,6 +106,12 @@ worker_reconcile() {
         echo "[$(date +%H:%M:%S)] Closing #${issue} — resolved by merged PR #${merged_pr} (${pr_title})"
         gh issue close "$issue" --repo "$repo" --comment "Closed by merged PR #${merged_pr}" 2>/dev/null
         worker_mark_seen "$issue"
+
+        local branch_name
+        branch_name=$(gh pr view "$merged_pr" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null || true)
+        if [[ -n "$branch_name" ]]; then
+            gh api -X DELETE "repos/${repo}/git/refs/heads/${branch_name}" 2>/dev/null || true
+        fi
     done
 }
 
@@ -126,6 +132,15 @@ worker_reconcile_orphaned_branches() {
         open_pr=$(gh pr list --repo "$repo" --head "$branch" --state open \
             --json number -q '.[0].number' 2>/dev/null || true)
         [[ -n "$open_pr" ]] && continue
+
+        # Delete branch if a merged PR already exists for it
+        local merged_pr
+        merged_pr=$(gh pr list --repo "$repo" --head "$branch" --state merged \
+            --json number -q '.[0].number' 2>/dev/null || true)
+        if [[ -n "$merged_pr" ]]; then
+            gh api -X DELETE "repos/${repo}/git/refs/heads/${branch}" 2>/dev/null || true
+            continue
+        fi
 
         # Skip if branch has no commits ahead of main
         local ahead_by
