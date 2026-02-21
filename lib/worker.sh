@@ -186,6 +186,80 @@ sipag_run_hook() {
     "$hook_path" &  # run async, don't block the worker
 }
 
+# Record token usage from a Claude log file to ~/.sipag/usage.log (NDJSON).
+# Usage: worker_record_usage <repo> <issue_or_empty> <task_id> <duration_s> <result> <log_file>
+#
+# Parses the log for token counts and cost reported by Claude Code, then appends
+# one NDJSON record to ${SIPAG_DIR}/usage.log.  All token fields are "null" when
+# the log does not contain recognisable usage stats.
+worker_record_usage() {
+    local repo="$1" issue="$2" task_id="$3" duration_s="$4" result="$5" log_file="$6"
+
+    local ts input_tokens output_tokens cache_read_tokens cost_usd raw
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    input_tokens=null
+    output_tokens=null
+    cache_read_tokens=null
+    cost_usd=null
+
+    if [[ -f "$log_file" ]]; then
+        # Cache read tokens — check before generic "input" to avoid false matches
+        # on lines like "cache_read_input_tokens".
+        raw=$(grep -iE '"?cache_read_input_tokens"?[: ]+[0-9]|cache[_ ]read[_ ]tokens?[ :]+[0-9]' \
+            "$log_file" | grep -oE '[0-9][0-9,]*' | tr -d ',' | head -1 || true)
+        if [[ -n "$raw" ]]; then
+            cache_read_tokens="$raw"
+        fi
+
+        # Input tokens — require the quoted JSON key to avoid matching
+        # "cache_read_input_tokens".  Fall back to text-format patterns.
+        raw=$(grep -oE '"input_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9,]*' "$log_file" \
+            | grep -oE '[0-9][0-9,]*' | tr -d ',' | head -1 || true)
+        if [[ -z "$raw" ]]; then
+            raw=$(grep -iE 'input[_ ]tokens?[[:space:]]*:[[:space:]]*[0-9]' "$log_file" \
+                | grep -v -i cache \
+                | grep -oE '[0-9][0-9,]*' | tr -d ',' | head -1 || true)
+        fi
+        if [[ -n "$raw" ]]; then
+            input_tokens="$raw"
+        fi
+
+        # Output tokens — same approach (output field name is unambiguous).
+        raw=$(grep -oE '"output_tokens"[[:space:]]*:[[:space:]]*[0-9][0-9,]*' "$log_file" \
+            | grep -oE '[0-9][0-9,]*' | tr -d ',' | head -1 || true)
+        if [[ -z "$raw" ]]; then
+            raw=$(grep -iE 'output[_ ]tokens?[[:space:]]*:[[:space:]]*[0-9]' "$log_file" \
+                | grep -oE '[0-9][0-9,]*' | tr -d ',' | head -1 || true)
+        fi
+        if [[ -n "$raw" ]]; then
+            output_tokens="$raw"
+        fi
+
+        # Cost in USD — JSON "cost_usd" or "total_cost_usd" field, or "$N.NN"
+        # on any line that also mentions "cost".
+        raw=$(grep -oE '"(total_)?cost_usd"[[:space:]]*:[[:space:]]*[0-9][0-9.]*' "$log_file" \
+            | grep -oE '[0-9][0-9.]*' | head -1 || true)
+        if [[ -z "$raw" ]]; then
+            raw=$(grep -i 'cost' "$log_file" \
+                | grep -oE '\$[0-9]+\.[0-9]+' | head -1 | tr -d '$' || true)
+        fi
+        if [[ -n "$raw" ]]; then
+            cost_usd="$raw"
+        fi
+    fi
+
+    # Format issue number as a JSON number or null.
+    local issue_json=null
+    if [[ "$issue" =~ ^[0-9]+$ ]]; then
+        issue_json="$issue"
+    fi
+
+    # Append NDJSON record.
+    printf '%s\n' \
+        "{\"ts\":\"${ts}\",\"repo\":\"${repo}\",\"issue\":${issue_json},\"task_id\":\"${task_id}\",\"input_tokens\":${input_tokens},\"output_tokens\":${output_tokens},\"cache_read_tokens\":${cache_read_tokens},\"cost_usd\":${cost_usd},\"duration_s\":${duration_s},\"result\":\"${result}\"}" \
+        >> "${SIPAG_DIR}/usage.log"
+}
+
 # Convert an issue title into a URL-safe branch name slug (max 50 chars)
 worker_slugify() {
     local title="$1"
@@ -288,6 +362,10 @@ Instructions:
         worker_transition_label "$repo" "$issue_num" "in-progress" ""
         echo "[#${issue_num}] DONE: $title"
 
+        # Record token usage
+        worker_record_usage "$repo" "$issue_num" "$task_id" "$duration" "success" \
+            "${WORKER_LOG_DIR}/issue-${issue_num}.log"
+
         # Look up the PR opened by the worker
         local pr_num pr_url
         pr_num=$(gh pr list --repo "$repo" --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
@@ -304,6 +382,10 @@ Instructions:
         worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
 
+        # Record token usage (even on failure — captures partial usage)
+        worker_record_usage "$repo" "$issue_num" "$task_id" "$duration" "failure" \
+            "${WORKER_LOG_DIR}/issue-${issue_num}.log"
+
         # Hook: worker failed
         export SIPAG_EVENT="worker.failed"
         export SIPAG_EXIT_CODE="$exit_code"
@@ -316,9 +398,10 @@ Instructions:
 worker_run_pr_iteration() {
     local repo="$1"
     local pr_num="$2"
-    local title branch_name issue_num issue_body review_feedback pr_diff prompt
+    local title branch_name issue_num issue_body review_feedback pr_diff prompt start_time
 
     worker_pr_mark_running "$pr_num"
+    start_time=$(date +%s)
 
     title=$(gh pr view "$pr_num" --repo "$repo" --json title -q '.title' 2>/dev/null)
     branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
@@ -387,7 +470,15 @@ Instructions:
         ' > "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log" 2>&1
 
     local exit_code=$?
+    local iter_duration
+    iter_duration=$(( $(date +%s) - start_time ))
     worker_pr_mark_done "$pr_num"
+
+    # Record token usage for this PR iteration.
+    local iter_result="success"
+    [[ $exit_code -ne 0 ]] && iter_result="failure"
+    worker_record_usage "$repo" "" "pr-${pr_num}-iter" "$iter_duration" "$iter_result" \
+        "${WORKER_LOG_DIR}/pr-${pr_num}-iter.log"
 
     # Hook: PR iteration done
     export SIPAG_EVENT="pr-iteration.done"

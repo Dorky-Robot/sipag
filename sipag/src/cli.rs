@@ -4,6 +4,7 @@ use sipag_core::{
     executor::{self, generate_task_id, RunConfig},
     repo,
     task::{self, default_sipag_dir, default_sipag_file, TaskStatus},
+    usage,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -123,6 +124,17 @@ pub enum Commands {
     /// Show queue state across all directories
     Status,
 
+    /// Show token usage and cost estimates from ~/.sipag/usage.log
+    Usage {
+        /// Filter by repository (e.g. org/repo)
+        #[arg(long)]
+        repo: Option<String>,
+
+        /// Show only records since this time ago (e.g. 7d, 24h, 1w)
+        #[arg(long)]
+        since: Option<String>,
+    },
+
     /// Print version
     Version,
 
@@ -188,6 +200,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
         Some(Commands::Status) => cmd_status(),
+        Some(Commands::Usage { repo, since }) => cmd_usage(repo.as_deref(), since.as_deref()),
         Some(Commands::BgExec {
             task_id,
             repo_url,
@@ -612,6 +625,136 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+fn cmd_usage(repo_filter: Option<&str>, since_str: Option<&str>) -> Result<()> {
+    let dir = sipag_dir();
+    let all_records = usage::load_usage(&dir)?;
+
+    if all_records.is_empty() {
+        println!("No usage data yet. Usage is recorded automatically when workers complete.");
+        println!("Usage log: {}/usage.log", dir.display());
+        return Ok(());
+    }
+
+    // Parse --since filter
+    let since_cutoff: Option<chrono::DateTime<chrono::Utc>> = match since_str {
+        Some(s) => match parse_since(s) {
+            Some(cutoff) => Some(cutoff),
+            None => bail!("Invalid --since value '{}'. Use formats like: 7d, 24h, 1w", s),
+        },
+        None => None,
+    };
+
+    // Filter records
+    let records: Vec<&usage::UsageRecord> = all_records
+        .iter()
+        .filter(|r| {
+            if let Some(repo) = repo_filter {
+                if r.repo != repo {
+                    return false;
+                }
+            }
+            if let Some(cutoff) = since_cutoff {
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&r.ts) {
+                    if ts.with_timezone(&chrono::Utc) < cutoff {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .collect();
+
+    if records.is_empty() {
+        println!("No usage records match the given filters.");
+        return Ok(());
+    }
+
+    // Print header
+    let period_label = match since_str {
+        Some(s) => format!("Last {s}"),
+        None => "All time".to_string(),
+    };
+    println!("{period_label}:");
+
+    // Collect unique repos (sorted)
+    let mut repos: Vec<String> = records.iter().map(|r| r.repo.clone()).collect();
+    repos.sort();
+    repos.dedup();
+
+    let mut total_input: u64 = 0;
+    let mut total_output: u64 = 0;
+    let mut total_cost: f64 = 0.0;
+    let mut total_runs: usize = 0;
+
+    for repo in &repos {
+        let mut runs: usize = 0;
+        let mut input: u64 = 0;
+        let mut output: u64 = 0;
+        let mut cost: f64 = 0.0;
+
+        for record in records.iter().filter(|r| r.repo == *repo) {
+            runs += 1;
+            input += record.input_tokens.unwrap_or(0);
+            output += record.output_tokens.unwrap_or(0);
+            cost += record.effective_cost_usd();
+        }
+
+        total_input += input;
+        total_output += output;
+        total_cost += cost;
+        total_runs += runs;
+
+        println!(
+            "  {repo:<30}  {} input / {} output  ~${cost:.2}  ({runs} run{})",
+            fmt_tokens(input),
+            fmt_tokens(output),
+            if runs == 1 { "" } else { "s" },
+        );
+    }
+
+    if repos.len() > 1 {
+        println!(
+            "  {:<30}  {} input / {} output  ~${total_cost:.2}  ({total_runs} run{})",
+            "Total",
+            fmt_tokens(total_input),
+            fmt_tokens(total_output),
+            if total_runs == 1 { "" } else { "s" },
+        );
+    }
+
+    Ok(())
+}
+
+/// Parse a human-readable duration string into a cutoff timestamp.
+/// Supported formats: `Nd` (days), `Nh` (hours), `Nw` (weeks).
+fn parse_since(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let now = chrono::Utc::now();
+    if let Some(days) = s.strip_suffix('d') {
+        let n: i64 = days.parse().ok()?;
+        return Some(now - chrono::Duration::days(n));
+    }
+    if let Some(hours) = s.strip_suffix('h') {
+        let n: i64 = hours.parse().ok()?;
+        return Some(now - chrono::Duration::hours(n));
+    }
+    if let Some(weeks) = s.strip_suffix('w') {
+        let n: i64 = weeks.parse().ok()?;
+        return Some(now - chrono::Duration::days(n * 7));
+    }
+    None
+}
+
+/// Format a token count as a compact human-readable string.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
     }
 }
 
