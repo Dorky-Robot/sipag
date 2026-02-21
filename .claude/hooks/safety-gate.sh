@@ -207,7 +207,7 @@ BASH_ALLOW_PATTERNS=(
 	'^git (add|commit|status|diff|log|branch|checkout|switch|stash|show|rev-parse|rev-list|ls-files|merge|rebase|cherry-pick|tag|fetch|pull|remote)'
 	'^git push( |$)'
 	'^(npm|yarn|pnpm) (test|run|exec)'
-	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|format|clippy|install)'
+	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|fmt|format|clippy|install)'
 	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false)( |$)'
 	'^mkdir '
 	'^(cp|mv) '

@@ -46,19 +46,8 @@ pub fn parse_worker_json(json: &str) -> anyhow::Result<WorkerState> {
         .ok_or_else(|| anyhow::anyhow!("worker state missing required field: issue_num"))?;
 
     let issue_title = v["issue_title"].as_str().unwrap_or("").to_string();
-    if issue_title.is_empty() {
-        eprintln!("sipag: worker state for {repo} missing field: issue_title");
-    }
-
     let branch = v["branch"].as_str().unwrap_or("").to_string();
-    if branch.is_empty() {
-        eprintln!("sipag: worker state for {repo}#{issue_num} missing field: branch");
-    }
-
     let container_name = v["container_name"].as_str().unwrap_or("").to_string();
-    if container_name.is_empty() {
-        eprintln!("sipag: worker state for {repo}#{issue_num} missing field: container_name");
-    }
 
     Ok(WorkerState {
         repo,

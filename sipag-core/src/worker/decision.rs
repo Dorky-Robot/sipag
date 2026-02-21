@@ -17,13 +17,6 @@ pub enum SkipReason {
     ExistingPr,
 }
 
-impl IssueAction {
-    /// Returns `true` if this action is `Dispatch`.
-    pub fn is_dispatch(&self) -> bool {
-        matches!(self, Self::Dispatch)
-    }
-}
-
 /// Result of checking whether an exited container should be finalized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FinalizationResult {
@@ -209,19 +202,5 @@ mod tests {
                 let _ = decide_finalization(alive, has_pr);
             }
         }
-    }
-
-    // ── IssueAction::is_dispatch ─────────────────────────────────────────────
-
-    #[test]
-    fn is_dispatch_returns_true_for_dispatch() {
-        assert!(IssueAction::Dispatch.is_dispatch());
-    }
-
-    #[test]
-    fn is_dispatch_returns_false_for_skip() {
-        assert!(!IssueAction::Skip(SkipReason::AlreadyCompleted).is_dispatch());
-        assert!(!IssueAction::Skip(SkipReason::InFlight).is_dispatch());
-        assert!(!IssueAction::Skip(SkipReason::ExistingPr).is_dispatch());
     }
 }

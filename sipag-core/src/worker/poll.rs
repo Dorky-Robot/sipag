@@ -14,8 +14,8 @@ use super::dispatch::{
     dispatch_conflict_fix, dispatch_issue_worker, dispatch_pr_iteration, is_container_running,
 };
 use super::github::{
-    auto_merge_prs, count_open_issues, count_open_prs, find_conflicted_prs,
-    find_prs_needing_iteration, list_approved_issues, reconcile_merged_prs,
+    count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
+    list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::recover_and_finalize;
@@ -89,9 +89,8 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         let mut found_work = false;
 
         for repo in repos {
-            // ── Per-repo: reconcile + auto-merge + dispatch ──────────────────
+            // ── Per-repo: reconcile + dispatch ──────────────────────────────
             let _ = reconcile_merged_prs(repo);
-            let _ = auto_merge_prs(repo);
 
             // ── Conflict fixes ───────────────────────────────────────────────
             let conflicted = find_conflicted_prs(repo);
