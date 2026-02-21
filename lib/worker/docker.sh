@@ -71,6 +71,119 @@ _worker_update_state() {
         "$state_file" > "$tmp" && mv "$tmp" "$state_file"
 }
 
+# Recover orphaned worker state files on startup.
+#
+# Scans ~/.sipag/workers/*.json for entries with status "running" — these are
+# left over when the worker process dies while containers are still active.
+#
+# For each orphaned entry:
+#   - Container still running: adopt it (start a background monitor that waits
+#     for exit, then runs the same post-run label/state logic). Marks the state
+#     file "recovering" immediately so a second call is idempotent.
+#   - Container gone (exited and self-cleaned via --rm):
+#       PR exists (open or merged) → state → done, remove in-progress label
+#       No PR found              → state → failed, restore WORKER_WORK_LABEL
+#
+# Idempotent: states not in "running" are skipped, so calling twice is safe.
+worker_recover() {
+    local workers_dir="${SIPAG_DIR}/workers"
+    [[ -d "$workers_dir" ]] || return 0
+
+    local adopted=0 finalized=0
+
+    for state_file in "${workers_dir}"/*.json; do
+        [[ -f "$state_file" ]] || continue
+
+        local status
+        status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
+        [[ "$status" == "running" ]] || continue
+
+        local repo issue_num branch container_name started_at
+        repo=$(jq -r '.repo' "$state_file")
+        issue_num=$(jq -r '.issue_num' "$state_file")
+        branch=$(jq -r '.branch' "$state_file")
+        container_name=$(jq -r '.container_name' "$state_file")
+        started_at=$(jq -r '.started_at' "$state_file")
+
+        local repo_slug="${repo//\//--}"
+
+        if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
+                | grep -q "^${container_name}$"; then
+            # Container still running: adopt it
+            echo "[$(date +%H:%M:%S)] Recovery: adopting running container ${container_name} (#${issue_num})"
+
+            # Mark as recovering so re-runs of worker_recover skip this entry
+            local tmp
+            tmp=$(mktemp)
+            jq '.status = "recovering"' "$state_file" > "$tmp" && mv "$tmp" "$state_file"
+
+            # Ensure issue is marked seen so the polling loop won't re-dispatch it
+            local seen_file="${SIPAG_DIR}/seen/${repo_slug}"
+            mkdir -p "${SIPAG_DIR}/seen"
+            touch "$seen_file"
+            grep -qx "$issue_num" "$seen_file" 2>/dev/null || echo "$issue_num" >> "$seen_file"
+
+            # Background monitor: wait for container exit then finalize state
+            (
+                local exit_code
+                exit_code=$(docker wait "$container_name" 2>/dev/null || echo 1)
+                local ended_at duration_s
+                ended_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                duration_s=0
+                local start_epoch
+                if start_epoch=$(date -d "${started_at}" +%s 2>/dev/null); then
+                    duration_s=$(( $(date +%s) - start_epoch ))
+                fi
+
+                if [[ "$exit_code" -eq 0 ]]; then
+                    worker_transition_label "$repo" "$issue_num" "in-progress" ""
+                    local pr_num pr_url
+                    pr_num=$(gh pr list --repo "$repo" --head "$branch" --state open \
+                        --json number -q '.[0].number' 2>/dev/null || true)
+                    pr_url=$(gh pr list --repo "$repo" --head "$branch" \
+                        --json url -q '.[0].url' 2>/dev/null || true)
+                    _worker_update_state "$repo_slug" "$issue_num" "done" "$exit_code" \
+                        "$ended_at" "$duration_s" "${pr_num:-}" "${pr_url:-}"
+                    echo "[#${issue_num}] Recovery: container exited OK → done"
+                else
+                    worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+                    _worker_update_state "$repo_slug" "$issue_num" "failed" "$exit_code" \
+                        "$ended_at" "$duration_s"
+                    echo "[#${issue_num}] Recovery: container exited ${exit_code} → failed"
+                fi
+            ) &
+            adopted=$(( adopted + 1 ))
+        else
+            # Container gone (exited and removed via --rm): check for a PR
+            echo "[$(date +%H:%M:%S)] Recovery: container ${container_name} gone, checking PR for #${issue_num}"
+            local ended_at
+            ended_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+            local pr_num pr_url
+            pr_num=$(gh pr list --repo "$repo" --head "$branch" --state all \
+                --json number -q '.[0].number' 2>/dev/null || true)
+
+            if [[ -n "$pr_num" ]]; then
+                pr_url=$(gh pr list --repo "$repo" --head "$branch" --state all \
+                    --json url -q '.[0].url' 2>/dev/null || true)
+                worker_transition_label "$repo" "$issue_num" "in-progress" ""
+                _worker_update_state "$repo_slug" "$issue_num" "done" "0" \
+                    "$ended_at" "0" "${pr_num:-}" "${pr_url:-}"
+                echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} → done (PR #${pr_num})"
+            else
+                worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+                _worker_update_state "$repo_slug" "$issue_num" "failed" "1" "$ended_at" "0"
+                echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} → failed (no PR found)"
+            fi
+            finalized=$(( finalized + 1 ))
+        fi
+    done
+
+    local total=$(( adopted + finalized ))
+    [[ $total -gt 0 ]] && echo "[$(date +%H:%M:%S)] Recovery complete: ${adopted} adopted, ${finalized} finalized"
+    return 0
+}
+
 # Run a single issue in a Docker container
 worker_run_issue() {
     local repo="$1"

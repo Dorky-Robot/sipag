@@ -767,6 +767,285 @@ GHEOF
   [[ -f "$marker" ]]
 }
 
+# --- worker_recover ---
+
+# Helper: write a minimal "running" worker state file for tests
+_make_running_state() {
+  local state_file="$1" repo="$2" issue_num="$3" branch="$4" container_name="$5"
+  mkdir -p "$(dirname "$state_file")"
+  jq -n \
+    --arg repo "$repo" \
+    --argjson issue_num "$issue_num" \
+    --arg branch "$branch" \
+    --arg container_name "$container_name" \
+    '{
+      repo: $repo,
+      issue_num: $issue_num,
+      issue_title: "Test issue",
+      branch: $branch,
+      container_name: $container_name,
+      pr_num: null,
+      pr_url: null,
+      status: "running",
+      started_at: "2024-01-01T00:00:00Z",
+      ended_at: null,
+      duration_s: null,
+      exit_code: null,
+      log_path: "/tmp/test.log"
+    }' > "$state_file"
+}
+
+@test "worker_recover: does nothing when workers dir does not exist" {
+  rm -rf "${SIPAG_DIR}/workers"
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Recovery"
+}
+
+@test "worker_recover: does nothing when no state files have status 'running'" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--1.json" "owner/repo" 1 \
+    "sipag/issue-1-test" "sipag-issue-1"
+  # Overwrite status to done
+  jq '.status = "done"' "${SIPAG_DIR}/workers/owner--repo--1.json" \
+    > "${TEST_TMPDIR}/tmp.json" && mv "${TEST_TMPDIR}/tmp.json" "${SIPAG_DIR}/workers/owner--repo--1.json"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "adopting"
+  assert_output_not_contains "→ done"
+  assert_output_not_contains "→ failed"
+}
+
+@test "worker_recover: adopts running container, marks state 'recovering', marks issue seen" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--5.json" "owner/repo" 5 \
+    "sipag/issue-5-test" "sipag-issue-5"
+  touch "${SIPAG_DIR}/seen/owner--repo"
+
+  # docker ps returns the container name → container is running
+  # docker wait blocks; background subshell calls it but we don't wait for it in run
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  echo "sipag-issue-5"
+fi
+# docker wait: return 0 after a short delay (won't be waited on by run)
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "adopting"
+  assert_output_contains "sipag-issue-5"
+
+  # State file must be updated to "recovering" (not "running")
+  local new_status
+  new_status=$(jq -r '.status' "${SIPAG_DIR}/workers/owner--repo--5.json")
+  [[ "$new_status" == "recovering" ]]
+
+  # Issue 5 must be recorded in the seen file for owner/repo
+  grep -qx "5" "${SIPAG_DIR}/seen/owner--repo"
+}
+
+@test "worker_recover: marks issue seen even if seen file does not exist yet" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  rm -rf "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--6.json" "owner/repo" 6 \
+    "sipag/issue-6-test" "sipag-issue-6"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  echo "sipag-issue-6"
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  grep -qx "6" "${SIPAG_DIR}/seen/owner--repo"
+}
+
+@test "worker_recover: marks done when container is gone and PR exists" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--7.json" "owner/repo" 7 \
+    "sipag/issue-7-test" "sipag-issue-7"
+
+  # docker ps returns empty → container not running
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  # gh pr list returns a PR number on first call (number), URL on second (url)
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* && "$args" == *"number"* ]]; then
+  echo "42"
+elif [[ "$args" == *"pr list"* && "$args" == *"url"* ]]; then
+  echo "https://github.com/owner/repo/pull/42"
+elif [[ "$args" == *"issue edit"* ]]; then
+  exit 0
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "→ done"
+  assert_output_contains "#7"
+
+  local new_status
+  new_status=$(jq -r '.status' "${SIPAG_DIR}/workers/owner--repo--7.json")
+  [[ "$new_status" == "done" ]]
+
+  local pr_num
+  pr_num=$(jq -r '.pr_num' "${SIPAG_DIR}/workers/owner--repo--7.json")
+  [[ "$pr_num" == "42" ]]
+}
+
+@test "worker_recover: marks failed when container is gone and no PR exists" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--9.json" "owner/repo" 9 \
+    "sipag/issue-9-test" "sipag-issue-9"
+  WORKER_WORK_LABEL="approved"
+
+  # docker ps returns empty → container not running
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  # gh pr list returns empty → no PR
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == *"issue edit"* ]]; then
+  exit 0
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "→ failed"
+  assert_output_contains "#9"
+
+  local new_status
+  new_status=$(jq -r '.status' "${SIPAG_DIR}/workers/owner--repo--9.json")
+  [[ "$new_status" == "failed" ]]
+
+  local exit_code
+  exit_code=$(jq -r '.exit_code' "${SIPAG_DIR}/workers/owner--repo--9.json")
+  [[ "$exit_code" == "1" ]]
+}
+
+@test "worker_recover: is idempotent — skips states not in 'running'" {
+  mkdir -p "${SIPAG_DIR}/workers"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--11.json" "owner/repo" 11 \
+    "sipag/issue-11-test" "sipag-issue-11"
+  # Pre-set status to "recovering" (simulates already-adopted state)
+  jq '.status = "recovering"' "${SIPAG_DIR}/workers/owner--repo--11.json" \
+    > "${TEST_TMPDIR}/tmp.json" && mv "${TEST_TMPDIR}/tmp.json" "${SIPAG_DIR}/workers/owner--repo--11.json"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "adopting"
+  assert_output_not_contains "→ done"
+  assert_output_not_contains "→ failed"
+}
+
+@test "worker_recover: does not duplicate issue in seen file if already present" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--13.json" "owner/repo" 13 \
+    "sipag/issue-13-test" "sipag-issue-13"
+  # Pre-populate seen file with this issue
+  echo "13" > "${SIPAG_DIR}/seen/owner--repo"
+
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* ]]; then
+  echo "sipag-issue-13"
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  worker_recover
+
+  # Issue should appear exactly once in the seen file
+  local count
+  count=$(grep -cx "13" "${SIPAG_DIR}/seen/owner--repo" || echo 0)
+  [[ "$count" -eq 1 ]]
+}
+
+@test "worker_recover: handles multiple orphaned states in one pass" {
+  mkdir -p "${SIPAG_DIR}/workers" "${SIPAG_DIR}/seen"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--20.json" "owner/repo" 20 \
+    "sipag/issue-20-multi" "sipag-issue-20"
+  _make_running_state "${SIPAG_DIR}/workers/owner--repo--21.json" "owner/repo" 21 \
+    "sipag/issue-21-multi" "sipag-issue-21"
+
+  # docker ps: container 20 running, container 21 gone
+  cat > "${TEST_TMPDIR}/bin/docker" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"ps"* && "$*" == *"sipag-issue-20"* ]]; then
+  echo "sipag-issue-20"
+elif [[ "$*" == *"ps"* ]]; then
+  printf ''
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/docker"
+
+  # gh: no PR for issue 21
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  printf ''
+elif [[ "$args" == *"issue edit"* ]]; then
+  exit 0
+fi
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_recover
+  [[ "$status" -eq 0 ]]
+
+  assert_output_contains "adopting"
+  assert_output_contains "sipag-issue-20"
+  assert_output_contains "→ failed"
+  assert_output_contains "#21"
+  assert_output_contains "Recovery complete: 1 adopted, 1 finalized"
+
+  local s20 s21
+  s20=$(jq -r '.status' "${SIPAG_DIR}/workers/owner--repo--20.json")
+  s21=$(jq -r '.status' "${SIPAG_DIR}/workers/owner--repo--21.json")
+  [[ "$s20" == "recovering" ]]
+  [[ "$s21" == "failed" ]]
+}
+
 @test "worker_auto_merge: does not fire hook when merge fails" {
   WORKER_AUTO_MERGE=true
   mkdir -p "${SIPAG_DIR}/hooks"
