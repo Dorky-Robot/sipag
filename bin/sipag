@@ -157,8 +157,17 @@ cmd_work() {
 		fi
 	fi
 
-	worker_init "${repos[0]}"
-	worker_loop "${repos[@]}"
+	# Delegate to the Rust worker loop
+	local -a sipag_args=()
+	[[ "$WORKER_ONCE" == "1" ]] && sipag_args+=(--once)
+	sipag_args+=("${repos[@]}")
+
+	if command -v sipag-cli &>/dev/null; then
+		exec sipag-cli work "${sipag_args[@]}"
+	else
+		echo "Error: sipag-cli not found. Run 'make install' or 'cargo install --path sipag'"
+		return 1
+	fi
 }
 
 cmd_drain() {

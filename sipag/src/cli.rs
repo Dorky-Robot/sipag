@@ -127,6 +127,17 @@ pub enum Commands {
     /// Print version
     Version,
 
+    /// Poll GitHub for approved issues and dispatch Docker workers
+    Work {
+        /// Repositories to poll (in owner/repo format, e.g. Dorky-Robot/sipag)
+        #[arg(value_name = "REPO")]
+        repos: Vec<String>,
+
+        /// Run one polling cycle and exit
+        #[arg(long)]
+        once: bool,
+    },
+
     /// Internal: run Docker task in background (do not use directly)
     #[command(name = "_bg-exec", hide = true)]
     BgExec {
@@ -194,6 +205,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
         Some(Commands::Status) => cmd_status(),
+        Some(Commands::Work { repos, once }) => {
+            let dir = sipag_dir();
+            sipag_core::worker::run_worker_loop(repos, &dir, once)
+        }
         Some(Commands::BgExec {
             task_id,
             repo_url,
