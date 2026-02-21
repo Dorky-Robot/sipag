@@ -5,7 +5,7 @@ use sipag_core::{
     init,
     prompt::{format_duration, generate_task_id},
     repo,
-    task::{self, default_sipag_dir, TaskStatus},
+    task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
 };
 use std::fs;
@@ -226,7 +226,6 @@ fn cmd_start() -> Result<()> {
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
-    let running_dir = dir.join("running");
     let failed_dir = dir.join("failed");
     let image = std::env::var("SIPAG_IMAGE")
         .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
@@ -235,6 +234,7 @@ fn cmd_start() -> Result<()> {
         .parse::<u64>()
         .unwrap_or(1800);
 
+    let repo = FileTaskRepository::new(dir.clone());
     let mut processed = 0;
 
     loop {
@@ -265,7 +265,7 @@ fn cmd_start() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
 
-        let task = match task::read_task_file(&task_file, TaskStatus::Queue) {
+        let task_file_data = match task::read_task_file(&task_file, TaskStatus::Queue) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error: failed to parse task file: {e}");
@@ -276,7 +276,7 @@ fn cmd_start() -> Result<()> {
             }
         };
 
-        let repo_name = task.repo.as_deref().unwrap_or("");
+        let repo_name = task_file_data.repo.as_deref().unwrap_or("");
         let url = match repo::get_repo_url(&dir, repo_name) {
             Ok(u) => u,
             Err(e) => {
@@ -289,23 +289,35 @@ fn cmd_start() -> Result<()> {
         };
 
         // Extract issue number from source (e.g. "github#142" → "142")
-        let issue_num = task
+        let issue_num = task_file_data
             .source
             .as_deref()
             .and_then(|s| s.split('#').next_back())
             .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
             .map(|s| s.to_string());
 
-        // Move task to running/ before execution
-        let running_file = running_dir.join(format!("{task_name}.md"));
-        let _ = fs::rename(&task_file, &running_file);
+        // Transition Queue → Running via repository (enforces state machine + does file move).
+        let task_id = TaskId::new(&task_name);
+        let mut domain_task = match repo.get(&task_id) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Error: failed to load task: {e}");
+                processed += 1;
+                continue;
+            }
+        };
+        if let Err(e) = repo.transition(&mut domain_task, TaskStatus::Running, chrono::Utc::now()) {
+            eprintln!("Error: failed to start task: {e}");
+            processed += 1;
+            continue;
+        }
 
         let _ = executor::run_impl(
             &dir,
             RunConfig {
                 task_id: &task_name,
                 repo_url: &url,
-                description: &task.title,
+                description: &task_file_data.title,
                 issue: issue_num.as_deref(),
                 background: false,
                 image: &image,
@@ -448,12 +460,11 @@ fn cmd_kill(task_id: &str) -> Result<()> {
         .args(["kill", &container_name])
         .output();
 
-    let log_file = dir.join("running").join(format!("{task_id}.log"));
-    let failed_dir = dir.join("failed");
-    fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
-    if log_file.exists() {
-        fs::rename(&log_file, failed_dir.join(format!("{task_id}.log")))?;
-    }
+    // Transition Running → Failed via repository (enforces state machine + does file move).
+    let repo = FileTaskRepository::new(dir.clone());
+    let id = TaskId::new(task_id);
+    let mut task = repo.get(&id)?;
+    repo.transition(&mut task, TaskStatus::Failed, chrono::Utc::now())?;
 
     println!("Killed: {task_id}");
     Ok(())
@@ -514,10 +525,16 @@ fn cmd_retry(name: &str) -> Result<()> {
         bail!("Error: task '{}' not found in failed/", name);
     }
 
-    fs::rename(&failed_file, dir.join("queue").join(format!("{name}.md")))?;
+    // Delete the log before transitioning so the retry starts clean.
     if failed_log.exists() {
         let _ = fs::remove_file(&failed_log);
     }
+
+    // Transition Failed → Queued via repository (enforces state machine + does file move).
+    let repo = FileTaskRepository::new(dir.clone());
+    let id = TaskId::new(name);
+    let mut task = repo.get(&id)?;
+    repo.transition(&mut task, TaskStatus::Queue, chrono::Utc::now())?;
 
     println!("Retrying: {name} (moved to queue)");
     Ok(())
