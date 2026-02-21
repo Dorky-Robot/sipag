@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::path::PathBuf;
 
 use crate::task::{TaskFile, TaskStatus};
 
@@ -57,7 +58,10 @@ pub fn parse_task_content(content: &str, name: &str, status: TaskStatus) -> Resu
 
     // Collect remaining lines as body, trimming leading/trailing blank lines
     let remaining = &lines[i..];
-    let start = remaining.iter().position(|l| !l.is_empty()).unwrap_or(remaining.len());
+    let start = remaining
+        .iter()
+        .position(|l| !l.is_empty())
+        .unwrap_or(remaining.len());
     let end = remaining
         .iter()
         .rposition(|l| !l.is_empty())
@@ -82,6 +86,7 @@ pub fn parse_task_content(content: &str, name: &str, status: TaskStatus) -> Resu
         title,
         body,
         status,
+        file_path: PathBuf::new(),
     })
 }
 
