@@ -1,9 +1,10 @@
 use crate::app::App;
+use crate::task::Status;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -14,26 +15,43 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     let task = &app.tasks[app.selected];
     let area = f.area();
 
-    // ── Outer border + title ──────────────────────────────────────────────────
-    let outer_title = format!(" sipag ── #{} ", task.id);
+    // 3-part layout: header bar | body | footer bar
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header bar
+        Constraint::Min(0),    // body
+        Constraint::Length(1), // footer bar
+    ])
+    .split(area);
+
+    // ── Header bar ────────────────────────────────────────────────────────────
+    let issue_str = task.issue.map(|n| format!(" #{}", n)).unwrap_or_default();
+    let header_text = format!(" sipag Detail{} — {}", issue_str, task.title);
+    let header = Paragraph::new(Line::from(header_text)).style(
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(header, chunks[0]);
+
+    // ── Footer bar ────────────────────────────────────────────────────────────
+    let footer_text = match task.status {
+        Status::Running => " [Esc] back  [j/k] scroll  [a] attach  [q] quit",
+        Status::Failed => " [Esc] back  [j/k] scroll  [r] retry  [q] quit",
+        _ => " [Esc] back  [j/k] scroll  [q] quit",
+    };
+    let footer = Paragraph::new(Line::from(footer_text))
+        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+    f.render_widget(footer, chunks[2]);
+
+    // ── Outer content block (Cyan borders) ───────────────────────────────────
     let outer_block = Block::default()
-        .title(outer_title)
-        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-        .border_type(BorderType::Rounded);
+        .title(" Detail ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
 
-    // ── Help bar (bottom two rows) ────────────────────────────────────────────
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
-
-    let content_area = outer_block.inner(chunks[0]);
-    f.render_widget(outer_block, chunks[0]);
-
-    let help_block = Block::default().borders(Borders::ALL).border_type(BorderType::Rounded);
-    let help_inner = help_block.inner(chunks[1]);
-    f.render_widget(help_block, chunks[1]);
-
-    let help_text =
-        Paragraph::new(Line::from("  r:retry  Esc:back")).style(Style::default());
-    f.render_widget(help_text, help_inner);
+    let content_area = outer_block.inner(chunks[1]);
+    f.render_widget(outer_block, chunks[1]);
 
     // ── Build the top section (title + metadata + description) ────────────────
     let mut top_lines: Vec<Line> = Vec::new();
@@ -84,8 +102,6 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     let top_height = top_lines.len() as u16;
 
     // ── Split content_area into top (fixed) + log (fills rest) ───────────────
-    // If top section overflows the content area, just render everything scrolled.
-    // We try to give at least 3 rows to the log when it exists.
     let top_height_clamped = if app.log_lines.is_empty() {
         content_area.height
     } else {
@@ -143,8 +159,8 @@ pub fn render_detail(f: &mut Frame, app: &App) {
                 width: indicator.len() as u16,
                 height: 1,
             };
-            let indicator_para = Paragraph::new(indicator)
-                .style(Style::default().fg(Color::DarkGray));
+            let indicator_para =
+                Paragraph::new(indicator).style(Style::default().fg(Color::DarkGray));
             f.render_widget(indicator_para, indicator_rect);
         }
     }
