@@ -10,10 +10,20 @@
 //!   - `orchestrator` — WorkerOrchestrator: coordinates issue runs via ports
 //!   - `recovery`     — orchestration: recover and finalize active workers
 //!   - `store`        — filesystem adapter for state persistence
+//!
+//! Worker loop (replaces `bin/sipag` + `lib/worker/*.sh`):
+//!   - `config`   — runtime config loaded from env vars and `~/.sipag/config`
+//!   - `github`   — GitHub operations via the `gh` CLI
+//!   - `dispatch` — Docker container dispatch for issue and PR workers
+//!   - `poll`     — main polling loop (`sipag work`)
 
+pub mod config;
 pub mod container;
 pub mod decision;
+pub mod dispatch;
+pub mod github;
 pub mod orchestrator;
+pub mod poll;
 pub mod ports;
 pub mod prompt;
 pub mod recovery;
