@@ -172,6 +172,17 @@ mod tests {
             });
             Ok(())
         }
+
+        fn list_mergeable_prs(
+            &self,
+            _repo: &str,
+        ) -> Result<Vec<super::super::ports::PrMergeCandidate>> {
+            Ok(vec![])
+        }
+
+        fn merge_pr(&self, _repo: &str, _pr_num: u64, _title: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     // ── Mock: StateStore ─────────────────────────────────────────────────────
