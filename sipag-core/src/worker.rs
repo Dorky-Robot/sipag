@@ -9,7 +9,10 @@
 //!   - `store`        — filesystem adapter for state persistence
 
 pub mod decision;
+pub mod github_gateway;
+pub mod hook_runner;
 pub mod ports;
+pub mod reconciliation;
 pub mod recovery;
 pub mod state;
 pub mod status;

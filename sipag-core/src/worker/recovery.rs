@@ -146,6 +146,8 @@ mod tests {
                 PrInfo {
                     number,
                     url: format!("https://github.com/test/repo/pull/{}", number),
+                    state: super::super::ports::PrState::Open,
+                    branch: branch.to_string(),
                 },
             );
             self
@@ -155,6 +157,50 @@ mod tests {
     impl GitHubGateway for MockGitHub {
         fn find_pr_for_branch(&self, _repo: &str, branch: &str) -> Result<Option<PrInfo>> {
             Ok(self.prs.get(branch).cloned())
+        }
+
+        fn find_pr_for_issue(&self, _repo: &str, _issue_num: u64) -> Result<Option<PrInfo>> {
+            Ok(None)
+        }
+
+        fn find_open_pr_for_issue(&self, _repo: &str, _issue_num: u64) -> Result<Option<PrInfo>> {
+            Ok(None)
+        }
+
+        fn find_prs_needing_iteration(&self, _repo: &str) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+
+        fn find_conflicted_prs(&self, _repo: &str) -> Result<Vec<PrInfo>> {
+            Ok(vec![])
+        }
+
+        fn issue_is_open(&self, _repo: &str, _issue_num: u64) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn get_issue_info(
+            &self,
+            _repo: &str,
+            _issue_num: u64,
+        ) -> Result<Option<super::super::ports::IssueInfo>> {
+            Ok(None)
+        }
+
+        fn list_issues_with_label(&self, _repo: &str, _label: &str) -> Result<Vec<u64>> {
+            Ok(vec![])
+        }
+
+        fn get_issue_timeline(
+            &self,
+            _repo: &str,
+            _issue_num: u64,
+        ) -> Result<Vec<super::super::ports::TimelineEvent>> {
+            Ok(vec![])
+        }
+
+        fn close_issue(&self, _repo: &str, _issue_num: u64, _comment: &str) -> Result<()> {
+            Ok(())
         }
 
         fn transition_label(
@@ -170,6 +216,34 @@ mod tests {
                 remove: remove.map(|s| s.to_string()),
                 add: add.map(|s| s.to_string()),
             });
+            Ok(())
+        }
+
+        fn get_pr_info(&self, _repo: &str, _pr_num: u64) -> Result<Option<PrInfo>> {
+            Ok(None)
+        }
+
+        fn get_open_prs_for_branch(&self, _repo: &str, _branch: &str) -> Result<Vec<PrInfo>> {
+            Ok(vec![])
+        }
+
+        fn get_merged_prs_for_branch(&self, _repo: &str, _branch: &str) -> Result<Vec<PrInfo>> {
+            Ok(vec![])
+        }
+
+        fn list_branches_with_prefix(&self, _repo: &str, _prefix: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        fn branch_ahead_by(&self, _repo: &str, _base: &str, _head: &str) -> Result<u64> {
+            Ok(0)
+        }
+
+        fn create_pr(&self, _repo: &str, _branch: &str, _title: &str, _body: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn delete_branch(&self, _repo: &str, _branch: &str) -> Result<()> {
             Ok(())
         }
     }

@@ -1,3 +1,6 @@
+use chrono::{DateTime, Utc};
+
+use super::ports::{Comment, Review, ReviewState, TimelineEvent};
 use super::status::WorkerStatus;
 
 /// What the system should do with a discovered approved issue.
@@ -64,6 +67,49 @@ pub fn decide_finalization(container_alive: bool, pr_exists: bool) -> Finalizati
     } else {
         FinalizationResult::Failed
     }
+}
+
+/// Pure function: does this PR need another worker pass?
+///
+/// Returns true if:
+/// - A CHANGES_REQUESTED review was submitted after `last_commit_date`, OR
+/// - Any PR comment was created after `last_commit_date`.
+///
+/// Anchoring to `last_commit_date` prevents re-triggering on feedback that
+/// was already addressed by a worker (which pushed new commits). This also
+/// covers PR authors who cannot formally request changes on their own PR —
+/// their feedback arrives as plain comments instead.
+pub fn needs_iteration(
+    reviews: &[Review],
+    comments: &[Comment],
+    last_commit_date: DateTime<Utc>,
+) -> bool {
+    let has_changes_requested = reviews
+        .iter()
+        .any(|r| r.state == ReviewState::ChangesRequested && r.submitted_at > last_commit_date);
+    let has_new_comments = comments.iter().any(|c| c.created_at > last_commit_date);
+    has_changes_requested || has_new_comments
+}
+
+/// Pure function: should this in-progress issue be reconciled as done?
+///
+/// Inspects GitHub timeline events for a cross-reference from a merged PR.
+/// Returns the merged PR number if found, None otherwise.
+///
+/// This uses the timeline API rather than `gh pr list --search` to avoid
+/// fuzzy matching false positives (e.g. searching for #66 returning PRs
+/// that mention #6).
+pub fn should_reconcile(timeline_events: &[TimelineEvent]) -> Option<u64> {
+    for event in timeline_events {
+        if let TimelineEvent::CrossReferenced {
+            pr_num,
+            merged: true,
+        } = event
+        {
+            return Some(*pr_num);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -202,5 +248,156 @@ mod tests {
                 let _ = decide_finalization(alive, has_pr);
             }
         }
+    }
+
+    // ── needs_iteration ──────────────────────────────────────────────────────
+
+    fn date(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn review(state: ReviewState, submitted_at: &str) -> Review {
+        Review {
+            state,
+            submitted_at: date(submitted_at),
+        }
+    }
+
+    fn comment(created_at: &str) -> Comment {
+        Comment {
+            created_at: date(created_at),
+        }
+    }
+
+    #[test]
+    fn changes_requested_after_commit_needs_iteration() {
+        let reviews = vec![review(
+            ReviewState::ChangesRequested,
+            "2024-01-15T11:00:00Z",
+        )];
+        assert!(needs_iteration(&reviews, &[], date("2024-01-15T10:00:00Z")));
+    }
+
+    #[test]
+    fn changes_requested_before_commit_no_iteration() {
+        let reviews = vec![review(
+            ReviewState::ChangesRequested,
+            "2024-01-15T09:00:00Z",
+        )];
+        assert!(!needs_iteration(
+            &reviews,
+            &[],
+            date("2024-01-15T10:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn approved_review_after_commit_no_iteration() {
+        // APPROVED reviews don't trigger iteration
+        let reviews = vec![review(ReviewState::Approved, "2024-01-15T11:00:00Z")];
+        assert!(!needs_iteration(
+            &reviews,
+            &[],
+            date("2024-01-15T10:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn comment_after_commit_needs_iteration() {
+        let comments = vec![comment("2024-01-15T11:00:00Z")];
+        assert!(needs_iteration(
+            &[],
+            &comments,
+            date("2024-01-15T10:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn comment_before_commit_no_iteration() {
+        let comments = vec![comment("2024-01-15T09:00:00Z")];
+        assert!(!needs_iteration(
+            &[],
+            &comments,
+            date("2024-01-15T10:00:00Z")
+        ));
+    }
+
+    #[test]
+    fn empty_reviews_and_comments_no_iteration() {
+        assert!(!needs_iteration(&[], &[], date("2024-01-15T10:00:00Z")));
+    }
+
+    #[test]
+    fn mixed_reviews_only_changes_requested_after_triggers() {
+        let reviews = vec![
+            review(ReviewState::Approved, "2024-01-15T11:00:00Z"),
+            review(ReviewState::ChangesRequested, "2024-01-15T11:30:00Z"),
+        ];
+        assert!(needs_iteration(&reviews, &[], date("2024-01-15T10:00:00Z")));
+    }
+
+    #[test]
+    fn changes_requested_at_same_time_as_commit_no_iteration() {
+        // Strictly after — same timestamp does not trigger
+        let reviews = vec![review(
+            ReviewState::ChangesRequested,
+            "2024-01-15T10:00:00Z",
+        )];
+        assert!(!needs_iteration(
+            &reviews,
+            &[],
+            date("2024-01-15T10:00:00Z")
+        ));
+    }
+
+    // ── should_reconcile ─────────────────────────────────────────────────────
+
+    #[test]
+    fn merged_cross_reference_returns_pr_num() {
+        let events = vec![TimelineEvent::CrossReferenced {
+            pr_num: 42,
+            merged: true,
+        }];
+        assert_eq!(should_reconcile(&events), Some(42));
+    }
+
+    #[test]
+    fn unmerged_cross_reference_returns_none() {
+        let events = vec![TimelineEvent::CrossReferenced {
+            pr_num: 42,
+            merged: false,
+        }];
+        assert_eq!(should_reconcile(&events), None);
+    }
+
+    #[test]
+    fn other_event_returns_none() {
+        let events = vec![TimelineEvent::Other];
+        assert_eq!(should_reconcile(&events), None);
+    }
+
+    #[test]
+    fn empty_timeline_returns_none() {
+        assert_eq!(should_reconcile(&[]), None);
+    }
+
+    #[test]
+    fn first_merged_pr_returned_when_multiple() {
+        let events = vec![
+            TimelineEvent::Other,
+            TimelineEvent::CrossReferenced {
+                pr_num: 10,
+                merged: false,
+            },
+            TimelineEvent::CrossReferenced {
+                pr_num: 11,
+                merged: true,
+            },
+            TimelineEvent::CrossReferenced {
+                pr_num: 12,
+                merged: true,
+            },
+        ];
+        assert_eq!(should_reconcile(&events), Some(11));
     }
 }
