@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand};
 use sipag_core::{
     executor::{self, generate_task_id, RunConfig},
     repo,
-    task::{self, default_sipag_dir, TaskStatus},
+    repository::{FileTaskRepository, TaskRepository},
+    task::{self, default_sipag_dir, Task, TaskStatus},
 };
 use std::fs;
 use std::path::PathBuf;
@@ -197,14 +198,13 @@ fn cmd_start() -> Result<()> {
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
-    let running_dir = dir.join("running");
-    let failed_dir = dir.join("failed");
     let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
         .unwrap_or(1800);
 
+    let task_repo = FileTaskRepository::new(dir.clone());
     let mut processed = 0;
 
     loop {
@@ -235,23 +235,25 @@ fn cmd_start() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
 
-        let task = match task::parse_task_file(&task_file, TaskStatus::Queue) {
+        let parsed = match task::parse_task_file(&task_file, TaskStatus::Queue) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error: failed to parse task file: {e}");
-                let _ = fs::rename(&task_file, failed_dir.join(format!("{task_name}.md")));
+                let mut domain_task = Task::with_status(task_name.clone(), TaskStatus::Queue);
+                let _ = task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
                 println!("==> Failed: {task_name}");
                 processed += 1;
                 continue;
             }
         };
 
-        let repo_name = task.repo.as_deref().unwrap_or("");
+        let repo_name = parsed.repo.as_deref().unwrap_or("");
         let url = match repo::get_repo_url(&dir, repo_name) {
             Ok(u) => u,
             Err(e) => {
                 eprintln!("Error: {e}");
-                let _ = fs::rename(&task_file, failed_dir.join(format!("{task_name}.md")));
+                let mut domain_task = Task::with_status(task_name.clone(), TaskStatus::Queue);
+                let _ = task_repo.transition(&mut domain_task, TaskStatus::Failed, chrono::Utc::now());
                 println!("==> Failed: {task_name}");
                 processed += 1;
                 continue;
@@ -259,23 +261,23 @@ fn cmd_start() -> Result<()> {
         };
 
         // Extract issue number from source (e.g. "github#142" → "142")
-        let issue_num = task
+        let issue_num = parsed
             .source
             .as_deref()
             .and_then(|s| s.split('#').next_back())
             .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
             .map(|s| s.to_string());
 
-        // Move task to running/ before execution
-        let running_file = running_dir.join(format!("{task_name}.md"));
-        let _ = fs::rename(&task_file, &running_file);
+        // Transition task Queue → Running via repository (enforces domain rules).
+        let mut domain_task = Task::with_status(task_name.clone(), TaskStatus::Queue);
+        let _ = task_repo.transition(&mut domain_task, TaskStatus::Running, chrono::Utc::now());
 
         let _ = executor::run_impl(
             &dir,
             RunConfig {
                 task_id: &task_name,
                 repo_url: &url,
-                description: &task.title,
+                description: &parsed.title,
                 issue: issue_num.as_deref(),
                 background: false,
                 image: &image,
@@ -406,8 +408,12 @@ fn cmd_logs(task_id: &str) -> Result<()> {
 
 fn cmd_kill(task_id: &str) -> Result<()> {
     let dir = sipag_dir();
-    let tracking_file = dir.join("running").join(format!("{task_id}.md"));
-    if !tracking_file.exists() {
+    let task_repo = FileTaskRepository::new(dir.clone());
+
+    let mut task = task_repo
+        .get(&task_id.to_string())
+        .with_context(|| format!("Error: task '{}' not found in running/", task_id))?;
+    if task.status != TaskStatus::Running {
         bail!("Error: task '{}' not found in running/", task_id);
     }
 
@@ -417,12 +423,7 @@ fn cmd_kill(task_id: &str) -> Result<()> {
         .args(["kill", &container_name])
         .output();
 
-    let log_file = dir.join("running").join(format!("{task_id}.log"));
-    let failed_dir = dir.join("failed");
-    fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
-    if log_file.exists() {
-        fs::rename(&log_file, failed_dir.join(format!("{task_id}.log")))?;
-    }
+    task_repo.transition(&mut task, TaskStatus::Failed, chrono::Utc::now())?;
 
     println!("Killed: {task_id}");
     Ok(())
@@ -475,17 +476,16 @@ fn cmd_show(name: &str) -> Result<()> {
 
 fn cmd_retry(name: &str) -> Result<()> {
     let dir = sipag_dir();
-    let failed_file = dir.join("failed").join(format!("{name}.md"));
-    let failed_log = dir.join("failed").join(format!("{name}.log"));
+    let task_repo = FileTaskRepository::new(dir.clone());
 
-    if !failed_file.exists() {
+    let mut task = task_repo
+        .get(&name.to_string())
+        .with_context(|| format!("Error: task '{}' not found in failed/", name))?;
+    if task.status != TaskStatus::Failed {
         bail!("Error: task '{}' not found in failed/", name);
     }
 
-    fs::rename(&failed_file, dir.join("queue").join(format!("{name}.md")))?;
-    if failed_log.exists() {
-        let _ = fs::remove_file(&failed_log);
-    }
+    task_repo.transition(&mut task, TaskStatus::Queue, chrono::Utc::now())?;
 
     println!("Retrying: {name} (moved to queue)");
     Ok(())

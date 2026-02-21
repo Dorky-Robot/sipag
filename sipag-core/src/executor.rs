@@ -3,7 +3,8 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::task::{append_ended, slugify, write_tracking_file};
+use crate::repository::{FileTaskRepository, TaskRepository};
+use crate::task::{append_ended, slugify, write_tracking_file, Task, TaskStatus};
 
 /// Check that Docker daemon is running and accessible.
 fn preflight_docker_running() -> Result<()> {
@@ -127,8 +128,6 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
     preflight_docker_image(image)?;
 
     let running_dir = sipag_dir.join("running");
-    let done_dir = sipag_dir.join("done");
-    let failed_dir = sipag_dir.join("failed");
     let tracking_file = running_dir.join(format!("{task_id}.md"));
     let log_path = running_dir.join(format!("{task_id}.log"));
     let container_name = format!("sipag-{task_id}");
@@ -227,21 +226,15 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     } else {
         let success = run_docker(&log_path);
         let _ = append_ended(&tracking_file);
+
+        let repo = FileTaskRepository::new(sipag_dir.to_path_buf());
+        let mut task = Task::with_status(task_id.to_string(), TaskStatus::Running);
+        let now = chrono::Utc::now();
         if success {
-            if tracking_file.exists() {
-                fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
-            }
-            if log_path.exists() {
-                fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
-            }
+            let _ = repo.transition(&mut task, TaskStatus::Done, now);
             println!("==> Done: {task_id}");
         } else {
-            if tracking_file.exists() {
-                fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
-            }
-            if log_path.exists() {
-                fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
-            }
+            let _ = repo.transition(&mut task, TaskStatus::Failed, now);
             println!("==> Failed: {task_id}");
         }
     }
@@ -260,8 +253,6 @@ pub fn run_bg_exec(
     timeout_secs: u64,
 ) -> Result<()> {
     let running_dir = sipag_dir.join("running");
-    let done_dir = sipag_dir.join("done");
-    let failed_dir = sipag_dir.join("failed");
     let tracking_file = running_dir.join(format!("{task_id}.md"));
     let log_path = running_dir.join(format!("{task_id}.log"));
     let container_name = format!("sipag-{task_id}");
@@ -317,21 +308,14 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     let success = cmd.status().map(|s| s.success()).unwrap_or(false);
     let _ = append_ended(&tracking_file);
 
+    let repo = FileTaskRepository::new(sipag_dir.to_path_buf());
+    let mut task = Task::with_status(task_id.to_string(), TaskStatus::Running);
+    let now = chrono::Utc::now();
     if success {
-        if tracking_file.exists() {
-            fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
-        }
-        if log_path.exists() {
-            fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
-        }
+        let _ = repo.transition(&mut task, TaskStatus::Done, now);
         println!("==> Done: {task_id}");
     } else {
-        if tracking_file.exists() {
-            fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
-        }
-        if log_path.exists() {
-            fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
-        }
+        let _ = repo.transition(&mut task, TaskStatus::Failed, now);
         println!("==> Failed: {task_id}");
     }
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
+pub use sipag_core::task::TaskStatus;
 use std::{
     fs,
     io::{Read, Seek, SeekFrom},
@@ -8,27 +9,6 @@ use std::{
     process::{Child, Command},
     time::Instant,
 };
-
-// ── Task ─────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskStatus {
-    Queue,
-    Running,
-    Done,
-    Failed,
-}
-
-impl TaskStatus {
-    pub fn symbol(&self) -> &'static str {
-        match self {
-            TaskStatus::Queue => "·",
-            TaskStatus::Running => "⧖",
-            TaskStatus::Done => "✓",
-            TaskStatus::Failed => "✗",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Task {
