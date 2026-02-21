@@ -13,6 +13,7 @@ WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
+WORKER_ONCE=0
 
 # Load config
 worker_load_config() {
@@ -457,6 +458,10 @@ worker_loop() {
             local total_open open_prs
             total_open=$(gh issue list --repo "$repo" --state open --limit 500 --json number --jq 'length' 2>/dev/null || echo "?")
             open_prs=$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo "?")
+            if [[ "${WORKER_ONCE}" -eq 1 ]]; then
+                echo "[$(date +%H:%M:%S)] --once: ${#all_issues[@]} approved, ${total_open} open total, ${open_prs} PRs open. No work found — exiting."
+                break
+            fi
             echo "[$(date +%H:%M:%S)] ${#all_issues[@]} approved, ${total_open} open total, ${open_prs} PRs open. Next poll in ${WORKER_POLL_INTERVAL}s..."
             sleep "$WORKER_POLL_INTERVAL"
             continue
@@ -516,6 +521,10 @@ worker_loop() {
         gh pr list --repo "$repo" --state open --json number,title \
             -q '.[] | "  #\(.number): \(.title)"'
         echo ""
+        if [[ "${WORKER_ONCE}" -eq 1 ]]; then
+            echo "[$(date +%H:%M:%S)] --once: cycle complete, exiting."
+            break
+        fi
         echo "[$(date +%H:%M:%S)] Next poll in ${WORKER_POLL_INTERVAL}s..."
         sleep "$WORKER_POLL_INTERVAL"
     done

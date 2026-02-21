@@ -32,6 +32,7 @@ source "${SIPAG_ROOT}/lib/preflight.sh"
 SIPAG_FILE="${SIPAG_FILE:-./tasks.md}"
 CONTINUE=0
 DRY_RUN=0
+WORKER_ONCE=0
 
 # --- Help ---
 
@@ -41,7 +42,7 @@ sipag — autonomous dev agent powered by Claude Code
 
 Usage:
   sipag start <owner/repo>       Prime session for agile workflow
-  sipag work <owner/repo>        Pick up approved issues, code in Docker
+  sipag work <owner/repo> [--once]   Pick up approved issues, code in Docker
   sipag merge <owner/repo>       Conversational PR merge session
   sipag next [-c] [-n] [-f]     Run next task from a markdown checklist
   sipag list [-f path]           Print all tasks with status
@@ -57,6 +58,7 @@ Flags:
   -c, --continue     After completing, loop to the next task
   -n, --dry-run      Show what would run, don't invoke claude
   -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
+      --once         (work) Process one polling cycle and exit (useful for testing)
 
 Config (~/.sipag/config):
   batch_size=4                 Max parallel Docker containers
@@ -233,6 +235,10 @@ main() {
 		-f | --file)
 			shift
 			SIPAG_FILE="${1:?--file requires a path}"
+			shift
+			;;
+		--once)
+			WORKER_ONCE=1
 			shift
 			;;
 		-*)
