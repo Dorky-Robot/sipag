@@ -1,4 +1,5 @@
 mod app;
+mod executor;
 mod ui;
 
 use anyhow::Result;

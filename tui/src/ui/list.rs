@@ -1,125 +1,66 @@
-use crate::app::App;
-use crate::task::Status;
+use crate::app::{App, TaskStatus};
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph},
     Frame,
 };
 
-pub fn render_list(f: &mut Frame, app: &App) {
+pub fn render_list(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
-    // Split into: task table | bottom bar (legend + help).
-    let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).split(area);
+    // Split into: task list | bottom help bar.
+    let chunks =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
 
-    // ── Table header ─────────────────────────────────────────────────────────
-    let header = Row::new(vec![
-        Cell::from("ID"),
-        Cell::from("St"),
-        Cell::from("Pri"),
-        Cell::from("Repo"),
-        Cell::from("Title"),
-        Cell::from("Age"),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD))
-    .height(1);
-
-    // ── Task rows ─────────────────────────────────────────────────────────────
-    let rows: Vec<Row> = app
+    // ── Task list items ───────────────────────────────────────────────────────
+    let items: Vec<ListItem> = app
         .tasks
         .iter()
-        .enumerate()
-        .map(|(i, task)| {
-            let style = if i == app.selected {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
+        .map(|task| {
+            let sym = task.status.symbol();
+            let text = format!(" {} {}  {}", sym, task.id, task.title);
+            let style = match task.status {
+                TaskStatus::Queue => Style::default(),
+                TaskStatus::Running => Style::default().fg(Color::Yellow),
+                TaskStatus::Done => Style::default().fg(Color::Green),
+                TaskStatus::Failed => Style::default().fg(Color::Red),
             };
-
-            let pri = task
-                .priority
-                .as_deref()
-                .map(|p| match p {
-                    "high" => "H",
-                    "low" => "L",
-                    _ => "M",
-                })
-                .unwrap_or("-");
-
-            Row::new(vec![
-                Cell::from(format!("{}", task.id)),
-                Cell::from(task.status.icon()),
-                Cell::from(pri),
-                Cell::from(task.repo.as_deref().unwrap_or("-")),
-                Cell::from(task.title.as_str()),
-                Cell::from(task.format_age()),
-            ])
-            .style(style)
-            .height(1)
+            ListItem::new(text).style(style)
         })
         .collect();
 
-    // Column widths
-    let widths = [
-        Constraint::Length(4),  // ID
-        Constraint::Length(3),  // St
-        Constraint::Length(4),  // Pri
-        Constraint::Length(10), // Repo
-        Constraint::Min(20),    // Title
-        Constraint::Length(6),  // Age
-    ];
-
-    let table = Table::new(rows, widths)
-        .header(header)
+    let list = List::new(items)
         .block(
             Block::default()
                 .title(" sipag ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded),
-        );
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
 
-    f.render_widget(table, chunks[0]);
+    f.render_stateful_widget(list, chunks[0], &mut app.task_list_state);
 
-    // ── Bottom bar ────────────────────────────────────────────────────────────
-    let pending = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Pending)
-        .count();
-    let running = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Running)
-        .count();
-    let done = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Done)
-        .count();
-    let failed = app
-        .tasks
-        .iter()
-        .filter(|t| t.status == Status::Failed)
-        .count();
-
+    // ── Bottom help bar ───────────────────────────────────────────────────────
+    let (q, r, d, fai) = app.task_counts();
     let legend = format!(
-        "  · pending  ⧖ running  ✓ done  ✗ failed    {} tasks ({} pending, {} running, {} done, {} failed)",
+        "  {} tasks  · {} queued  ⧖ {} running  ✓ {} done  ✗ {} failed",
         app.tasks.len(),
-        pending,
-        running,
-        done,
-        failed,
+        q,
+        r,
+        d,
+        fai,
     );
-    let help = "  j/k:navigate  Enter:detail  q:quit";
-
+    let help = "  j/k:navigate  x:run-executor  r:retry-failed  q:quit";
     let bottom = Paragraph::new(vec![Line::from(legend), Line::from(help)]).block(
         Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
     );
-
     f.render_widget(bottom, chunks[1]);
 }
