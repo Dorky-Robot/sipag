@@ -8,3 +8,5 @@
 .env.*
 target/
 node_modules/
+.tmp-*
+tao.db
