@@ -100,7 +100,14 @@ cmd_work() {
 	worker_load_config
 	preflight_auth || return 1
 	preflight_docker_running || return 1
-	preflight_docker_image "${WORKER_IMAGE}" || return 1
+	# Auto-pull image if not present
+	if ! docker image inspect "${WORKER_IMAGE}" &>/dev/null; then
+		echo "Worker image '${WORKER_IMAGE}' not found — pulling..."
+		docker pull "${WORKER_IMAGE}" || {
+			echo "Error: Could not pull '${WORKER_IMAGE}'. Run 'sipag setup' to configure."
+			return 1
+		}
+	fi
 	preflight_gh_auth || return 1
 	if [[ -f "${SIPAG_DIR}/drain" ]]; then
 		echo "Warning: stale drain signal found. Clearing it and starting normally."
@@ -159,53 +166,56 @@ cmd_resume() {
 }
 
 cmd_status() {
-	local workers_dir="${SIPAG_DIR}/workers"
-	if [[ ! -d "$workers_dir" ]] || [[ -z "$(ls -A "$workers_dir" 2>/dev/null)" ]]; then
-		echo "No workers found. Run 'sipag work <owner/repo>' to start."
-		return 0
+	# Auto-setup on first run (directories not initialized)
+	if [[ ! -d "${SIPAG_DIR}/queue" ]]; then
+		echo "First run detected — running setup..."
+		setup_run || true
 	fi
 
-	# Interactive terminal: launch TUI if available
+	# Always launch TUI in an interactive terminal
 	if [[ -t 1 ]] && command -v sipag-tui &>/dev/null; then
 		exec sipag-tui
 	fi
 
 	# Plain text table (piped output or TUI not installed)
+	local workers_dir="${SIPAG_DIR}/workers"
 	printf "%-24s %-7s %-9s %-10s %s\n" "REPO" "ISSUE" "STATUS" "DURATION" "BRANCH"
 
 	local running=0 done_count=0 failed=0
-	for f in "$workers_dir"/*.json; do
-		[[ -f "$f" ]] || continue
-		local repo issue_num status duration_s branch pr_num display_branch duration
-		repo=$(jq -r '.repo // ""' "$f")
-		issue_num=$(jq -r '.issue_num // ""' "$f")
-		status=$(jq -r '.status // ""' "$f")
-		duration_s=$(jq -r 'if .duration_s != null then (.duration_s | tostring) else "" end' "$f")
-		branch=$(jq -r '.branch // ""' "$f")
-		pr_num=$(jq -r 'if .pr_num != null then (.pr_num | tostring) else "" end' "$f")
+	if [[ -d "$workers_dir" ]]; then
+		for f in "$workers_dir"/*.json; do
+			[[ -f "$f" ]] || continue
+			local repo issue_num status duration_s branch pr_num display_branch duration
+			repo=$(jq -r '.repo // ""' "$f")
+			issue_num=$(jq -r '.issue_num // ""' "$f")
+			status=$(jq -r '.status // ""' "$f")
+			duration_s=$(jq -r 'if .duration_s != null then (.duration_s | tostring) else "" end' "$f")
+			branch=$(jq -r '.branch // ""' "$f")
+			pr_num=$(jq -r 'if .pr_num != null then (.pr_num | tostring) else "" end' "$f")
 
-		# Format duration
-		duration="-"
-		if [[ -n "$duration_s" && "$duration_s" =~ ^[0-9]+$ ]]; then
-			duration="$(( duration_s / 60 ))m$(( duration_s % 60 ))s"
-		fi
+			# Format duration
+			duration="-"
+			if [[ -n "$duration_s" && "$duration_s" =~ ^[0-9]+$ ]]; then
+				duration="$(( duration_s / 60 ))m$(( duration_s % 60 ))s"
+			fi
 
-		# Format branch/PR column
-		if [[ "$status" == "done" && -n "$pr_num" ]]; then
-			display_branch="PR #${pr_num}"
-		else
-			display_branch="$branch"
-		fi
+			# Format branch/PR column
+			if [[ "$status" == "done" && -n "$pr_num" ]]; then
+				display_branch="PR #${pr_num}"
+			else
+				display_branch="$branch"
+			fi
 
-		case "$status" in
-			running) running=$(( running + 1 )) ;;
-			done)    done_count=$(( done_count + 1 )) ;;
-			failed)  failed=$(( failed + 1 )) ;;
-		esac
+			case "$status" in
+				running) running=$(( running + 1 )) ;;
+				done)    done_count=$(( done_count + 1 )) ;;
+				failed)  failed=$(( failed + 1 )) ;;
+			esac
 
-		printf "%-24s %-7s %-9s %-10s %s\n" \
-			"$repo" "#${issue_num}" "$status" "$duration" "$display_branch"
-	done
+			printf "%-24s %-7s %-9s %-10s %s\n" \
+				"$repo" "#${issue_num}" "$status" "$duration" "$display_branch"
+		done
+	fi
 
 	echo ""
 	echo "${running} running · ${done_count} done · ${failed} failed"
@@ -316,9 +326,9 @@ main() {
 		esac
 	done
 
-	# Default: show help
+	# Default: launch status (TUI if available, text table otherwise)
 	if [[ -z "$command" ]]; then
-		usage
+		cmd_status
 		return 0
 	fi
 

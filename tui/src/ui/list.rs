@@ -1,7 +1,7 @@
 use crate::app::App;
 use crate::task::Status;
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
@@ -107,14 +107,23 @@ pub fn render_list(f: &mut Frame, app: &App) {
         Constraint::Length(10), // SINCE
     ];
 
-    let mut table_state = TableState::default().with_selected(Some(app.selected));
-    let table = Table::new(rows, widths)
-        .header(col_header)
-        .block(Block::default().borders(Borders::TOP))
-        .row_highlight_style(Style::default().bg(Color::DarkGray))
-        .highlight_symbol("  > ");
-
-    f.render_stateful_widget(table, chunks[1], &mut table_state);
+    if app.tasks.is_empty() {
+        let empty = Paragraph::new(
+            "\nNo workers running.\n\nStart with:  sipag work <owner/repo>",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::TOP));
+        f.render_widget(empty, chunks[1]);
+    } else {
+        let mut table_state = TableState::default().with_selected(Some(app.selected));
+        let table = Table::new(rows, widths)
+            .header(col_header)
+            .block(Block::default().borders(Borders::TOP))
+            .row_highlight_style(Style::default().bg(Color::DarkGray))
+            .highlight_symbol("  > ");
+        f.render_stateful_widget(table, chunks[1], &mut table_state);
+    }
 
     // ── Footer bar ────────────────────────────────────────────────────────────
     let selected_task = app.tasks.get(app.selected);
