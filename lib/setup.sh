@@ -92,6 +92,11 @@ setup_run() {
 	echo "Creating directories..."
 	_setup_dirs
 
+	# --- Shell completions ---
+	echo ""
+	echo "Installing shell completions..."
+	_setup_completions
+
 	echo ""
 	echo "=== Setup complete ==="
 	echo ""
@@ -172,6 +177,62 @@ _setup_docker_image() {
 		_setup_err "Could not pull ${image} and no Dockerfile found"
 		echo "      To use a custom image: SIPAG_IMAGE=my-image sipag setup"
 		return 1
+	fi
+}
+
+# Install shell completions for detected shells.
+# Outputs a completion script via 'sipag completions <shell>' and writes it
+# to the appropriate location for each detected shell.
+_setup_completions() {
+	local any_installed=0
+
+	# Bash
+	if command -v bash >/dev/null 2>&1; then
+		local bash_dir="$HOME/.bash_completion.d"
+		mkdir -p "$bash_dir"
+		local output
+		if output=$(sipag completions bash 2>/dev/null); then
+			printf '%s\n' "$output" > "$bash_dir/sipag"
+			_setup_ok "Bash completions installed ($bash_dir/sipag)"
+			_setup_info "To activate: source $bash_dir/sipag  (add to ~/.bashrc)"
+			any_installed=1
+		else
+			_setup_err "Failed to install bash completions (is sipag-cli installed?)"
+		fi
+	fi
+
+	# Zsh
+	if command -v zsh >/dev/null 2>&1; then
+		local zsh_dir="$HOME/.zsh/completions"
+		mkdir -p "$zsh_dir"
+		local output
+		if output=$(sipag completions zsh 2>/dev/null); then
+			printf '%s\n' "$output" > "$zsh_dir/_sipag"
+			_setup_ok "Zsh completions installed ($zsh_dir/_sipag)"
+			_setup_info "Ensure $zsh_dir is in fpath (add to ~/.zshrc: fpath=(~/.zsh/completions \$fpath))"
+			any_installed=1
+		else
+			_setup_err "Failed to install zsh completions (is sipag-cli installed?)"
+		fi
+	fi
+
+	# Fish
+	if command -v fish >/dev/null 2>&1; then
+		local fish_dir="$HOME/.config/fish/completions"
+		mkdir -p "$fish_dir"
+		local output
+		if output=$(sipag completions fish 2>/dev/null); then
+			printf '%s\n' "$output" > "$fish_dir/sipag.fish"
+			_setup_ok "Fish completions installed ($fish_dir/sipag.fish)"
+			any_installed=1
+		else
+			_setup_err "Failed to install fish completions (is sipag-cli installed?)"
+		fi
+	fi
+
+	if [[ $any_installed -eq 0 ]]; then
+		_setup_info "No compatible shells found for completion installation"
+		_setup_info "To install manually: sipag completions bash|zsh|fish > <completion-file>"
 	fi
 }
 

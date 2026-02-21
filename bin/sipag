@@ -308,7 +308,7 @@ main() {
 			usage
 			return 1
 			;;
-		run|ps|logs|kill|show|retry|add|repo|init|tui)
+		completions|run|ps|logs|kill|show|retry|add|repo|init|tui)
 			# Rust-managed commands — pass through all remaining args
 			command="$1"
 			shift
@@ -341,7 +341,7 @@ main() {
 	status) cmd_status ;;
 	merge) cmd_merge "$merge_repo" ;;
 	# Delegate Rust-managed commands to sipag-cli
-	run|ps|logs|kill|show|retry|add|repo|init|tui)
+	completions|run|ps|logs|kill|show|retry|add|repo|init|tui)
 		if command -v sipag-cli &>/dev/null; then
 			exec sipag-cli "$command" "$@"
 		else
