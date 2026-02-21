@@ -201,6 +201,9 @@ worker_transition_label() {
     local repo="$1" issue_num="$2" from_label="$3" to_label="$4"
     # Curly braces + || true prevent set -e from killing the worker when the
     # issue is closed, missing, or the label doesn't exist.
-    [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; }
-    [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; }
+    # The trailing `|| true` on each line ensures the function never returns
+    # non-zero — without it, `[[ -n "" ]] && ...` returns 1 as the last
+    # statement, which under set -e kills the caller.
+    [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; } || true
+    [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; } || true
 }
