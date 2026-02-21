@@ -56,9 +56,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut app::App
                     disable_raw_mode()?;
                     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
-                    // Run docker exec -it <container> tmux attach -t claude
+                    // Show the last 100 lines of the log for context, then attach
+                    // to the live tmux session (or display completion status if done).
+                    let attach_script = "\
+                        echo '=== Claude output (last 100 lines) ==='; \
+                        tail -n 100 /tmp/claude.log 2>/dev/null; \
+                        echo '==================================='; \
+                        if tmux has-session -t claude 2>/dev/null; then \
+                            echo 'Attaching to live session (Ctrl-b d to detach)...'; \
+                            tmux attach -t claude; \
+                        else \
+                            echo \"[Session complete. Exit: $(cat /tmp/.claude-exit 2>/dev/null || echo unknown)]\"; \
+                        fi";
                     let status = std::process::Command::new("docker")
-                        .args(["exec", "-it", &container, "tmux", "attach", "-t", "claude"])
+                        .args(["exec", "-it", &container, "bash", "-c", attach_script])
                         .status();
 
                     if let Err(e) = status {
