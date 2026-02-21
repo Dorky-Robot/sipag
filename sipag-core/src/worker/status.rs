@@ -3,13 +3,18 @@ use std::fmt;
 /// Lifecycle status of a worker container.
 ///
 /// State machine:
-///   Running → Done | Failed
+///   Enqueued → Running → Done | Failed
 ///   Recovering → Running (reset) | Done | Failed (finalized)
+///
+/// `Enqueued` is written as soon as an approved issue is selected for
+/// dispatch, before the container starts. This ensures issues are never
+/// silently dropped if the process crashes before the container starts.
 ///
 /// `Recovering` is a legacy transitional state from old code; new code never
 /// sets it, but we handle it gracefully for backward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkerStatus {
+    Enqueued,
     Running,
     Recovering,
     Done,
@@ -24,11 +29,12 @@ impl WorkerStatus {
 
     /// Whether this status represents an active (non-terminal) state.
     pub fn is_active(self) -> bool {
-        matches!(self, Self::Running | Self::Recovering)
+        matches!(self, Self::Enqueued | Self::Running | Self::Recovering)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Enqueued => "enqueued",
             Self::Running => "running",
             Self::Recovering => "recovering",
             Self::Done => "done",
@@ -38,6 +44,7 @@ impl WorkerStatus {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "enqueued" => Some(Self::Enqueued),
             "running" => Some(Self::Running),
             "recovering" => Some(Self::Recovering),
             "done" => Some(Self::Done),
@@ -59,6 +66,10 @@ mod tests {
 
     #[test]
     fn parse_all_valid_statuses() {
+        assert_eq!(
+            WorkerStatus::parse("enqueued"),
+            Some(WorkerStatus::Enqueued)
+        );
         assert_eq!(WorkerStatus::parse("running"), Some(WorkerStatus::Running));
         assert_eq!(
             WorkerStatus::parse("recovering"),
@@ -79,6 +90,7 @@ mod tests {
     #[test]
     fn display_round_trips_through_parse() {
         for status in [
+            WorkerStatus::Enqueued,
             WorkerStatus::Running,
             WorkerStatus::Recovering,
             WorkerStatus::Done,
@@ -91,6 +103,7 @@ mod tests {
 
     #[test]
     fn terminal_statuses() {
+        assert!(!WorkerStatus::Enqueued.is_terminal());
         assert!(!WorkerStatus::Running.is_terminal());
         assert!(!WorkerStatus::Recovering.is_terminal());
         assert!(WorkerStatus::Done.is_terminal());
@@ -99,6 +112,7 @@ mod tests {
 
     #[test]
     fn active_statuses() {
+        assert!(WorkerStatus::Enqueued.is_active());
         assert!(WorkerStatus::Running.is_active());
         assert!(WorkerStatus::Recovering.is_active());
         assert!(!WorkerStatus::Done.is_active());
@@ -108,6 +122,7 @@ mod tests {
     #[test]
     fn terminal_and_active_are_complementary() {
         for status in [
+            WorkerStatus::Enqueued,
             WorkerStatus::Running,
             WorkerStatus::Recovering,
             WorkerStatus::Done,
