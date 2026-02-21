@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
+use sipag_core::events::last_event;
 use sipag_core::task::{list_tasks, TaskFile, TaskStatus};
 use std::io::stdout;
 use std::path::Path;
@@ -19,15 +20,16 @@ use std::path::Path;
 struct App {
     tasks: Vec<TaskFile>,
     state: ListState,
+    sipag_dir: std::path::PathBuf,
 }
 
 impl App {
-    fn new(tasks: Vec<TaskFile>) -> Self {
+    fn new(tasks: Vec<TaskFile>, sipag_dir: std::path::PathBuf) -> Self {
         let mut state = ListState::default();
         if !tasks.is_empty() {
             state.select(Some(0));
         }
-        Self { tasks, state }
+        Self { tasks, state, sipag_dir }
     }
 
     fn next(&mut self) {
@@ -75,6 +77,9 @@ fn render(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(3), Constraint::Length(5)])
         .split(area);
 
+    // Pre-capture sipag_dir to avoid borrow conflict inside the iterator closure.
+    let sipag_dir = app.sipag_dir.clone();
+
     // --- Task list ---
     let items: Vec<ListItem> = app
         .tasks
@@ -86,6 +91,23 @@ fn render(frame: &mut Frame, app: &mut App) {
                 .as_deref()
                 .and_then(|r| r.split('/').next_back())
                 .unwrap_or("-");
+
+            // For running tasks, show latest event progress inline.
+            let progress: Option<String> = if task.status == TaskStatus::Running {
+                let events_path = sipag_dir
+                    .join("running")
+                    .join(format!("{}.events", task.name));
+                last_event(&events_path).map(|ev| format!("[{}] {}", ev.event, ev.msg))
+            } else {
+                None
+            };
+
+            let title_text = if let Some(ref prog) = progress {
+                format!("{} — {}", task.title, prog)
+            } else {
+                task.title.clone()
+            };
+
             let line = Line::from(vec![
                 Span::styled(
                     format!(" [{:7}] ", task.status.as_str()),
@@ -96,7 +118,7 @@ fn render(frame: &mut Frame, app: &mut App) {
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::raw(format!("{:<20} ", repo_display)),
-                Span::styled(task.title.clone(), Style::default()),
+                Span::styled(title_text, Style::default()),
             ]);
             ListItem::new(line)
         })
@@ -148,7 +170,7 @@ fn render(frame: &mut Frame, app: &mut App) {
 /// Run the interactive TUI, loading tasks from sipag_dir.
 pub fn run_tui(sipag_dir: &Path) -> Result<()> {
     let tasks = list_tasks(sipag_dir).unwrap_or_default();
-    let mut app = App::new(tasks);
+    let mut app = App::new(tasks, sipag_dir.to_path_buf());
 
     enable_raw_mode()?;
     let mut out = stdout();
@@ -170,7 +192,7 @@ pub fn run_tui(sipag_dir: &Path) -> Result<()> {
                 (KeyCode::Char('r'), _) => {
                     // Refresh task list
                     let idx = app.state.selected();
-                    app.tasks = list_tasks(sipag_dir).unwrap_or_default();
+                    app.tasks = list_tasks(&app.sipag_dir).unwrap_or_default();
                     app.state.select(idx.filter(|&i| i < app.tasks.len()));
                 }
                 _ => {}

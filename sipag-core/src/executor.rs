@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::events::{emit_event, EventType};
 use crate::task::{append_ended, slugify, write_tracking_file};
 
 /// Build the Claude prompt for a task.
@@ -60,6 +61,7 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
     let failed_dir = sipag_dir.join("failed");
     let tracking_file = running_dir.join(format!("{task_id}.md"));
     let log_path = running_dir.join(format!("{task_id}.log"));
+    let events_path = running_dir.join(format!("{task_id}.events"));
     let container_name = format!("sipag-{task_id}");
 
     // Write tracking file
@@ -70,6 +72,10 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         &container_name,
         description,
     )?;
+
+    // Emit started event
+    let issue_num = issue.and_then(|s| s.parse::<u32>().ok());
+    emit_event(&events_path, EventType::Started, issue_num, description);
 
     let prompt = build_prompt(description, "", issue);
 
@@ -157,19 +163,27 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
         let success = run_docker(&log_path);
         let _ = append_ended(&tracking_file);
         if success {
+            emit_event(&events_path, EventType::Done, issue_num, "Task completed successfully");
             if tracking_file.exists() {
                 fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
             }
             if log_path.exists() {
                 fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
             }
+            if events_path.exists() {
+                fs::rename(&events_path, done_dir.join(format!("{task_id}.events")))?;
+            }
             println!("==> Done: {task_id}");
         } else {
+            emit_event(&events_path, EventType::Failed, issue_num, "Task failed");
             if tracking_file.exists() {
                 fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
             }
             if log_path.exists() {
                 fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
+            }
+            if events_path.exists() {
+                fs::rename(&events_path, failed_dir.join(format!("{task_id}.events")))?;
             }
             println!("==> Failed: {task_id}");
         }
@@ -193,9 +207,13 @@ pub fn run_bg_exec(
     let failed_dir = sipag_dir.join("failed");
     let tracking_file = running_dir.join(format!("{task_id}.md"));
     let log_path = running_dir.join(format!("{task_id}.log"));
+    let events_path = running_dir.join(format!("{task_id}.events"));
     let container_name = format!("sipag-{task_id}");
 
     let prompt = build_prompt(description, "", None);
+
+    // Emit started event
+    emit_event(&events_path, EventType::Started, None, description);
 
     let mut oauth_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
     if oauth_token.is_none() {
@@ -247,19 +265,27 @@ claude --print --dangerously-skip-permissions -p "$PROMPT""#;
     let _ = append_ended(&tracking_file);
 
     if success {
+        emit_event(&events_path, EventType::Done, None, "Task completed successfully");
         if tracking_file.exists() {
             fs::rename(&tracking_file, done_dir.join(format!("{task_id}.md")))?;
         }
         if log_path.exists() {
             fs::rename(&log_path, done_dir.join(format!("{task_id}.log")))?;
         }
+        if events_path.exists() {
+            fs::rename(&events_path, done_dir.join(format!("{task_id}.events")))?;
+        }
         println!("==> Done: {task_id}");
     } else {
+        emit_event(&events_path, EventType::Failed, None, "Task failed");
         if tracking_file.exists() {
             fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
         }
         if log_path.exists() {
             fs::rename(&log_path, failed_dir.join(format!("{task_id}.log")))?;
+        }
+        if events_path.exists() {
+            fs::rename(&events_path, failed_dir.join(format!("{task_id}.events")))?;
         }
         println!("==> Failed: {task_id}");
     }

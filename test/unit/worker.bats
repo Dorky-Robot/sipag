@@ -282,3 +282,51 @@ EOF
   run worker_has_open_pr "owner/repo" 5
   [[ "$status" -ne 0 ]]
 }
+
+# --- worker_emit_event ---
+
+@test "worker_emit_event creates events file with NDJSON line" {
+  local events_file="${TEST_TMPDIR}/sipag/running/issue-42.events"
+  mkdir -p "${TEST_TMPDIR}/sipag/running"
+  worker_emit_event "$events_file" "started" "42" "Test task"
+  [[ -f "$events_file" ]]
+  assert_file_contains "$events_file" '"event":"started"'
+  assert_file_contains "$events_file" '"issue":42'
+  assert_file_contains "$events_file" '"msg":"Test task"'
+}
+
+@test "worker_emit_event appends multiple events" {
+  local events_file="${TEST_TMPDIR}/sipag/running/issue-7.events"
+  mkdir -p "${TEST_TMPDIR}/sipag/running"
+  worker_emit_event "$events_file" "started" "7" "Begin"
+  worker_emit_event "$events_file" "coding" "7" "Working"
+  worker_emit_event "$events_file" "done" "7" "Finished"
+  local line_count
+  line_count=$(wc -l < "$events_file")
+  [[ "$line_count" -eq 3 ]]
+}
+
+@test "worker_emit_event emits valid JSON with timestamp" {
+  local events_file="${TEST_TMPDIR}/sipag/running/issue-1.events"
+  mkdir -p "${TEST_TMPDIR}/sipag/running"
+  worker_emit_event "$events_file" "testing" "1" "Running tests"
+  assert_file_contains "$events_file" '"ts":'
+  assert_file_contains "$events_file" '"event":"testing"'
+}
+
+@test "worker_emit_event handles empty issue number" {
+  local events_file="${TEST_TMPDIR}/sipag/running/pr-5-iter.events"
+  mkdir -p "${TEST_TMPDIR}/sipag/running"
+  worker_emit_event "$events_file" "coding" "" "PR iteration"
+  [[ -f "$events_file" ]]
+  assert_file_contains "$events_file" '"event":"coding"'
+  # No issue field when empty
+  run grep -c '"issue"' "$events_file"
+  [[ "$output" == "0" ]]
+}
+
+@test "worker_emit_event is silent when directory does not exist" {
+  local events_file="/nonexistent/dir/task.events"
+  run worker_emit_event "$events_file" "started" "" "msg"
+  [[ "$status" -eq 0 ]]
+}

@@ -6,6 +6,7 @@
 
 SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
 WORKER_LOG_DIR="/tmp/sipag-backlog"
+WORKER_EVENTS_DIR="${SIPAG_DIR}/running"
 
 # Defaults (overridden by config)
 WORKER_BATCH_SIZE=4
@@ -36,6 +37,7 @@ worker_load_config() {
 # Track issues we've already picked up
 worker_init() {
     mkdir -p "$WORKER_LOG_DIR"
+    mkdir -p "$WORKER_EVENTS_DIR"
     WORKER_SEEN_FILE="${SIPAG_DIR}/seen"
     touch "$WORKER_SEEN_FILE"
 
@@ -52,6 +54,30 @@ worker_init() {
     fi
     WORKER_OAUTH_TOKEN=$(cat "${SIPAG_DIR}/token")
     WORKER_GH_TOKEN=$(gh auth token)
+}
+
+# Emit a structured NDJSON progress event.
+# Usage: worker_emit_event <events_file> <event_type> <issue_num_or_empty> <message>
+# Event types: started cloning planning coding testing committing pr_opened done failed
+worker_emit_event() {
+    local events_file="$1"
+    local event_type="$2"
+    local issue_num="$3"
+    local msg="$4"
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Escape message for JSON (handle double quotes and backslashes)
+    local escaped_msg
+    escaped_msg=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/\\t/g')
+
+    local issue_part=""
+    if [[ -n "$issue_num" ]]; then
+        issue_part=",\"issue\":${issue_num}"
+    fi
+
+    printf '{"ts":"%s","event":"%s"%s,"msg":"%s"}\n' \
+        "$ts" "$event_type" "$issue_part" "$escaped_msg" >> "$events_file" 2>/dev/null || true
 }
 
 worker_is_seen() {
@@ -201,6 +227,12 @@ worker_run_issue() {
 
     echo "[#${issue_num}] Starting: $title"
 
+    # Events file for this issue (in ~/.sipag/running/ so TUI/CLI can consume it)
+    local events_file="${WORKER_EVENTS_DIR}/issue-${issue_num}.events"
+
+    # Emit started event
+    worker_emit_event "$events_file" "started" "$issue_num" "$title"
+
     # Generate branch name and draft PR body before entering container
     slug=$(worker_slugify "$title")
     branch="sipag/issue-${issue_num}-${slug}"
@@ -227,6 +259,8 @@ Instructions:
 - Commit your changes with a clear commit message and push to origin
 - The PR will be marked ready for review automatically when you finish
 - The PR should close issue #${issue_num}"
+
+    worker_emit_event "$events_file" "cloning" "$issue_num" "Cloning repository and setting up branch"
 
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
@@ -258,10 +292,12 @@ Instructions:
     local exit_code=$?
     if [[ $exit_code -eq 0 ]]; then
         # Success: remove in-progress (PR's "Closes #N" handles the rest)
+        worker_emit_event "$events_file" "done" "$issue_num" "PR marked ready for review"
         worker_transition_label "$repo" "$issue_num" "in-progress" ""
         echo "[#${issue_num}] DONE: $title"
     else
         # Failure: move back to approved for retry (draft PR stays open showing progress)
+        worker_emit_event "$events_file" "failed" "$issue_num" "Worker exited with code ${exit_code}"
         worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
     fi
@@ -279,6 +315,11 @@ worker_run_pr_iteration() {
     branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
 
     echo "[PR #${pr_num}] Iterating: $title (branch: $branch_name)"
+
+    # Events file for this PR iteration
+    local events_file="${WORKER_EVENTS_DIR}/pr-${pr_num}-iter.events"
+
+    worker_emit_event "$events_file" "started" "" "Iterating on PR #${pr_num}: $title"
 
     # Extract linked issue number from PR body (e.g. "Closes #42")
     issue_num=$(gh pr view "$pr_num" --repo "$repo" --json body -q '.body' 2>/dev/null \
@@ -316,6 +357,8 @@ Instructions:
 - Commit with a message that references the feedback
 - Push to the same branch (git push origin ${branch_name})"
 
+    worker_emit_event "$events_file" "coding" "" "Applying review feedback to PR #${pr_num}"
+
     PROMPT="$prompt" BRANCH="$branch_name" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
         -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
@@ -335,8 +378,10 @@ Instructions:
     local exit_code=$?
     worker_pr_mark_done "$pr_num"
     if [[ $exit_code -eq 0 ]]; then
+        worker_emit_event "$events_file" "done" "" "PR #${pr_num} iteration complete"
         echo "[PR #${pr_num}] DONE iterating: $title"
     else
+        worker_emit_event "$events_file" "failed" "" "PR #${pr_num} iteration failed (exit ${exit_code})"
         echo "[PR #${pr_num}] FAILED iteration (exit ${exit_code}): $title"
     fi
 }

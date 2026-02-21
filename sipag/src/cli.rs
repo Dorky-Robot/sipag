@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
+    events::{self, emit_event, EventType},
     executor::{self, generate_task_id, RunConfig},
     repo,
     task::{self, default_sipag_dir, default_sipag_file, TaskStatus},
@@ -52,6 +53,10 @@ pub enum Commands {
     Logs {
         /// Task ID
         id: String,
+
+        /// Stream new events in real-time (follows the events file like tail -f)
+        #[arg(short = 'f', long)]
+        follow: bool,
     },
 
     /// Kill a running container and move task to failed/
@@ -171,7 +176,7 @@ pub fn run(cli: Cli) -> Result<()> {
             description,
         }) => cmd_run(&repo, issue.as_deref(), background, &description),
         Some(Commands::Ps) => cmd_ps(),
-        Some(Commands::Logs { id }) => cmd_logs(&id),
+        Some(Commands::Logs { id, follow }) => cmd_logs(&id, follow),
         Some(Commands::Kill { id }) => cmd_kill(&id),
         Some(Commands::Add {
             title,
@@ -415,9 +420,34 @@ fn compute_duration(task: &task::TaskFile, now: &chrono::DateTime<chrono::Utc>) 
     }
 }
 
-fn cmd_logs(task_id: &str) -> Result<()> {
+fn cmd_logs(task_id: &str, follow: bool) -> Result<()> {
     let dir = sipag_dir();
+
+    if follow {
+        return cmd_logs_follow(task_id, &dir);
+    }
+
+    // Non-follow: try events file first (structured output), then fall back to plain log.
     for status_dir in &["running", "done", "failed"] {
+        let events_file = dir.join(status_dir).join(format!("{task_id}.events"));
+        if events_file.exists() {
+            let evts = events::read_events(&events_file);
+            for ev in &evts {
+                let issue_part = ev
+                    .issue
+                    .map(|n| format!(" issue={n}"))
+                    .unwrap_or_default();
+                println!("[{}] {}{} {}", ev.ts, ev.event, issue_part, ev.msg);
+            }
+            // Also print plain log if available
+            let log_file = dir.join(status_dir).join(format!("{task_id}.log"));
+            if log_file.exists() {
+                println!("--- log ---");
+                print!("{}", fs::read_to_string(&log_file)?);
+            }
+            return Ok(());
+        }
+        // Fall back to plain log
         let log_file = dir.join(status_dir).join(format!("{task_id}.log"));
         if log_file.exists() {
             print!("{}", fs::read_to_string(&log_file)?);
@@ -425,6 +455,137 @@ fn cmd_logs(task_id: &str) -> Result<()> {
         }
     }
     bail!("Error: no log found for task '{task_id}'")
+}
+
+/// Stream events from the events file in real-time (like `tail -f`).
+/// Falls back to tailing the plain log file if no events file exists yet.
+fn cmd_logs_follow(task_id: &str, dir: &std::path::Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    use std::thread;
+    use std::time::Duration;
+
+    // Find the events file across all status dirs; prefer running/.
+    let find_events_file = |task_id: &str| -> Option<std::path::PathBuf> {
+        for status_dir in &["running", "done", "failed"] {
+            let p = dir.join(status_dir).join(format!("{task_id}.events"));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    };
+
+    let find_log_file = |task_id: &str| -> Option<std::path::PathBuf> {
+        for status_dir in &["running", "done", "failed"] {
+            let p = dir.join(status_dir).join(format!("{task_id}.log"));
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    };
+
+    // Wait up to 10 seconds for either an events or log file to appear.
+    let wait_limit = 50; // 50 × 200 ms = 10 s
+    let mut wait_count = 0;
+
+    loop {
+        if find_events_file(task_id).is_some() || find_log_file(task_id).is_some() {
+            break;
+        }
+        if wait_count >= wait_limit {
+            bail!("Error: no log or events file found for task '{task_id}'");
+        }
+        thread::sleep(Duration::from_millis(200));
+        wait_count += 1;
+    }
+
+    // Prefer events file for structured output.
+    if let Some(events_path) = find_events_file(task_id) {
+        // Stream structured events.
+        let mut file = fs::File::open(&events_path)
+            .with_context(|| format!("Failed to open {}", events_path.display()))?;
+        let mut pos: u64 = 0;
+        let mut buf = String::new();
+
+        loop {
+            // Re-locate the file if it was moved (task completed → done/failed).
+            if !events_path.exists() {
+                // Try to find the file in done/failed
+                if let Some(new_path) = find_events_file(task_id) {
+                    if new_path != events_path {
+                        if let Ok(f) = fs::File::open(&new_path) {
+                            // Read remaining from original position in new file
+                            let mut nf = f;
+                            let _ = nf.seek(SeekFrom::Start(pos));
+                            let mut remaining = String::new();
+                            if nf.read_to_string(&mut remaining).is_ok() {
+                                for line in remaining.lines() {
+                                    if let Some(ev) = events::WorkerEvent::from_ndjson(line) {
+                                        let issue_part = ev
+                                            .issue
+                                            .map(|n| format!(" issue={n}"))
+                                            .unwrap_or_default();
+                                        println!("[{}] {}{} {}", ev.ts, ev.event, issue_part, ev.msg);
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            let _ = file.seek(SeekFrom::Start(pos));
+            buf.clear();
+            if file.read_to_string(&mut buf).is_ok() && !buf.is_empty() {
+                pos += buf.len() as u64;
+                for line in buf.lines() {
+                    if let Some(ev) = events::WorkerEvent::from_ndjson(line) {
+                        let issue_part =
+                            ev.issue.map(|n| format!(" issue={n}")).unwrap_or_default();
+                        println!("[{}] {}{} {}", ev.ts, ev.event, issue_part, ev.msg);
+                        // Stop following when we see a terminal event
+                        if ev.event == "done" || ev.event == "failed" {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        return Ok(());
+    }
+
+    // Fall back: tail the plain log file.
+    if let Some(log_path) = find_log_file(task_id) {
+        use std::io::{BufRead, BufReader};
+        let file = fs::File::open(&log_path)
+            .with_context(|| format!("Failed to open {}", log_path.display()))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    // No new data; check if task has completed (file moved)
+                    if !log_path.exists() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Ok(_) => {
+                    print!("{}", line);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn cmd_kill(task_id: &str) -> Result<()> {
@@ -441,10 +602,18 @@ fn cmd_kill(task_id: &str) -> Result<()> {
         .output();
 
     let log_file = dir.join("running").join(format!("{task_id}.log"));
+    let events_file = dir.join("running").join(format!("{task_id}.events"));
     let failed_dir = dir.join("failed");
+
+    // Emit a failed event before moving files
+    emit_event(&events_file, EventType::Failed, None, "Task killed");
+
     fs::rename(&tracking_file, failed_dir.join(format!("{task_id}.md")))?;
     if log_file.exists() {
         fs::rename(&log_file, failed_dir.join(format!("{task_id}.log")))?;
+    }
+    if events_file.exists() {
+        fs::rename(&events_file, failed_dir.join(format!("{task_id}.events")))?;
     }
 
     println!("Killed: {task_id}");
