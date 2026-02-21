@@ -9,6 +9,7 @@ name = "sipag-tui"
 path = "src/main.rs"
 
 [dependencies]
+sipag-core = { path = "../sipag-core" }
 ratatui = "0.30"
 anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }

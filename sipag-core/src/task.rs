@@ -21,6 +21,31 @@ impl TaskStatus {
             TaskStatus::Failed => "failed",
         }
     }
+
+    /// Single-character icon for use in list views.
+    pub fn icon(&self) -> &'static str {
+        match self {
+            TaskStatus::Queue => "·",
+            TaskStatus::Running => "⧖",
+            TaskStatus::Done => "✓",
+            TaskStatus::Failed => "✗",
+        }
+    }
+
+    /// Human-readable status name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TaskStatus::Queue => "pending",
+            TaskStatus::Running => "running",
+            TaskStatus::Done => "done",
+            TaskStatus::Failed => "failed",
+        }
+    }
+
+    /// Single-character symbol (alias for icon()).
+    pub fn symbol(&self) -> &'static str {
+        self.icon()
+    }
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -44,6 +69,8 @@ pub struct TaskFile {
     pub title: String,
     pub body: String,
     pub status: TaskStatus,
+    /// Absolute path to the task file on disk.
+    pub file_path: PathBuf,
 }
 
 /// Parse a task file with optional YAML frontmatter.
@@ -133,6 +160,7 @@ pub fn parse_task_file(path: &Path, status: TaskStatus) -> Result<TaskFile> {
         title,
         body,
         status,
+        file_path: path.to_path_buf(),
     })
 }
 

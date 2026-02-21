@@ -89,7 +89,7 @@ pub fn render_list(f: &mut Frame, app: &App) {
     let pending = app
         .tasks
         .iter()
-        .filter(|t| t.status == Status::Pending)
+        .filter(|t| t.status == Status::Queue)
         .count();
     let running = app
         .tasks
