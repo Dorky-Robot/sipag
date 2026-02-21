@@ -183,6 +183,21 @@ ${issue_body}
     done
 }
 
+# Find open sipag/issue-* PRs that have merge conflicts (mergeable == CONFLICTING).
+# Only returns PRs from sipag-managed branches. Excludes UNKNOWN mergeability
+# (GitHub hasn't computed it yet) to avoid false positives.
+#
+# $1: repo in OWNER/REPO format
+worker_find_conflicted_prs() {
+    local repo="$1"
+    gh pr list --repo "$repo" --state open \
+        --json number,headRefName,mergeable \
+        --jq '.[] | select(
+            (.headRefName | startswith("sipag/issue-")) and
+            .mergeable == "CONFLICTING"
+        ) | .number' 2>/dev/null | sort -n
+}
+
 # Check if an issue is currently open (not closed or merged).
 # Returns 0 (true) for open issues, 1 (false) for closed issues.
 # Used by worker_recover to skip label transitions on issues that have since been closed.
