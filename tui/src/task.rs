@@ -270,6 +270,8 @@ mod tests {
             log_path: Some(PathBuf::from(
                 "/home/.sipag/logs/Dorky-Robot--sipag--42.log",
             )),
+            last_heartbeat: None,
+            phase: None,
         };
         let task = Task::from(w);
         assert_eq!(task.id, 42);
@@ -300,6 +302,8 @@ mod tests {
             duration_s: Some(263),
             exit_code: Some(0),
             log_path: None,
+            last_heartbeat: None,
+            phase: None,
         };
         let task = Task::from(w);
         assert_eq!(task.status, Status::Done);
@@ -331,6 +335,8 @@ mod tests {
             duration_s: Some(300),
             exit_code: Some(1),
             log_path: None,
+            last_heartbeat: None,
+            phase: None,
         };
         let task = Task::from(w);
         assert_eq!(task.status, Status::Failed);

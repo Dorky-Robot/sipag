@@ -4,8 +4,11 @@ use super::status::WorkerStatus;
 
 /// Worker state parsed from `~/.sipag/workers/*.json`.
 ///
-/// Written by the worker when a container starts and updated on completion.
-/// This is the entity — the single source of truth for a worker's lifecycle.
+/// Written by both the sipag process and the Docker worker container.
+/// The state file is the shared coordination layer — both sides read and
+/// write to it. This enables crash recovery: if sipag dies, running
+/// containers keep updating their state files and a new sipag instance
+/// can adopt them.
 #[derive(Debug, Clone)]
 pub struct WorkerState {
     pub repo: String,
@@ -21,6 +24,11 @@ pub struct WorkerState {
     pub duration_s: Option<i64>,
     pub exit_code: Option<i64>,
     pub log_path: Option<PathBuf>,
+    /// ISO 8601 timestamp of the last heartbeat from the container.
+    /// Updated periodically by the running container to signal liveness.
+    pub last_heartbeat: Option<String>,
+    /// Human-readable phase the worker is currently in (e.g. "cloning repo").
+    pub phase: Option<String>,
 }
 
 /// Parse a worker state from a JSON string.
@@ -63,6 +71,8 @@ pub fn parse_worker_json(json: &str) -> anyhow::Result<WorkerState> {
         duration_s: v["duration_s"].as_i64(),
         exit_code: v["exit_code"].as_i64(),
         log_path: v["log_path"].as_str().map(PathBuf::from),
+        last_heartbeat: v["last_heartbeat"].as_str().map(|s| s.to_string()),
+        phase: v["phase"].as_str().map(|s| s.to_string()),
     })
 }
 

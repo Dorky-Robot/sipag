@@ -104,6 +104,8 @@ pub fn dispatch_issue_worker(
         duration_s: None,
         exit_code: None,
         log_path: Some(log_path.clone()),
+        last_heartbeat: None,
+        phase: None,
     };
     store.save(&enqueued_state)?;
 
@@ -146,11 +148,15 @@ pub fn dispatch_issue_worker(
         duration_s: None,
         exit_code: None,
         log_path: Some(log_path.clone()),
+        last_heartbeat: Some(started_at.clone()),
+        phase: Some("starting container".to_string()),
     };
     store.save(&running_state)?;
 
     // 6. Run Docker container (blocking).
     let start = Instant::now();
+    let workers_dir = sipag_dir.join("workers");
+    let state_filename = format!("{repo_slug}--{issue_num}.json");
     let success = run_worker_container(
         &container_name,
         repo,
@@ -165,6 +171,7 @@ pub fn dispatch_issue_worker(
         api_key,
         ISSUE_CONTAINER_SCRIPT,
         &log_path,
+        Some((&workers_dir, &state_filename)),
     );
     let duration_s = start.elapsed().as_secs() as i64;
     let ended_at = now_utc();
@@ -312,6 +319,7 @@ pub fn dispatch_pr_iteration(
         api_key,
         ITERATION_CONTAINER_SCRIPT,
         &log_path,
+        None,
     );
 
     if success {
@@ -390,6 +398,7 @@ pub fn dispatch_conflict_fix(
         api_key,
         CONFLICT_FIX_CONTAINER_SCRIPT,
         &log_path,
+        None,
     );
 
     if success {
@@ -409,6 +418,10 @@ fn now_utc() -> String {
 
 /// Run the Docker container for a worker, streaming output to `log_path`.
 ///
+/// When `state_mount` is `Some((host_workers_dir, state_filename))`, the host's
+/// workers directory is bind-mounted into the container and `STATE_FILE` is set
+/// so the container can self-report heartbeats, phases, and PR info.
+///
 /// Returns `true` on success (exit 0), `false` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn run_worker_container(
@@ -425,6 +438,7 @@ fn run_worker_container(
     api_key: Option<&str>,
     script: &str,
     log_path: &PathBuf,
+    state_mount: Option<(&Path, &str)>,
 ) -> bool {
     let log_out = match File::create(log_path) {
         Ok(f) => f,
@@ -450,10 +464,17 @@ fn run_worker_container(
         cmd = Command::new("docker");
         cmd.arg("run");
     }
-    cmd.arg("--rm")
-        .arg("--name")
-        .arg(container_name)
-        // Repository identity
+    cmd.arg("--rm").arg("--name").arg(container_name);
+
+    // Mount workers directory for state self-reporting.
+    if let Some((workers_dir, state_filename)) = state_mount {
+        cmd.arg("-v")
+            .arg(format!("{}:/sipag-state", workers_dir.display()))
+            .arg("-e")
+            .arg(format!("STATE_FILE=/sipag-state/{state_filename}"));
+    }
+
+    cmd // Repository identity
         .arg("-e")
         .arg(format!("REPO={repo}"))
         // Branch and PR metadata (for the issue worker script)

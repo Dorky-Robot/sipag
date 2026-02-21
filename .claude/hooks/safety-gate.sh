@@ -218,6 +218,7 @@ BASH_ALLOW_PATTERNS=(
 	# Docker (non-privileged)
 	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|pull|build)'
 	# Development tools
+	'^shellcheck '
 	'^bats '
 	'^make (test|check|lint|fmt|dev|build|clean|install|all)( |$)'
 	'^gh (issue|pr|repo|release|workflow|run|auth|api)'

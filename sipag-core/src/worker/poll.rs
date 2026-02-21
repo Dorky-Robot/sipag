@@ -18,7 +18,7 @@ use super::github::{
     list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
-use super::recovery::recover_and_finalize;
+use super::recovery::{recover_and_finalize, RecoveryOutcome};
 use super::status::WorkerStatus;
 use super::store::FileStateStore;
 use crate::auth;
@@ -63,6 +63,11 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             "[recovery] {} worker(s) processed on startup",
             outcomes.len()
         );
+        for outcome in &outcomes {
+            if let RecoveryOutcome::StaleHeartbeat { issue_num } = outcome {
+                println!("[recovery] WARNING: worker for issue #{issue_num} has a stale heartbeat");
+            }
+        }
     }
 
     // ── In-flight tracker (PR iteration / conflict-fix dedup) ────────────────
@@ -84,7 +89,18 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         // ── Finalize exited containers ───────────────────────────────────────
         // Runs at the top of each cycle so containers adopted by recovery
         // get their state updated without needing background threads.
-        let _ = recover_and_finalize(&docker_runtime, &gh_gateway, &store, &cfg.work_label);
+        if let Ok(cycle_outcomes) =
+            recover_and_finalize(&docker_runtime, &gh_gateway, &store, &cfg.work_label)
+        {
+            for outcome in &cycle_outcomes {
+                if let RecoveryOutcome::StaleHeartbeat { issue_num } = outcome {
+                    println!(
+                        "[{}] WARNING: worker for issue #{issue_num} has a stale heartbeat (no update in 10+ min)",
+                        hms()
+                    );
+                }
+            }
+        }
 
         let mut found_work = false;
 
@@ -167,6 +183,8 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                                 duration_s: None,
                                 exit_code: None,
                                 log_path: None,
+                                last_heartbeat: None,
+                                phase: None,
                             };
                             let _ = store.save(&state);
                         }
