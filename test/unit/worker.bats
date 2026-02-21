@@ -14,8 +14,9 @@ setup() {
   export WORKER_LOG_DIR="${TEST_TMPDIR}/worker-logs"
   mkdir -p "$WORKER_LOG_DIR"
 
-  # Clear env var so we test defaults from scratch
+  # Clear env vars so we test defaults from scratch
   unset SIPAG_WORK_LABEL
+  unset SIPAG_BATCH_SIZE
 
   source "${SIPAG_ROOT}/lib/worker.sh"
 
@@ -37,6 +38,28 @@ teardown() {
   # Re-source with the env var set to verify module-level assignment
   SIPAG_WORK_LABEL="custom-env-label" source "${SIPAG_ROOT}/lib/worker.sh"
   [[ "$WORKER_WORK_LABEL" == "custom-env-label" ]]
+}
+
+# --- default batch_size ---
+
+@test "default batch_size is 1" {
+  [[ "$WORKER_BATCH_SIZE" == "1" ]]
+}
+
+@test "SIPAG_BATCH_SIZE env var sets initial batch_size before config load" {
+  SIPAG_BATCH_SIZE=3 source "${SIPAG_ROOT}/lib/worker.sh"
+  [[ "$WORKER_BATCH_SIZE" == "3" ]]
+}
+
+@test "SIPAG_BATCH_SIZE over max is clamped to WORKER_BATCH_SIZE_MAX" {
+  SIPAG_BATCH_SIZE=99 source "${SIPAG_ROOT}/lib/worker.sh"
+  [[ "$WORKER_BATCH_SIZE" == "$WORKER_BATCH_SIZE_MAX" ]]
+}
+
+@test "worker_load_config caps batch_size at WORKER_BATCH_SIZE_MAX" {
+  echo "batch_size=99" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_BATCH_SIZE" == "$WORKER_BATCH_SIZE_MAX" ]]
 }
 
 # --- worker_load_config: work_label ---
@@ -62,7 +85,7 @@ teardown() {
 
 @test "worker_load_config reads all config keys including work_label" {
   cat > "${SIPAG_DIR}/config" <<'EOF'
-batch_size=8
+batch_size=3
 image=my-image:v2
 timeout=3600
 poll_interval=60
@@ -70,7 +93,7 @@ work_label=triaged
 EOF
   worker_load_config
   [[ "$WORKER_WORK_LABEL" == "triaged" ]]
-  [[ "$WORKER_BATCH_SIZE" == "8" ]]
+  [[ "$WORKER_BATCH_SIZE" == "3" ]]
   [[ "$WORKER_IMAGE" == "my-image:v2" ]]
   [[ "$WORKER_TIMEOUT" == "3600" ]]
   [[ "$WORKER_POLL_INTERVAL" == "60" ]]
@@ -84,7 +107,7 @@ work_label=labeled
 EOF
   worker_load_config
   [[ "$WORKER_WORK_LABEL" == "labeled" ]]
-  [[ "$WORKER_BATCH_SIZE" == "4" ]]  # default unchanged
+  [[ "$WORKER_BATCH_SIZE" == "1" ]]  # default unchanged
 }
 
 @test "worker_load_config trims whitespace from keys and values" {

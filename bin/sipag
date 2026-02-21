@@ -57,7 +57,7 @@ Flags:
   -f, --file <path>  Task file (default: ./tasks.md or $SIPAG_FILE)
 
 Config (~/.sipag/config):
-  batch_size=4                 Max parallel Docker containers
+  batch_size=1                 Max parallel Docker containers (default: 1, max: 5)
   image=sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
@@ -65,6 +65,7 @@ Config (~/.sipag/config):
 Environment:
   SIPAG_FILE              Task file path (default: ./tasks.md)
   SIPAG_TIMEOUT           Claude timeout in seconds (default: 600)
+  SIPAG_BATCH_SIZE        Max parallel Docker containers (default: 1, max: 5)
   SIPAG_MODEL             Model override
   SIPAG_PROMPT_PREFIX     Prepended to every prompt
   SIPAG_SKIP_PERMISSIONS  Set 0 for interactive mode (default: 1)
