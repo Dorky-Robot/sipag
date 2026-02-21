@@ -172,6 +172,9 @@ pub struct App {
     pub task_list_state: ListState,
     pub mode: Mode,
     pub executor: Option<ExecutorState>,
+    /// Set when the user presses 'a' on a running task. The main loop
+    /// reads this, suspends the TUI, and runs `docker exec` to attach.
+    pub attach_request: Option<String>,
 }
 
 impl App {
@@ -185,6 +188,7 @@ impl App {
             task_list_state: ListState::default(),
             mode: Mode::TaskList,
             executor: None,
+            attach_request: None,
         };
         app.refresh_tasks()?;
         if !app.tasks.is_empty() {
@@ -298,6 +302,11 @@ impl App {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
+            KeyCode::Char('a') => {
+                if let Some(container) = self.selected_container_name() {
+                    self.attach_request = Some(container);
+                }
+            }
             KeyCode::Char('x') => self.start_executor()?,
             KeyCode::Char('r') => self.retry_selected()?,
             _ => {}
@@ -558,6 +567,29 @@ impl App {
         }
 
         Ok(())
+    }
+
+    // ── Attach ────────────────────────────────────────────────────────────────
+
+    /// Get the container name for the selected running task.
+    pub fn selected_container_name(&self) -> Option<String> {
+        let idx = self.task_list_state.selected()?;
+        let task = self.tasks.get(idx)?;
+        if task.status != TaskStatus::Running {
+            return None;
+        }
+        // Read container: field from the tracking .md file
+        let md_path = self
+            .sipag_dir
+            .join("running")
+            .join(format!("{}.md", task.id));
+        let content = fs::read_to_string(&md_path).ok()?;
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("container:") {
+                return Some(val.trim().to_string());
+            }
+        }
+        None
     }
 
     // ── Accessors for ui ──────────────────────────────────────────────────────

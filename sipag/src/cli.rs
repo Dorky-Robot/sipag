@@ -2,9 +2,10 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
     executor::{self, RunConfig},
+    init,
     prompt::{format_duration, generate_task_id},
     repo,
-    task::{self, default_sipag_dir, default_sipag_file, TaskStatus},
+    task::{self, default_sipag_dir, TaskStatus},
 };
 use std::fs;
 use std::path::PathBuf;
@@ -67,40 +68,18 @@ pub enum Commands {
     /// Create ~/.sipag/{queue,running,done,failed}
     Init,
 
-    /// Queue a task
+    /// Queue a task (requires --repo)
     Add {
         /// Task title/description
         title: String,
 
         /// Repository name (writes YAML file to queue/)
-        #[arg(long)]
-        repo: Option<String>,
+        #[arg(long, required = true)]
+        repo: String,
 
         /// Priority level
         #[arg(long, default_value = "medium")]
         priority: String,
-    },
-
-    /// Print all tasks with status (markdown checklist file)
-    List {
-        /// Task file path (default: ./tasks.md or $SIPAG_FILE)
-        #[arg(short = 'f', long)]
-        file: Option<PathBuf>,
-    },
-
-    /// Find first pending task, run claude, mark done
-    Next {
-        /// After completing, loop to the next task
-        #[arg(short = 'c', long)]
-        r#continue: bool,
-
-        /// Show what would run; don't invoke claude
-        #[arg(short = 'n', long)]
-        dry_run: bool,
-
-        /// Task file path (default: ./tasks.md or $SIPAG_FILE)
-        #[arg(short = 'f', long)]
-        file: Option<PathBuf>,
     },
 
     /// Print task file and log (searches all dirs)
@@ -156,8 +135,13 @@ pub enum RepoCommands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None | Some(Commands::Tui) => {
-            let sipag_dir = default_sipag_dir();
-            crate::tui::run_tui(&sipag_dir)
+            let status = std::process::Command::new("sipag-tui")
+                .status()
+                .with_context(|| "Failed to exec sipag-tui — is it installed?")?;
+            if !status.success() {
+                bail!("sipag-tui exited with status: {}", status);
+            }
+            Ok(())
         }
         Some(Commands::Version) => {
             println!("sipag {VERSION}");
@@ -178,13 +162,7 @@ pub fn run(cli: Cli) -> Result<()> {
             title,
             repo,
             priority,
-        }) => cmd_add(&title, repo.as_deref(), &priority),
-        Some(Commands::List { file }) => cmd_list(file.as_deref()),
-        Some(Commands::Next {
-            r#continue,
-            dry_run,
-            file,
-        }) => cmd_next(r#continue, dry_run, file.as_deref()),
+        }) => cmd_add(&title, &repo, &priority),
         Some(Commands::Show { name }) => cmd_show(&name),
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
@@ -212,18 +190,19 @@ fn sipag_dir() -> PathBuf {
 }
 
 fn cmd_init() -> Result<()> {
-    task::init_dirs(&sipag_dir())
+    init::init_dirs(&sipag_dir())
 }
 
 fn cmd_start() -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
     println!("sipag executor starting (queue: {}/queue)", dir.display());
 
     let queue_dir = dir.join("queue");
     let running_dir = dir.join("running");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -259,7 +238,7 @@ fn cmd_start() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
 
-        let task = match task::parse_task_file(&task_file, TaskStatus::Queue) {
+        let task = match task::read_task_file(&task_file, TaskStatus::Queue) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("Error: failed to parse task file: {e}");
@@ -315,12 +294,13 @@ fn cmd_start() -> Result<()> {
 
 fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &str) -> Result<()> {
     let dir = sipag_dir();
-    task::init_dirs(&dir).ok();
+    init::init_dirs(&dir).ok();
 
     let task_id = generate_task_id(description, chrono::Utc::now());
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -361,7 +341,7 @@ fn cmd_ps() -> Result<()> {
         paths.sort_by(|a, b| b.cmp(a)); // newest first
 
         for path in paths {
-            let task = match task::parse_task_file(&path, TaskStatus::Queue) {
+            let task = match task::read_task_file(&path, TaskStatus::Queue) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
@@ -452,100 +432,22 @@ fn cmd_kill(task_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_add(title: &str, repo: Option<&str>, priority: &str) -> Result<()> {
+fn cmd_add(title: &str, repo: &str, priority: &str) -> Result<()> {
     if title.is_empty() {
-        bail!("Usage: sipag add \"task text\" [--repo <name>] [--priority <level>]");
+        bail!("Usage: sipag add \"task text\" --repo <name> [--priority <level>]");
     }
 
     let dir = sipag_dir();
-    if let Some(repo_name) = repo {
-        // Queue mode: write YAML file to queue/
-        if !dir.join("queue").exists() {
-            task::init_dirs(&dir).ok();
-        }
-        let filename = task::next_filename(&dir.join("queue"), title);
-        let path = dir.join("queue").join(&filename);
-        task::write_task_file(&path, title, repo_name, priority, None)?;
-        println!("Added: {title}");
-    } else {
-        // Legacy checklist mode: append to SIPAG_FILE
-        let file = default_sipag_file();
-        task::append_checklist_item(&file, title)?;
-        println!("Added: {title}");
+    if !dir.join("queue").exists() {
+        init::init_dirs(&dir).ok();
     }
+    let filename = task::next_filename(&dir.join("queue"), title);
+    let path = dir.join("queue").join(&filename);
+    let added = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    task::write_task_file(&path, title, repo, priority, None, &added)?;
+    println!("Added: {title}");
 
     Ok(())
-}
-
-fn cmd_list(file: Option<&std::path::Path>) -> Result<()> {
-    let file = file
-        .map(|f| f.to_path_buf())
-        .unwrap_or_else(default_sipag_file);
-
-    if !file.exists() {
-        bail!("No task file: {}", file.display());
-    }
-
-    let items = task::parse_checklist(&file)?;
-    let done_count = items.iter().filter(|i| i.done).count();
-    let total = items.len();
-
-    for item in &items {
-        if item.done {
-            println!("  [x] {}", item.title);
-        } else {
-            println!("  [ ] {}", item.title);
-        }
-    }
-
-    println!();
-    println!("{done_count}/{total} done");
-    Ok(())
-}
-
-fn cmd_next(cont: bool, dry_run: bool, file: Option<&std::path::Path>) -> Result<()> {
-    let file = file
-        .map(|f| f.to_path_buf())
-        .unwrap_or_else(default_sipag_file);
-
-    loop {
-        let item = match task::next_checklist_item(&file)? {
-            Some(i) => i,
-            None => {
-                println!("No pending tasks in {}", file.display());
-                return Ok(());
-            }
-        };
-
-        println!("==> Task {}: {}", item.line_num, item.title);
-
-        if dry_run {
-            if !item.body.is_empty() {
-                println!();
-                println!("{}", item.body);
-            }
-            println!();
-            println!("(dry run — skipping claude)");
-            return Ok(());
-        }
-
-        match executor::run_claude(&item.title, &item.body) {
-            Ok(_) => {
-                task::mark_checklist_done(&file, item.line_num)?;
-                println!("==> Done: {}", item.title);
-            }
-            Err(e) => {
-                println!("==> Failed: {}: {e}", item.title);
-                return Err(e);
-            }
-        }
-
-        if !cont {
-            return Ok(());
-        }
-
-        println!();
-    }
 }
 
 fn cmd_show(name: &str) -> Result<()> {
@@ -618,7 +520,12 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
 
 fn cmd_status() -> Result<()> {
     let dir = sipag_dir();
-    let labels = [("Queue", "queue"), ("Running", "running"), ("Done", "done"), ("Failed", "failed")];
+    let labels = [
+        ("Queue", "queue"),
+        ("Running", "running"),
+        ("Done", "done"),
+        ("Failed", "failed"),
+    ];
 
     for (label, subdir) in &labels {
         let d = dir.join(subdir);

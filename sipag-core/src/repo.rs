@@ -9,8 +9,8 @@ pub fn get_repo_url(sipag_dir: &Path, name: &str) -> Result<String> {
     if !conf.exists() {
         bail!("No repos registered. Use: sipag repo add <name> <url>");
     }
-    let content = fs::read_to_string(&conf)
-        .with_context(|| format!("Failed to read {}", conf.display()))?;
+    let content =
+        fs::read_to_string(&conf).with_context(|| format!("Failed to read {}", conf.display()))?;
     for line in content.lines() {
         if let Some((key, val)) = line.split_once('=') {
             if key.trim() == name {
@@ -50,8 +50,8 @@ pub fn list_repos(sipag_dir: &Path) -> Result<Vec<(String, String)>> {
     if !conf.exists() {
         return Ok(Vec::new());
     }
-    let content = fs::read_to_string(&conf)
-        .with_context(|| format!("Failed to read {}", conf.display()))?;
+    let content =
+        fs::read_to_string(&conf).with_context(|| format!("Failed to read {}", conf.display()))?;
     let repos = content
         .lines()
         .filter(|l| !l.trim().is_empty())

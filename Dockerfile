@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    git curl build-essential ca-certificates sudo \
+    git curl build-essential ca-certificates sudo tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 22 (for claude CLI)

@@ -49,7 +49,15 @@ pub struct RunConfig<'a> {
 const BASH_SCRIPT: &str = r#"git clone "$REPO_URL" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
-claude --print --dangerously-skip-permissions -p "$PROMPT""#;
+tmux new-session -d -s claude "claude --dangerously-skip-permissions -p \"$PROMPT\"; echo \$? > /tmp/.claude-exit"
+touch /tmp/claude.log
+tmux pipe-pane -t claude -o 'cat >> /tmp/claude.log'
+tail -f /tmp/claude.log &
+TAIL_PID=$!
+while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+kill $TAIL_PID 2>/dev/null || true
+wait $TAIL_PID 2>/dev/null || true
+exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)""#;
 
 /// Run a Docker container and stream output to `log_path`.
 ///

@@ -10,6 +10,10 @@ use crate::task::{append_ended, write_tracking_file};
 
 pub use docker::RunConfig;
 
+fn now_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
 /// Run a task in a Docker container.
 ///
 /// Orchestrates: auth preflight → Docker preflight → write tracking file →
@@ -37,7 +41,14 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
     let tracking_file = running_dir.join(format!("{task_id}.md"));
     let container_name = format!("sipag-{task_id}");
 
-    write_tracking_file(&tracking_file, repo_url, issue, &container_name, description)?;
+    write_tracking_file(
+        &tracking_file,
+        repo_url,
+        issue,
+        &container_name,
+        description,
+        &now_timestamp(),
+    )?;
 
     let prompt_text = prompt::build_prompt(description, "", issue);
 
@@ -135,7 +146,7 @@ fn exec_and_finalize(
         &log_path,
     );
 
-    let _ = append_ended(&tracking_file);
+    let _ = append_ended(&tracking_file, &now_timestamp());
 
     if success {
         if tracking_file.exists() {
