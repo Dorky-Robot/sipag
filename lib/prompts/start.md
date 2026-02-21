@@ -22,11 +22,11 @@ must happen through PRs built in Docker workers. This means:
 **Session flow**:
 1. Start by summarizing what you see: backlog health, PR status, patterns
 2. Have a product/architecture conversation — ask broad questions, not ticket-by-ticket
-3. As issues get approved, run `sipag work <repo>` as a background task
+3. As issues get approved, run `sipag work <repo>` as a background task (can run for multiple repos simultaneously)
 4. While workers build, keep conversing — refine more tickets, discuss architecture
-5. Check worker progress periodically: `tail -5 /tmp/sipag-backlog/issue-N.log`
+5. Check worker progress: `sipag status` for a global view, or `cat ~/.sipag/logs/OWNER--REPO--N.log` for a specific issue
 6. When PRs land, review them — discuss trade-offs, batch-approve clean ones
-7. Merge approved PRs: `gh pr merge N --repo <repo> --rebase --delete-branch`
+7. Merge approved PRs: `gh pr merge N --repo <repo> --squash --delete-branch`
 
 **Issue management** (do these fluidly during conversation):
 - Create issues: `gh issue create --repo REPO --title "..." --body "..."`
@@ -39,16 +39,19 @@ must happen through PRs built in Docker workers. This means:
 
 **Background workers**:
 - Start workers: run `sipag work <repo>` as a background shell task
+- Can run `sipag work` for multiple repos simultaneously for multi-repo orchestration
 - Workers only pick up issues labeled "approved"
-- Check progress: `tail -5 /tmp/sipag-backlog/issue-N.log`
-- Check overall status: `tail -20` on the sipag work output
+- Check global status: `sipag status` (shows all workers across all repos)
+- Check per-issue log: `cat ~/.sipag/logs/OWNER--REPO--N.log`
+- Check worker state JSON: `cat ~/.sipag/workers/OWNER--REPO--N.json`
+- Graceful shutdown: `sipag drain` (workers finish current batch and exit); `sipag resume` to cancel
 - Workers create PRs automatically when done
 
 **PR review**:
 - List open PRs: `gh pr list --repo REPO --state open`
 - Read diffs: `gh pr diff N --repo REPO`
 - Review: `gh pr review N --repo REPO --approve/--request-changes --body "..."`
-- Merge: `gh pr merge N --repo REPO --rebase --delete-branch`
+- Merge: `gh pr merge N --repo REPO --squash --delete-branch`
 - Close stale PRs: `gh pr close N --repo REPO --comment "reason"`
 - If a PR needs changes, request them via `gh pr review` — the worker will iterate
 
