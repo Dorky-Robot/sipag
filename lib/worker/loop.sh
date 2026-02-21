@@ -42,10 +42,16 @@ worker_loop() {
             break
         fi
 
+        # Finalize any containers that exited since last cycle.
+        # This catches containers adopted by worker_recover() or left over
+        # from a killed worker — no background subshells needed.
+        worker_finalize_exited
+
         local found_work=0
         local repo
         for repo in "${repos[@]}"; do
             # Update per-repo globals (slug for log/state file naming)
+            # shellcheck disable=SC2034  # Used by docker.sh (sourced, not seen by shellcheck)
             WORKER_REPO_SLUG="${repo//\//--}"
 
             # Reconcile: close issues that already have merged PRs

@@ -192,6 +192,8 @@ worker_issue_is_open() {
 # Uses || true so a non-zero exit from gh (e.g. closed issue) does not kill the worker under set -e.
 worker_transition_label() {
     local repo="$1" issue_num="$2" from_label="$3" to_label="$4"
+    # Curly braces + || true prevent set -e from killing the worker when the
+    # issue is closed, missing, or the label doesn't exist.
     [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; }
     [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; }
 }

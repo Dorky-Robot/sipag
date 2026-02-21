@@ -30,10 +30,12 @@ worker_is_completed() {
     _worker_state_has_status "$(worker_state_file "$repo" "$issue_num")" "done"
 }
 
-# Check if issue is currently in flight (state file status: running).
+# Check if issue is currently in flight (state file status: running or recovering).
 worker_is_in_flight() {
     local repo="$1" issue_num="$2"
-    _worker_state_has_status "$(worker_state_file "$repo" "$issue_num")" "running"
+    local sf
+    sf=$(worker_state_file "$repo" "$issue_num")
+    _worker_state_has_status "$sf" "running" || _worker_state_has_status "$sf" "recovering"
 }
 
 # Check if issue's previous worker failed (state file status: failed).

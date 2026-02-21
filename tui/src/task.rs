@@ -77,11 +77,11 @@ impl From<WorkerState> for Task {
                 .map(|dt| dt.with_timezone(&Utc))
         });
 
-        let status = match w.status.as_str() {
-            "running" => Status::Running,
-            "done" => Status::Done,
-            "failed" => Status::Failed,
-            _ => Status::Queue,
+        let status = match w.status {
+            sipag_core::worker::WorkerStatus::Running
+            | sipag_core::worker::WorkerStatus::Recovering => Status::Running,
+            sipag_core::worker::WorkerStatus::Done => Status::Done,
+            sipag_core::worker::WorkerStatus::Failed => Status::Failed,
         };
 
         let issue_num = u32::try_from(w.issue_num).unwrap_or(0);
@@ -216,7 +216,7 @@ mod tests {
             container_name: "sipag-issue-42".to_string(),
             pr_num: None,
             pr_url: None,
-            status: "running".to_string(),
+            status: sipag_core::worker::WorkerStatus::Running,
             started_at: Some("2024-01-15T10:30:00Z".to_string()),
             ended_at: None,
             duration_s: None,
@@ -246,7 +246,7 @@ mod tests {
             container_name: "sipag-issue-42".to_string(),
             pr_num: Some(163),
             pr_url: Some("https://github.com/Dorky-Robot/sipag/pull/163".to_string()),
-            status: "done".to_string(),
+            status: sipag_core::worker::WorkerStatus::Done,
             started_at: Some("2024-01-15T10:30:00Z".to_string()),
             ended_at: Some("2024-01-15T10:34:23Z".to_string()),
             duration_s: Some(263),
