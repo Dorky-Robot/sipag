@@ -26,6 +26,8 @@ source "${SIPAG_ROOT}/lib/start.sh"
 source "${SIPAG_ROOT}/lib/merge.sh"
 # shellcheck source=../lib/doctor.sh
 source "${SIPAG_ROOT}/lib/doctor.sh"
+# shellcheck source=../lib/preflight.sh
+source "${SIPAG_ROOT}/lib/preflight.sh"
 
 # --- Defaults ---
 
@@ -40,26 +42,19 @@ usage() {
 sipag — autonomous dev agent powered by Claude Code
 
 Usage:
-  sipag start <owner/repo>     Prime a Claude Code session with GitHub context
-  sipag doctor                 Diagnose setup problems and show exact fix commands
-  sipag setup                  Configure Claude Code permissions for sipag
-  sipag work <owner/repo>      Poll repo for issues, spin up Docker workers
-  sipag merge <owner/repo>     Output PR context for a conversational merge session
-  sipag next [-c] [-n] [-f]   Run next task from a markdown checklist
-  sipag list [-f path]         Print all tasks with status
-  sipag add "task" [-f path]   Append task to checklist
-  sipag version                Print version
-  sipag help                   Show this help
+  sipag start <owner/repo>       Prime session for agile workflow
+  sipag doctor                   Diagnose setup problems and show exact fix commands
+  sipag work <owner/repo>        Pick up approved issues, code in Docker
+  sipag merge <owner/repo>       Conversational PR merge session
+  sipag next [-c] [-n] [-f]     Run next task from a markdown checklist
+  sipag list [-f path]           Print all tasks with status
+  sipag add "task" [-f path]     Append task to checklist
+  sipag setup                    Configure sipag and Claude Code permissions
+  sipag version                  Print version
+  sipag help                     Show this help
 
-sipag work:
-  Continuously polls a GitHub repo for open issues, launches isolated
-  Docker containers running Claude Code, and creates PRs. Runs until
-  killed (Ctrl+C). Configure via ~/.sipag/config.
-
-sipag merge:
-  Gathers open PR context (titles, review status, CI, merge state) and
-  outputs it to stdout along with workflow instructions. Pipe to claude
-  or use within a sipag start session to facilitate a merge conversation.
+Agile workflow:
+  start → (converse, triage, refine, approve) → work → merge
 
 Flags:
   -c, --continue     After completing, loop to the next task
@@ -68,7 +63,7 @@ Flags:
 
 Config (~/.sipag/config):
   batch_size=4                 Max parallel Docker containers
-  image=sipag-worker:latest    Docker image for workers
+  image=ghcr.io/dorky-robot/sipag-worker:latest    Docker image for workers
   timeout=1800                 Per-task timeout in seconds
   poll_interval=120            Seconds between polling for new issues
 
@@ -137,6 +132,8 @@ cmd_add() {
 
 cmd_start() {
 	local repo="${1:?Usage: sipag start <owner/repo>}"
+	preflight_gh_auth || return 1
+	preflight_repo "$repo" || return 1
 	start_run "$repo"
 }
 
@@ -151,6 +148,10 @@ cmd_setup() {
 cmd_work() {
 	local repo="${1:?Usage: sipag work <owner/repo>}"
 	worker_load_config
+	preflight_auth || return 1
+	preflight_docker_running || return 1
+	preflight_docker_image "${WORKER_IMAGE}" || return 1
+	preflight_gh_auth || return 1
 	worker_init
 	worker_loop "$repo"
 }

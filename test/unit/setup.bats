@@ -101,17 +101,19 @@ MOCK
   [[ -d "$HOME/.sipag/running" ]]
   [[ -d "$HOME/.sipag/done" ]]
   [[ -d "$HOME/.sipag/failed" ]]
+  [[ -d "$HOME/.sipag/hooks" ]]
 }
 
 # --- _setup_dirs ---
 
-@test "_setup_dirs: creates all four subdirectories" {
+@test "_setup_dirs: creates all subdirectories including hooks" {
   run _setup_dirs
   [[ "$status" -eq 0 ]]
   [[ -d "$HOME/.sipag/queue" ]]
   [[ -d "$HOME/.sipag/running" ]]
   [[ -d "$HOME/.sipag/done" ]]
   [[ -d "$HOME/.sipag/failed" ]]
+  [[ -d "$HOME/.sipag/hooks" ]]
 }
 
 @test "_setup_dirs: is idempotent" {

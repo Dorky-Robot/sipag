@@ -222,7 +222,7 @@ fn cmd_start() -> Result<()> {
     let queue_dir = dir.join("queue");
     let running_dir = dir.join("running");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -319,7 +319,7 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let task_id = generate_task_id(description);
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()

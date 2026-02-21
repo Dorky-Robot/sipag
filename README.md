@@ -87,6 +87,95 @@ When Claude decides work is ready, it runs `sipag work <repo>` in the background
 
 The container is the safety boundary. Workers have full autonomy inside it.
 
+## Lifecycle hooks
+
+sipag emits events at key worker milestones via hook scripts — the same pattern as git hooks. External tools subscribe by dropping executable scripts into `~/.sipag/hooks/`.
+
+sipag itself has no notification logic. It emits events; you decide what to do with them.
+
+```
+sipag (orchestrate) → lifecycle hook → tao (email)
+sipag (orchestrate) → lifecycle hook → slack-notify (Slack)
+sipag (orchestrate) → lifecycle hook → osascript (desktop)
+sipag (orchestrate) → lifecycle hook → your-custom-thing
+```
+
+### Hook scripts
+
+Place executable files in `~/.sipag/hooks/` named after the event:
+
+| Hook | When it fires |
+|---|---|
+| `on-worker-started` | Worker picked up an issue |
+| `on-worker-completed` | Worker finished, PR opened |
+| `on-worker-failed` | Worker exited non-zero |
+| `on-pr-iteration-started` | Worker iterating on PR feedback |
+| `on-pr-iteration-done` | PR iteration complete |
+
+Hooks run asynchronously — they never block the worker. Missing or non-executable hooks are silently skipped.
+
+### Event data
+
+Passed as environment variables:
+
+**on-worker-started**
+```
+SIPAG_EVENT=worker.started
+SIPAG_REPO=Dorky-Robot/sipag
+SIPAG_ISSUE=42
+SIPAG_ISSUE_TITLE="Fix auth middleware"
+SIPAG_TASK_ID=20260220-fix-auth-middleware
+```
+
+**on-worker-completed**
+```
+SIPAG_EVENT=worker.completed
+SIPAG_REPO=Dorky-Robot/sipag
+SIPAG_ISSUE=42
+SIPAG_ISSUE_TITLE="Fix auth middleware"
+SIPAG_PR_NUM=47
+SIPAG_PR_URL=https://github.com/Dorky-Robot/sipag/pull/47
+SIPAG_DURATION=503
+SIPAG_TASK_ID=20260220-fix-auth-middleware
+```
+
+**on-worker-failed**
+```
+SIPAG_EVENT=worker.failed
+SIPAG_REPO=Dorky-Robot/sipag
+SIPAG_ISSUE=42
+SIPAG_ISSUE_TITLE="Fix auth middleware"
+SIPAG_EXIT_CODE=1
+SIPAG_LOG_PATH=/tmp/sipag-backlog/issue-42.log
+SIPAG_TASK_ID=20260220-fix-auth-middleware
+```
+
+### Example hooks
+
+**Desktop notification (macOS)**
+```bash
+#!/usr/bin/env bash
+# ~/.sipag/hooks/on-worker-completed
+osascript -e "display notification \"PR opened for #${SIPAG_ISSUE}\" with title \"sipag\""
+```
+
+**Log to file**
+```bash
+#!/usr/bin/env bash
+# ~/.sipag/hooks/on-worker-completed
+echo "$(date) ${SIPAG_EVENT} ${SIPAG_REPO}#${SIPAG_ISSUE} ${SIPAG_PR_URL}" >> ~/.sipag/events.log
+```
+
+**Email via tao**
+```bash
+#!/usr/bin/env bash
+# ~/.sipag/hooks/on-worker-completed
+echo "PR ${SIPAG_PR_URL} opened for #${SIPAG_ISSUE} in ${SIPAG_REPO}" \
+    | tao notify developer felix@example.com --detach
+```
+
+`sipag setup` creates `~/.sipag/hooks/` for you.
+
 ## Installation
 
 ### Homebrew (macOS and Linux — recommended)
@@ -175,7 +264,7 @@ Simplify sipag to sandbox launcher
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIPAG_DIR` | `~/.sipag` | Data directory |
-| `SIPAG_IMAGE` | `sipag-worker:latest` | Docker base image |
+| `SIPAG_IMAGE` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker base image |
 | `SIPAG_TIMEOUT` | `1800` | Per-container timeout (seconds) |
 | `SIPAG_MODEL` | _(claude default)_ | Model override |
 | `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |

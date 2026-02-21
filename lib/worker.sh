@@ -9,7 +9,7 @@ WORKER_LOG_DIR="/tmp/sipag-backlog"
 
 # Defaults (overridden by config)
 WORKER_BATCH_SIZE=4
-WORKER_IMAGE="sipag-worker:latest"
+WORKER_IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
@@ -44,13 +44,14 @@ worker_init() {
     command -v gtimeout &>/dev/null && WORKER_TIMEOUT_CMD="gtimeout"
     command -v "$WORKER_TIMEOUT_CMD" &>/dev/null || WORKER_TIMEOUT_CMD=""
 
-    # Load credentials
-    if [[ ! -f "${SIPAG_DIR}/token" ]]; then
-        echo "Error: no token found at ${SIPAG_DIR}/token"
-        echo "Run: claude setup-token && cp ~/.claude/token ${SIPAG_DIR}/token"
-        return 1
+    # Load credentials: token file takes priority, ANTHROPIC_API_KEY is fallback
+    WORKER_OAUTH_TOKEN=""
+    WORKER_API_KEY=""
+    if [[ -s "${SIPAG_DIR}/token" ]]; then
+        WORKER_OAUTH_TOKEN=$(cat "${SIPAG_DIR}/token")
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        WORKER_API_KEY="${ANTHROPIC_API_KEY}"
     fi
-    WORKER_OAUTH_TOKEN=$(cat "${SIPAG_DIR}/token")
     WORKER_GH_TOKEN=$(gh auth token)
 }
 
@@ -174,6 +175,17 @@ worker_transition_label() {
     [[ -n "$to_label" ]]   && gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null
 }
 
+# Run a lifecycle hook script if it exists and is executable.
+# Hooks live in ${SIPAG_DIR}/hooks/<name>. They run asynchronously so they
+# never block the worker. Env vars must be exported by the caller before
+# invoking this function.
+sipag_run_hook() {
+    local hook_name="$1"
+    local hook_path="${SIPAG_DIR}/hooks/${hook_name}"
+    [[ -x "$hook_path" ]] || return 0
+    "$hook_path" &  # run async, don't block the worker
+}
+
 # Convert an issue title into a URL-safe branch name slug (max 50 chars)
 worker_slugify() {
     local title="$1"
@@ -190,7 +202,7 @@ worker_slugify() {
 worker_run_issue() {
     local repo="$1"
     local issue_num="$2"
-    local title body branch slug pr_body prompt
+    local title body branch slug pr_body prompt task_id start_time
 
     # Mark as in-progress so the spec is locked from edits
     worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"
@@ -204,6 +216,7 @@ worker_run_issue() {
     # Generate branch name and draft PR body before entering container
     slug=$(worker_slugify "$title")
     branch="sipag/issue-${issue_num}-${slug}"
+    task_id="$(date +%Y%m%d)-${slug}"
 
     pr_body="Closes #${issue_num}
 
@@ -223,14 +236,25 @@ Instructions:
 - You are on branch ${branch} — do NOT create a new branch
 - A draft PR is already open for this branch — do not open another one
 - Implement the changes
+- Run \`make dev\` (fmt + clippy + test) before committing to validate your changes
 - Run any existing tests and make sure they pass
 - Commit your changes with a clear commit message and push to origin
 - The PR will be marked ready for review automatically when you finish
 - The PR should close issue #${issue_num}"
 
+    # Hook: worker started
+    export SIPAG_EVENT="worker.started"
+    export SIPAG_REPO="$repo"
+    export SIPAG_ISSUE="$issue_num"
+    export SIPAG_ISSUE_TITLE="$title"
+    export SIPAG_TASK_ID="$task_id"
+    sipag_run_hook "on-worker-started"
+
+    start_time=$(date +%s)
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
-        -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
         -e PROMPT \
         -e BRANCH \
@@ -256,14 +280,35 @@ Instructions:
         ' > "${WORKER_LOG_DIR}/issue-${issue_num}.log" 2>&1
 
     local exit_code=$?
+    local duration
+    duration=$(( $(date +%s) - start_time ))
+
     if [[ $exit_code -eq 0 ]]; then
         # Success: remove in-progress (PR's "Closes #N" handles the rest)
         worker_transition_label "$repo" "$issue_num" "in-progress" ""
         echo "[#${issue_num}] DONE: $title"
+
+        # Look up the PR opened by the worker
+        local pr_num pr_url
+        pr_num=$(gh pr list --repo "$repo" --head "$branch" --json number -q '.[0].number' 2>/dev/null || true)
+        pr_url=$(gh pr list --repo "$repo" --head "$branch" --json url -q '.[0].url' 2>/dev/null || true)
+
+        # Hook: worker completed
+        export SIPAG_EVENT="worker.completed"
+        export SIPAG_PR_NUM="${pr_num:-}"
+        export SIPAG_PR_URL="${pr_url:-}"
+        export SIPAG_DURATION="$duration"
+        sipag_run_hook "on-worker-completed"
     else
         # Failure: move back to approved for retry (draft PR stays open showing progress)
         worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
         echo "[#${issue_num}] FAILED (exit ${exit_code}): $title — returned to ${WORKER_WORK_LABEL}"
+
+        # Hook: worker failed
+        export SIPAG_EVENT="worker.failed"
+        export SIPAG_EXIT_CODE="$exit_code"
+        export SIPAG_LOG_PATH="${WORKER_LOG_DIR}/issue-${issue_num}.log"
+        sipag_run_hook "on-worker-failed"
     fi
 }
 
@@ -316,9 +361,18 @@ Instructions:
 - Commit with a message that references the feedback
 - Push to the same branch (git push origin ${branch_name})"
 
+    # Hook: PR iteration started
+    export SIPAG_EVENT="pr-iteration.started"
+    export SIPAG_REPO="$repo"
+    export SIPAG_PR_NUM="$pr_num"
+    export SIPAG_ISSUE="${issue_num:-}"
+    export SIPAG_ISSUE_TITLE="$title"
+    sipag_run_hook "on-pr-iteration-started"
+
     PROMPT="$prompt" BRANCH="$branch_name" \
         ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
-        -e CLAUDE_CODE_OAUTH_TOKEN="$WORKER_OAUTH_TOKEN" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
         -e GH_TOKEN="$WORKER_GH_TOKEN" \
         -e PROMPT \
         -e BRANCH \
@@ -334,6 +388,12 @@ Instructions:
 
     local exit_code=$?
     worker_pr_mark_done "$pr_num"
+
+    # Hook: PR iteration done
+    export SIPAG_EVENT="pr-iteration.done"
+    export SIPAG_EXIT_CODE="$exit_code"
+    sipag_run_hook "on-pr-iteration-done"
+
     if [[ $exit_code -eq 0 ]]; then
         echo "[PR #${pr_num}] DONE iterating: $title"
     else

@@ -16,7 +16,7 @@ LOG_DIR="/tmp/sipag-backlog"
 
 # Load config
 BATCH_SIZE=4
-IMAGE="sipag-worker:latest"
+IMAGE="ghcr.io/dorky-robot/sipag-worker:latest"
 TIMEOUT=1800
 POLL_INTERVAL=120  # seconds between polls
 

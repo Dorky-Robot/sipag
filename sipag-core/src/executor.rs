@@ -5,6 +5,71 @@ use std::process::{Command, Stdio};
 
 use crate::task::{append_ended, slugify, write_tracking_file};
 
+/// Check that Docker daemon is running and accessible.
+fn preflight_docker_running() -> Result<()> {
+    let status = Command::new("docker")
+        .args(["info"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => anyhow::bail!(
+            "Error: Docker is not running.\n\n  To fix:\n\n    Open Docker Desktop    (macOS)\n    systemctl start docker (Linux)"
+        ),
+    }
+}
+
+/// Check that the required Docker image exists.
+fn preflight_docker_image(image: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["image", "inspect", image])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => anyhow::bail!(
+            "Error: Docker image '{}' not found.\n\n  To fix, run:\n\n    sipag setup\n\n  Or build manually:\n\n    docker build -t {} .",
+            image,
+            image
+        ),
+    }
+}
+
+/// Check that Claude authentication is available.
+/// Checks CLAUDE_CODE_OAUTH_TOKEN env, then ~/.sipag/token (OAuth), then ANTHROPIC_API_KEY.
+fn preflight_auth(sipag_dir: &Path) -> Result<()> {
+    // Check CLAUDE_CODE_OAUTH_TOKEN env var
+    if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        if !token.is_empty() {
+            return Ok(());
+        }
+    }
+    // Check ~/.sipag/token (primary OAuth method)
+    let token_file = sipag_dir.join("token");
+    if token_file.exists() {
+        if let Ok(contents) = fs::read_to_string(&token_file) {
+            if !contents.trim().is_empty() {
+                return Ok(());
+            }
+        }
+    }
+    // Check ANTHROPIC_API_KEY as fallback
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            eprintln!("Note: Using ANTHROPIC_API_KEY. For OAuth instead, run:");
+            eprintln!("  claude setup-token");
+            eprintln!("  cp ~/.claude/token {}/token", sipag_dir.display());
+            return Ok(());
+        }
+    }
+    anyhow::bail!(
+        "Error: No Claude authentication found.\n\n  To fix, run these two commands:\n\n    claude setup-token\n    cp ~/.claude/token {}/token\n\n  The first command opens your browser to authenticate with Anthropic.\n  The second copies the token to where sipag workers can use it.\n\n  Alternative: export ANTHROPIC_API_KEY=sk-ant-... (if you have an API key)",
+        sipag_dir.display()
+    )
+}
+
 /// Build the Claude prompt for a task.
 pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
     let mut prompt = format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
@@ -55,6 +120,12 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         image,
         timeout_secs,
     } = cfg;
+
+    // Preflight checks: fail early with clear messages before touching any state.
+    preflight_auth(sipag_dir)?;
+    preflight_docker_running()?;
+    preflight_docker_image(image)?;
+
     let running_dir = sipag_dir.join("running");
     let done_dir = sipag_dir.join("done");
     let failed_dir = sipag_dir.join("failed");
