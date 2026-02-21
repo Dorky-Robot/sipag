@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 set -euo pipefail
 git clone "https://github.com/${REPO}.git" /work && cd /work
 git config user.name "sipag"

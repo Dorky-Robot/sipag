@@ -328,6 +328,37 @@ fn repo_list_empty() {
         .stdout(predicate::str::contains("No repos registered"));
 }
 
+// ── Doctor ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn doctor_outputs_section_headers() {
+    let dir = temp_sipag_dir();
+    // Create a token file so the OAuth check passes
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("=== sipag doctor ==="))
+        .stdout(predicate::str::contains("Core tools:"))
+        .stdout(predicate::str::contains("Authentication:"))
+        .stdout(predicate::str::contains("Docker:"))
+        .stdout(predicate::str::contains("sipag:"));
+}
+
+#[test]
+fn doctor_shows_ok_for_queue_dirs() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("OK  Queue directories exist"));
+}
+
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
 #[test]

@@ -210,7 +210,7 @@ BASH_ALLOW_PATTERNS=(
 	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|format|clippy)'
 	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false)( |$)'
 	'^mkdir '
-	'^(cp|mv) '
+	'^(cp|mv|rm) '
 	'^(npm|yarn|pnpm) install'
 	'^pip install'
 	'^chmod [0-7]{3} '

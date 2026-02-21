@@ -13,7 +13,9 @@
 # worker_load_config + worker_init first, or use cmd_refresh_docs in bin/sipag
 # which does this automatically.
 
-# shellcheck disable=SC2154  # WORKER_* globals set by lib/worker/config.sh
+# Resolve lib dir so we can find prompt templates regardless of how we were sourced.
+_SIPAG_WORKER_LIB="${_SIPAG_WORKER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
 
 # Check whether ARCHITECTURE.md is stale relative to the last merged PR.
 # A file is considered stale when it has never been committed (missing), or when

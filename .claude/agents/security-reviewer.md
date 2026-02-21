@@ -28,7 +28,7 @@ Apply each STRIDE category to what you find:
 
 ### Tampering
 - Can issue title or body content alter git commands, branch names, or PR bodies in unintended ways?
-- Check `worker_slugify` in `lib/worker.sh`: does it fully sanitize branch names before passing to `git checkout -b`?
+- Check `slugify` in `sipag-core/src/task/naming.rs`: does it fully sanitize branch names before passing to `git checkout -b`?
 - Are task files in `~/.sipag/queue/` writable by untrusted processes?
 
 ### Repudiation
@@ -55,10 +55,9 @@ Apply each STRIDE category to what you find:
 ## OWASP Checks
 
 ### Command Injection
-- **Critical**: `worker_run_issue` in `lib/worker.sh` embeds `$title` and `$body` from GitHub issues directly into a shell heredoc passed to `docker run bash -c`. Check whether any of these can escape the string context and inject shell commands.
-- Verify the inner `bash -c '...'` in `docker run` does not allow `$PROMPT` or `$BRANCH` to break out of single quotes.
+- **Critical**: `sipag-core/src/worker/dispatch.rs` passes issue content as Docker environment variables (`PROMPT`, `BRANCH`). Verify `$PROMPT` and `$BRANCH` cannot break out of the container script's single-quoted context.
 - In `sipag-core/src/executor.rs`, check that `repo_url`, `description`, and `prompt` are passed as discrete `cmd.arg()` calls (not interpolated into a shell string).
-- Check `worker_slugify`: does `sed 's/[^a-z0-9]/-/g'` fully prevent branch names like `../../evil` or names containing shell metacharacters?
+- Check `slugify` in `sipag-core/src/task/naming.rs`: does it fully prevent branch names like `../../evil` or names containing shell metacharacters?
 
 ### Path Traversal
 - `~/.sipag/seen`, `~/.sipag/token`, and task files in `queue/`/`running/`/`done/`/`failed/`: can an attacker-controlled issue number or task ID create files outside these directories?

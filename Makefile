@@ -11,9 +11,9 @@ install:
 	cargo install --path sipag
 	cargo install --path tui
 	@# Bash scripts — kept in share/ for Docker containers (setup, doctor, etc.)
-	@mkdir -p "$(SHARE_DIR)/lib/worker" "$(SHARE_DIR)/lib/prompts"
+	@mkdir -p "$(SHARE_DIR)/lib/prompts" "$(SHARE_DIR)/lib/container"
 	@install -m 644 lib/*.sh "$(SHARE_DIR)/lib/"
-	@install -m 644 lib/worker/*.sh "$(SHARE_DIR)/lib/worker/"
+	@install -m 644 lib/container/*.sh "$(SHARE_DIR)/lib/container/"
 	@install -m 644 lib/prompts/*.md "$(SHARE_DIR)/lib/prompts/"
 	@echo ""
 	@echo "sipag installed. Try: sipag status"

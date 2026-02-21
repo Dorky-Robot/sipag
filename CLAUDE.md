@@ -29,19 +29,23 @@ Key modules in `sipag-core/`:
 - `config` — environment-based config (`SIPAG_DIR`, `SIPAG_IMAGE`, etc.)
 - `init` — creates `~/.sipag/{queue,running,done,failed}`
 
-### Bash scripts
+### Bash scripts (shell-out only)
 
 ```
-bin/sipag          # Bash CLI entry point: work, next, list, add commands
-lib/run.sh         # claude invocation helper (respects SIPAG_* env vars)
-lib/task.sh        # Markdown checklist parser: parse_next, mark_done, list, add
-lib/worker.sh      # Docker worker polling loop for `sipag work`
-lib/notify.sh      # Notification helpers
+lib/setup.sh           # Interactive setup wizard (called by `sipag setup`)
+lib/start.sh           # Agile session primer (called by `sipag start`)
+lib/merge.sh           # PR merge session (called by `sipag merge`)
+lib/refresh-docs.sh    # ARCHITECTURE.md/VISION.md refresh (called by `sipag refresh-docs`)
+lib/container/*.sh     # Container entrypoint scripts (embedded in Rust via include_str!)
+lib/prompts/*.md       # Prompt templates
 ```
+
+Note: `sipag doctor` was ported to native Rust. The worker loop (`sipag work`) is
+fully implemented in Rust (`sipag-core/src/worker/`).
 
 ### Prompt injected into each worker container
 
-`lib/worker.sh:worker_run_issue()` builds the prompt that every container receives. It includes:
+`sipag-core/src/prompt.rs:build_prompt()` builds the prompt that every container receives. It includes:
 - The GitHub issue title and body
 - Standard instructions: branch, implement, test, commit, draft PR, mark ready
 
@@ -68,14 +72,10 @@ sipag tui                     Launch interactive TUI (also: run sipag with no ar
 sipag version                 Print version
 ```
 
-### Bash CLI (bin/sipag — used inside containers and for issue polling)
+### Legacy Bash CLI (removed)
 
-```
-sipag work <owner/repo>      Poll GitHub for approved issues, spin up Docker workers
-sipag next [-c] [-n] [-f]    Run next task from a markdown checklist
-sipag list [-f path]          Print all tasks with status
-sipag add "task" [-f path]    Append task to checklist
-```
+The bash CLI (`bin/sipag`) has been removed. All commands are now handled by the
+Rust binary. The `sipag work` command is fully implemented in Rust.
 
 ## Conventions
 
@@ -150,9 +150,9 @@ For interactive sessions: open a terminal, run `sipag`, and use the TUI to inspe
 
 ### What changes most
 
-- `lib/worker.sh` — the worker loop and per-issue prompt construction
+- `sipag-core/src/worker/` — the worker loop, dispatch, recovery, and state
 - `sipag-core/src/executor.rs` — Docker executor logic
-- `sipag-core/src/task.rs` — task file format
+- `sipag-core/src/task/` — task file format and state machine
 
 ### Docker image
 

@@ -217,7 +217,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
-        Some(Commands::Doctor) => cmd_shell_script("doctor", &[]),
+        Some(Commands::Doctor) => cmd_doctor(),
         Some(Commands::Start { repo }) => {
             let args = repo
                 .as_deref()
@@ -356,8 +356,212 @@ fn cmd_resume() -> Result<()> {
     Ok(())
 }
 
+fn cmd_doctor() -> Result<()> {
+    let dir = sipag_dir();
+    let mut errors = 0u32;
+    let mut warnings = 0u32;
+
+    let ok = |msg: &str| println!("  OK  {msg}");
+    let mut err = |msg: &str| {
+        println!("  ERR {msg}");
+        errors += 1;
+    };
+    let mut warn = |msg: &str| {
+        println!(" WARN {msg}");
+        warnings += 1;
+    };
+    let info = |msg: &str| println!("  --  {msg}");
+
+    println!();
+    println!("=== sipag doctor ===");
+    println!();
+
+    // --- Core tools ---
+    println!("Core tools:");
+
+    for (cmd, name, install_hint, required) in [
+        ("gh", "gh CLI", "brew install gh", true),
+        ("claude", "claude CLI", "https://claude.ai/code", true),
+        ("docker", "docker", "brew install --cask docker", true),
+        ("jq", "jq", "brew install jq", false),
+    ] {
+        match std::process::Command::new(cmd).arg("--version").output() {
+            Ok(o) if o.status.success() => {
+                let ver = String::from_utf8_lossy(&o.stdout);
+                let short = ver.lines().next().unwrap_or("").trim();
+                ok(&format!("{name} ({short})"));
+            }
+            _ => {
+                if required {
+                    err(&format!("{name} not found"));
+                    println!("\n      To fix: {install_hint}\n");
+                } else {
+                    warn(&format!("{name} not found (optional)"));
+                    println!("\n      To fix: {install_hint}\n");
+                }
+            }
+        }
+    }
+
+    // --- Authentication ---
+    println!();
+    println!("Authentication:");
+
+    let gh_auth = std::process::Command::new("gh")
+        .args(["auth", "status"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if gh_auth.map(|s| s.success()).unwrap_or(false) {
+        ok("GitHub authenticated (gh auth status)");
+    } else {
+        err("GitHub not authenticated");
+        println!("\n      To fix, run:  gh auth login\n");
+    }
+
+    let token_file = dir.join("token");
+    if token_file.exists()
+        && std::fs::metadata(&token_file)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
+        ok("Claude OAuth token (~/.sipag/token)");
+    } else {
+        err("Claude OAuth token missing (~/.sipag/token)");
+        println!();
+        println!("      To fix, run these two commands:");
+        println!();
+        println!("        claude setup-token");
+        println!("        cp ~/.claude/token ~/.sipag/token");
+        println!();
+        println!("      Alternative: export ANTHROPIC_API_KEY=sk-ant-... (if you have an API key)");
+        println!();
+    }
+
+    if std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
+        info("ANTHROPIC_API_KEY set (optional — OAuth token is sufficient)");
+    } else {
+        info("ANTHROPIC_API_KEY not set (optional — OAuth token is sufficient)");
+    }
+
+    // --- Docker ---
+    println!();
+    println!("Docker:");
+
+    let docker_present = std::process::Command::new("docker")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if docker_present {
+        let daemon_ok = std::process::Command::new("docker")
+            .arg("info")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if daemon_ok {
+            ok("Docker daemon running");
+        } else {
+            err("Docker daemon not running");
+            println!(
+                "\n      To fix: Open Docker Desktop (macOS) / systemctl start docker (Linux)\n"
+            );
+        }
+
+        let image = std::env::var("SIPAG_IMAGE")
+            .unwrap_or_else(|_| sipag_core::config::DEFAULT_IMAGE.to_string());
+        let image_ok = std::process::Command::new("docker")
+            .args(["image", "inspect", &image])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if image_ok {
+            ok(&format!("{image} image exists"));
+        } else {
+            err(&format!("{image} image not found"));
+            println!("\n      To fix, run:  sipag setup\n");
+        }
+    } else {
+        info("Docker checks skipped (docker not installed)");
+    }
+
+    // --- sipag ---
+    println!();
+    println!("sipag:");
+
+    if dir.exists() {
+        ok(&format!("{} directory exists", dir.display()));
+    } else {
+        err(&format!("{} directory missing", dir.display()));
+        println!("\n      To fix, run:  sipag setup\n");
+    }
+
+    let missing_dirs: Vec<&str> = ["queue", "running", "done", "failed"]
+        .iter()
+        .filter(|d| !dir.join(d).exists())
+        .copied()
+        .collect();
+    if missing_dirs.is_empty() {
+        ok("Queue directories exist");
+    } else {
+        err(&format!(
+            "Queue directories missing: {}",
+            missing_dirs.join(", ")
+        ));
+        println!("\n      To fix, run:  sipag setup\n");
+    }
+
+    if let Some(home) = dirs_home() {
+        let settings = home.join(".claude").join("settings.json");
+        let settings_content = std::fs::read_to_string(&settings).unwrap_or_default();
+        let required_perms = ["Bash(gh issue *)", "Bash(gh pr *)", "Bash(gh label *)"];
+        let missing_perms: Vec<&&str> = required_perms
+            .iter()
+            .filter(|p| !settings_content.contains(*p))
+            .collect();
+        if missing_perms.is_empty() {
+            ok("Claude Code permissions configured");
+        } else {
+            err("Claude Code permissions missing");
+            println!("\n      Missing permissions:");
+            for p in &missing_perms {
+                println!("        {p}");
+            }
+            println!("      To fix, run:  sipag setup\n");
+        }
+    }
+
+    // --- Summary ---
+    println!();
+    if errors == 0 && warnings == 0 {
+        println!("All checks passed. Ready to go.");
+    } else if errors == 0 {
+        println!("{warnings} warning(s). Run 'sipag setup' to fix most issues.");
+    } else {
+        let mut summary = format!("{errors} error(s)");
+        if warnings > 0 {
+            summary += &format!(", {warnings} warning(s)");
+        }
+        println!("{summary}. Run 'sipag setup' to fix most issues.");
+    }
+
+    if errors > 0 {
+        bail!("doctor found {errors} error(s)");
+    }
+    Ok(())
+}
+
 /// Run a bash script from the sipag lib/ installation (for commands that still
-/// shell out: setup, doctor, start, merge, refresh-docs).
+/// shell out: setup, start, merge, refresh-docs).
 ///
 /// Resolution order for the lib/ directory:
 ///   1. `SIPAG_ROOT` environment variable → `$SIPAG_ROOT/lib/`
@@ -369,7 +573,6 @@ fn cmd_shell_script(script_name: &str, args: &[String]) -> Result<()> {
     // Map logical names to (file, entry-function).
     let (script_file, func_name) = match script_name {
         "setup" => ("setup.sh", "setup_run"),
-        "doctor" => ("doctor.sh", "doctor_run"),
         "start" => ("start.sh", "start_run_wrapper"),
         "merge" => ("merge.sh", "merge_run"),
         "refresh-docs" => ("refresh-docs.sh", "refresh_docs_run"),
