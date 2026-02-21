@@ -457,6 +457,50 @@ mod tests {
     }
 
     #[test]
+    fn enqueued_worker_finalized_as_failed() {
+        // An enqueued worker has no container (it was never started).
+        // Recovery should finalize it as failed so it gets re-dispatched.
+        let store = MockStore::new(vec![make_worker(42, WorkerStatus::Enqueued)]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0],
+            RecoveryOutcome::Finalized {
+                issue_num: 42,
+                status: WorkerStatus::Failed,
+            }
+        );
+        assert_eq!(store.get_status(42), Some(WorkerStatus::Failed));
+    }
+
+    #[test]
+    fn enqueued_worker_restores_work_label() {
+        // Recovery of an enqueued worker should restore the approved label
+        // (removing in-progress if it was set before the crash).
+        let store = MockStore::new(vec![make_worker(42, WorkerStatus::Enqueued)]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new();
+
+        recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+
+        let calls = github.label_calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            LabelCall {
+                repo: "test/repo".to_string(),
+                issue: 42,
+                remove: Some("in-progress".to_string()),
+                add: Some("approved".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn empty_store_returns_no_outcomes() {
         let store = MockStore::new(vec![]);
         let containers = MockContainers { running: vec![] };

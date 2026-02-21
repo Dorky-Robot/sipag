@@ -99,6 +99,42 @@ EOF
   [[ "$WORKER_POLL_INTERVAL" == "60" ]]
 }
 
+# --- doc_refresh_interval ---
+
+@test "default WORKER_DOC_REFRESH_INTERVAL is 10" {
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "10" ]]
+}
+
+@test "SIPAG_DOC_REFRESH_INTERVAL env var sets initial doc_refresh_interval" {
+  SIPAG_DOC_REFRESH_INTERVAL=5 source "${SIPAG_ROOT}/lib/worker.sh"
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "5" ]]
+}
+
+@test "worker_load_config reads doc_refresh_interval from config file" {
+  echo "doc_refresh_interval=20" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "20" ]]
+}
+
+@test "worker_load_config: doc_refresh_interval=0 disables auto refresh" {
+  echo "doc_refresh_interval=0" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "0" ]]
+}
+
+@test "worker_load_config reads all config keys including doc_refresh_interval" {
+  cat > "${SIPAG_DIR}/config" <<'EOF'
+batch_size=3
+image=my-image:v2
+timeout=3600
+poll_interval=60
+work_label=triaged
+doc_refresh_interval=15
+EOF
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "15" ]]
+}
+
 @test "worker_load_config ignores comment lines" {
   cat > "${SIPAG_DIR}/config" <<'EOF'
 # This is a comment
@@ -165,6 +201,53 @@ EOF
   run worker_pr_is_running 1
   [[ "$status" -ne 0 ]]
   run worker_pr_is_running 2
+  [[ "$status" -eq 0 ]]
+}
+
+# --- PR conflict-fix state tracking ---
+
+@test "worker_conflict_fix_is_running returns false when not running" {
+  run worker_conflict_fix_is_running 42
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_conflict_fix_mark_running creates the marker file" {
+  worker_conflict_fix_mark_running 42
+  [[ -f "${WORKER_LOG_DIR}/pr-42-conflict-fix-running" ]]
+}
+
+@test "worker_conflict_fix_is_running returns true after marking running" {
+  worker_conflict_fix_mark_running 99
+  run worker_conflict_fix_is_running 99
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_conflict_fix_mark_done removes the marker file" {
+  worker_conflict_fix_mark_running 7
+  worker_conflict_fix_mark_done 7
+  [[ ! -f "${WORKER_LOG_DIR}/pr-7-conflict-fix-running" ]]
+}
+
+@test "worker_conflict_fix_mark_done is idempotent when file does not exist" {
+  run worker_conflict_fix_mark_done 999
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_conflict_fix tracking is independent from pr iteration tracking" {
+  worker_pr_mark_running 5
+  run worker_conflict_fix_is_running 5
+  [[ "$status" -ne 0 ]]
+
+  worker_conflict_fix_mark_running 5
+  run worker_pr_is_running 5
+  [[ "$status" -eq 0 ]]
+  run worker_conflict_fix_is_running 5
+  [[ "$status" -eq 0 ]]
+
+  worker_pr_mark_done 5
+  run worker_pr_is_running 5
+  [[ "$status" -ne 0 ]]
+  run worker_conflict_fix_is_running 5
   [[ "$status" -eq 0 ]]
 }
 
@@ -298,6 +381,89 @@ PR_ITER_JQ='
     "comments":[]}]'
   result=$(echo "$json" | jq -r "$PR_ITER_JQ")
   [[ -z "$result" ]]
+}
+
+# --- worker_find_conflicted_prs ---
+
+@test "worker_find_conflicted_prs returns PR numbers with CONFLICTING status" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '5\n12\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == "5
+12" ]]
+}
+
+@test "worker_find_conflicted_prs returns empty when no conflicted PRs" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf ''
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ -z "$output" ]]
+}
+
+@test "worker_find_conflicted_prs sorts output numerically" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '20\n3\n11\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$output" == "3
+11
+20" ]]
+}
+
+# --- worker_find_conflicted_prs: jq filter logic ---
+# Runs the jq filter against synthetic data to verify CONFLICTING detection.
+
+CONFLICTED_JQ='.[] | select(
+    (.headRefName | startswith("sipag/issue-")) and
+    .mergeable == "CONFLICTING"
+) | .number'
+
+@test "jq filter: CONFLICTING PR on sipag branch is returned" {
+  local json='[{"number":10,"headRefName":"sipag/issue-10-foo","mergeable":"CONFLICTING"}]'
+  result=$(echo "$json" | jq -r "$CONFLICTED_JQ")
+  [[ "$result" == "10" ]]
+}
+
+@test "jq filter: MERGEABLE PR is not returned" {
+  local json='[{"number":11,"headRefName":"sipag/issue-11-bar","mergeable":"MERGEABLE"}]'
+  result=$(echo "$json" | jq -r "$CONFLICTED_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: UNKNOWN mergeability is not returned" {
+  local json='[{"number":12,"headRefName":"sipag/issue-12-baz","mergeable":"UNKNOWN"}]'
+  result=$(echo "$json" | jq -r "$CONFLICTED_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: CONFLICTING PR on non-sipag branch is not returned" {
+  local json='[{"number":13,"headRefName":"feature/manual-branch","mergeable":"CONFLICTING"}]'
+  result=$(echo "$json" | jq -r "$CONFLICTED_JQ")
+  [[ -z "$result" ]]
+}
+
+@test "jq filter: only CONFLICTING sipag PRs returned from mixed list" {
+  local json='[
+    {"number":20,"headRefName":"sipag/issue-20-a","mergeable":"CONFLICTING"},
+    {"number":21,"headRefName":"sipag/issue-21-b","mergeable":"MERGEABLE"},
+    {"number":22,"headRefName":"sipag/issue-22-c","mergeable":"UNKNOWN"},
+    {"number":23,"headRefName":"feature/manual","mergeable":"CONFLICTING"}
+  ]'
+  result=$(echo "$json" | jq -r "$CONFLICTED_JQ")
+  [[ "$result" == "20" ]]
 }
 
 # --- worker_slugify ---

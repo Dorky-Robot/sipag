@@ -123,12 +123,10 @@ pub fn render_list(f: &mut Frame, app: &App) {
     ];
 
     if app.tasks.is_empty() {
-        let empty = Paragraph::new(
-            "\nNo workers running.\n\nStart with:  sipag work <owner/repo>",
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::TOP));
+        let empty = Paragraph::new("\nNo workers running.\n\nStart with:  sipag work <owner/repo>")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::TOP));
         f.render_widget(empty, chunks[1]);
     } else {
         let mut table_state = TableState::default().with_selected(Some(app.selected));

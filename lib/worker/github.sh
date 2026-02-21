@@ -183,6 +183,21 @@ ${issue_body}
     done
 }
 
+# Find open sipag/issue-* PRs that have merge conflicts (mergeable == CONFLICTING).
+# Only returns PRs from sipag-managed branches. Excludes UNKNOWN mergeability
+# (GitHub hasn't computed it yet) to avoid false positives.
+#
+# $1: repo in OWNER/REPO format
+worker_find_conflicted_prs() {
+    local repo="$1"
+    gh pr list --repo "$repo" --state open \
+        --json number,headRefName,mergeable \
+        --jq '.[] | select(
+            (.headRefName | startswith("sipag/issue-")) and
+            .mergeable == "CONFLICTING"
+        ) | .number' 2>/dev/null | sort -n
+}
+
 # Check if an issue is currently open (not closed or merged).
 # Returns 0 (true) for open issues, 1 (false) for closed issues.
 # Used by worker_recover to skip label transitions on issues that have since been closed.
@@ -201,6 +216,9 @@ worker_transition_label() {
     local repo="$1" issue_num="$2" from_label="$3" to_label="$4"
     # Curly braces + || true prevent set -e from killing the worker when the
     # issue is closed, missing, or the label doesn't exist.
-    [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; }
-    [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; }
+    # The trailing `|| true` on each line ensures the function never returns
+    # non-zero — without it, `[[ -n "" ]] && ...` returns 1 as the last
+    # statement, which under set -e kills the caller.
+    [[ -n "$from_label" ]] && { gh issue edit "$issue_num" --repo "$repo" --remove-label "$from_label" 2>/dev/null || true; } || true
+    [[ -n "$to_label" ]]   && { gh issue edit "$issue_num" --repo "$repo" --add-label "$to_label" 2>/dev/null || true; } || true
 }

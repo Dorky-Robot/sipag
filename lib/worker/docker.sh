@@ -12,6 +12,40 @@
 
 # shellcheck disable=SC2154  # Globals defined in config.sh, sourced by worker.sh
 
+# Write minimal "enqueued" worker state JSON to ~/.sipag/workers/ before
+# the container starts. This guarantees the issue is never silently dropped
+# if the process crashes between issue discovery and container launch.
+# $1: repo slug (OWNER--REPO), $2: issue_num
+_worker_write_enqueued_state() {
+    local repo_slug="$1" issue_num="$2"
+    local state_file="${SIPAG_DIR}/workers/${repo_slug}--${issue_num}.json"
+    local container_name="sipag-issue-${issue_num}"
+    local now
+    now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    mkdir -p "${SIPAG_DIR}/workers"
+    # shellcheck disable=SC2016  # jq variables are not shell variables
+    jq -n \
+        --arg repo "${repo_slug/--//}" \
+        --argjson issue_num "$issue_num" \
+        --arg container_name "$container_name" \
+        --arg started_at "$now" \
+        '{
+            repo: $repo,
+            issue_num: $issue_num,
+            issue_title: "",
+            branch: "",
+            container_name: $container_name,
+            pr_num: null,
+            pr_url: null,
+            status: "enqueued",
+            started_at: $started_at,
+            ended_at: null,
+            duration_s: null,
+            exit_code: null,
+            log_path: null
+        }' > "$state_file"
+}
+
 # Write initial worker state JSON to ~/.sipag/workers/
 # $1: repo slug (OWNER--REPO), $2: issue_num, $3: issue_title,
 # $4: branch, $5: container_name, $6: started_at, $7: log_path
@@ -123,8 +157,9 @@ worker_recover() {
 
         local status
         status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
-        # Handle both "running" (normal) and "recovering" (stale from old code)
-        [[ "$status" == "running" || "$status" == "recovering" ]] || continue
+        # Handle "running" (normal), "recovering" (stale from old code), and
+        # "enqueued" (identified but container never started due to crash)
+        [[ "$status" == "running" || "$status" == "recovering" || "$status" == "enqueued" ]] || continue
 
         local repo issue_num branch container_name
         repo=$(jq -r '.repo' "$state_file")
@@ -133,6 +168,22 @@ worker_recover() {
         container_name=$(jq -r '.container_name' "$state_file")
 
         local repo_slug="${repo//\//--}"
+
+        # Enqueued workers have no container; the process crashed before the
+        # container could start. Restore the work label and mark as failed so
+        # the next poll cycle re-dispatches the issue.
+        if [[ "$status" == "enqueued" ]]; then
+            echo "[$(date +%H:%M:%S)] Recovery: #${issue_num} was enqueued but container never started — returning to ${WORKER_WORK_LABEL}"
+            worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+            local tmp_enq now_enq
+            now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            tmp_enq=$(mktemp)
+            jq --arg status "failed" --arg ended_at "$now_enq" \
+               '.status = $status | .ended_at = $ended_at' \
+               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+            finalized=$(( finalized + 1 ))
+            continue
+        fi
 
         if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
                 | grep -q "^${container_name}$"; then
@@ -174,7 +225,7 @@ worker_finalize_exited() {
 
         local status
         status=$(jq -r '.status' "$state_file" 2>/dev/null || true)
-        [[ "$status" == "running" || "$status" == "recovering" ]] || continue
+        [[ "$status" == "running" || "$status" == "recovering" || "$status" == "enqueued" ]] || continue
 
         local repo issue_num branch container_name
         repo=$(jq -r '.repo' "$state_file")
@@ -183,6 +234,21 @@ worker_finalize_exited() {
         container_name=$(jq -r '.container_name' "$state_file")
 
         local repo_slug="${repo//\//--}"
+
+        # Enqueued workers have no container (written before docker run was called).
+        # If still enqueued at finalization time, the worker subprocess died before
+        # transitioning to "running". Restore the work label and mark as failed.
+        if [[ "$status" == "enqueued" ]]; then
+            echo "[$(date +%H:%M:%S)] Enqueued worker #${issue_num} — container never started, returning to ${WORKER_WORK_LABEL}"
+            worker_transition_label "$repo" "$issue_num" "in-progress" "$WORKER_WORK_LABEL"
+            local tmp_enq now_enq
+            now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+            tmp_enq=$(mktemp)
+            jq --arg status "failed" --arg ended_at "$now_enq" \
+               '.status = $status | .ended_at = $ended_at' \
+               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+            continue
+        fi
 
         # Container still alive → skip, it's still working
         if docker ps --filter "name=^${container_name}$" --format '{{.Names}}' 2>/dev/null \
@@ -201,6 +267,11 @@ worker_run_issue() {
     local repo="$1"
     local issue_num="$2"
     local title body branch slug pr_body prompt task_id start_time
+
+    # Record the issue as enqueued immediately — before the label transition —
+    # so that a crash between discovery and container start leaves a recoverable
+    # state file instead of silently dropping the issue.
+    _worker_write_enqueued_state "$WORKER_REPO_SLUG" "$issue_num"
 
     # Mark as in-progress so the spec is locked from edits
     worker_transition_label "$repo" "$issue_num" "$WORKER_WORK_LABEL" "in-progress"
@@ -466,5 +537,83 @@ worker_run_pr_iteration() {
         echo "[PR #${pr_num}] DONE iterating: $title"
     else
         echo "[PR #${pr_num}] FAILED iteration (exit ${exit_code}): $title"
+    fi
+}
+
+# Fix a PR with merge conflicts by merging main forward into the branch.
+# If the merge is clean (no conflicts), pushes the merge commit automatically.
+# If there are conflicts, runs Claude to resolve them.
+#
+# Always merges forward — never rebases, never force-pushes.
+#
+# $1: repo in OWNER/REPO format
+# $2: pr_num — the conflicted PR to fix
+worker_run_conflict_fix() {
+    local repo="$1"
+    local pr_num="$2"
+    local title branch_name pr_body prompt
+
+    worker_conflict_fix_mark_running "$pr_num"
+
+    title=$(gh pr view "$pr_num" --repo "$repo" --json title -q '.title' 2>/dev/null)
+    branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
+
+    echo "[PR #${pr_num}] Merging main forward: $title (branch: $branch_name)"
+
+    pr_body=$(gh pr view "$pr_num" --repo "$repo" --json body -q '.body' 2>/dev/null || true)
+
+    # Load prompt from template and substitute placeholders
+    local _tpl_pr_num='{{PR_NUM}}' _tpl_pr_title='{{PR_TITLE}}'
+    local _tpl_branch='{{BRANCH}}' _tpl_pr_body='{{PR_BODY}}'
+    prompt=$(<"${_SIPAG_WORKER_LIB}/prompts/worker-conflict-fix.md")
+    prompt="${prompt//${_tpl_pr_num}/${pr_num}}"
+    prompt="${prompt//${_tpl_pr_title}/${title}}"
+    prompt="${prompt//${_tpl_branch}/${branch_name}}"
+    prompt="${prompt//${_tpl_pr_body}/${pr_body}}"
+
+    PROMPT="$prompt" BRANCH="$branch_name" \
+        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        --name "sipag-conflict-${pr_num}" \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
+        -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e PROMPT \
+        -e BRANCH \
+        "$WORKER_IMAGE" \
+        bash -c '
+            git clone "https://github.com/'"${repo}"'.git" /work && cd /work
+            git config user.name "sipag"
+            git config user.email "sipag@localhost"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
+            git checkout "$BRANCH"
+            git fetch origin main
+            if git merge origin/main --no-edit; then
+                # Clean merge — no conflicts, push the merge commit
+                git push origin "$BRANCH"
+                echo "[sipag] Merged main into $BRANCH (no conflicts)"
+                exit 0
+            fi
+            # Conflicts detected — run Claude to resolve them
+            echo "[sipag] Conflicts detected in $BRANCH, running Claude to resolve..."
+            tmux new-session -d -s claude \
+                "claude --dangerously-skip-permissions -p \"\$PROMPT\"; \
+                 echo \$? > /tmp/.claude-exit"
+            touch /tmp/claude.log
+            tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
+            tail -f /tmp/claude.log &
+            TAIL_PID=$!
+            while tmux has-session -t claude 2>/dev/null; do sleep 1; done
+            kill $TAIL_PID 2>/dev/null || true
+            wait $TAIL_PID 2>/dev/null || true
+            exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)"
+        ' > "${WORKER_LOG_DIR}/${WORKER_REPO_SLUG}--pr-${pr_num}-conflict-fix.log" 2>&1
+
+    local exit_code=$?
+    worker_conflict_fix_mark_done "$pr_num"
+
+    if [[ $exit_code -eq 0 ]]; then
+        echo "[PR #${pr_num}] Conflict fix done: $title"
+    else
+        echo "[PR #${pr_num}] Conflict fix FAILED (exit ${exit_code}): $title"
     fi
 }

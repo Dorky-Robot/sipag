@@ -73,11 +73,17 @@ pub fn run_container(
 ) -> bool {
     let log_out = match File::create(log_path) {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!("sipag: failed to create log file {}: {e}", log_path.display());
+            return false;
+        }
     };
     let log_err = match log_out.try_clone() {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(e) => {
+            eprintln!("sipag: failed to clone log file handle for {}: {e}", log_path.display());
+            return false;
+        }
     };
 
     let mut cmd = Command::new("timeout");

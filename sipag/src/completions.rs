@@ -31,7 +31,7 @@ _sipag() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     subcmd=""
 
-    local commands="start setup work drain resume merge status run ps logs kill add show retry repo init tui version completions help"
+    local commands="start setup work drain resume merge status triage run ps logs kill add show retry repo init tui version completions help"
 
     # Find the subcommand (first non-flag word after "sipag")
     for (( i=1; i < COMP_CWORD; i++ )); do
@@ -50,7 +50,7 @@ _sipag() {
             COMPREPLY=( $(compgen -W "add list" -- "$cur") )
             return 0
             ;;
-        work|start|merge)
+        work|start|merge|triage)
             COMPREPLY=( $(compgen -W "$(_sipag_repos)" -- "$cur") )
             return 0
             ;;
@@ -150,6 +150,7 @@ _sipag() {
                 'resume:Clear drain signal so workers continue polling'
                 'merge:Conversational PR merge session'
                 'status:Show worker state across all repos'
+                'triage:Review open issues against VISION.md'
                 'run:Launch a Docker sandbox for a task'
                 'ps:List running and recent tasks'
                 'logs:Print the log for a task'
@@ -183,6 +184,12 @@ _sipag() {
                     ;;
                 work|start|merge)
                     _sipag_repos
+                    ;;
+                triage)
+                    _arguments \
+                        '--dry-run[Print report only, no changes]' \
+                        '--apply[Apply without confirmation]' \
+                        ':repo:'
                     ;;
                 logs|kill|show|retry)
                     _sipag_tasks
@@ -241,7 +248,7 @@ function __sipag_tasks
 end
 
 # Top-level commands (shown when no subcommand has been given yet)
-set -l sipag_cmds start setup work drain resume merge status run ps logs kill add show retry repo init tui version completions help
+set -l sipag_cmds start setup work drain resume merge status triage run ps logs kill add show retry repo init tui version completions help
 
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a start       -d 'Prime a Claude Code session with board state'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a setup       -d 'Configure sipag and Claude Code permissions'
@@ -250,6 +257,7 @@ complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a drain     
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a resume      -d 'Clear drain signal so workers continue polling'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a merge       -d 'Conversational PR merge session'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a status      -d 'Show worker state across all repos'
+complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a triage      -d 'Review open issues against VISION.md'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a run         -d 'Launch a Docker sandbox for a task'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a ps          -d 'List running and recent tasks'
 complete -c sipag -n "not __fish_seen_subcommand_from $sipag_cmds" -a logs        -d 'Print the log for a task'
@@ -275,6 +283,11 @@ complete -c sipag -n '__fish_seen_subcommand_from repo' -a 'list' -d 'List regis
 
 # Dynamic repo name completion for work/start/merge
 complete -c sipag -n '__fish_seen_subcommand_from work start merge' -a '(__sipag_repos)'
+
+# triage flags
+complete -c sipag -n '__fish_seen_subcommand_from triage' -l dry-run -d 'Print report only, no changes'
+complete -c sipag -n '__fish_seen_subcommand_from triage' -l apply   -d 'Apply without confirmation'
+
 
 # run flags
 complete -c sipag -n '__fish_seen_subcommand_from run' -l repo       -d 'Repository URL'

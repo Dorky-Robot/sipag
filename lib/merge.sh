@@ -53,6 +53,24 @@ merge_run() {
         --json number,title,body,reviewDecision,additions,deletions,headRefName,mergeable,statusCheckRollup --limit 30
 
     echo ""
+    echo "## Conflicted Pull Requests"
+    local conflicted
+    conflicted=$(gh pr list --repo "$repo" --state open \
+        --json number,title,headRefName,mergeable \
+        --jq '[.[] | select(.mergeable == "CONFLICTING")]' 2>/dev/null || echo "[]")
+    local conflicted_count
+    conflicted_count=$(echo "$conflicted" | jq 'length' 2>/dev/null || echo "0")
+    if [[ "${conflicted_count}" -gt 0 ]]; then
+        echo "WARNING: ${conflicted_count} PR(s) have merge conflicts and cannot be merged directly:"
+        echo "$conflicted" | jq -r '.[] | "  PR #\(.number): \(.title) (\(.headRefName))"' 2>/dev/null
+        echo ""
+        echo "These PRs need main merged forward before they can be merged."
+        echo "Run \`sipag work ${repo}\` to have a worker fix them automatically (merge-forward, never rebase)."
+    else
+        echo "No conflicted PRs."
+    fi
+
+    echo ""
     echo "## Recent Commits on Main"
     gh api "repos/${repo}/commits?per_page=10" \
         --jq '.[] | {sha: .sha[0:7], message: (.commit.message | split("\n")[0]), date: .commit.author.date}' 2>/dev/null

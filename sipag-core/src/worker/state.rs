@@ -27,17 +27,45 @@ pub struct WorkerState {
 ///
 /// Unknown status strings default to `WorkerStatus::Failed` to surface
 /// issues rather than silently treating them as running.
+///
+/// Returns an error for critical missing fields (`repo`, `issue_num`).
+/// Logs a warning for non-critical missing fields.
 pub fn parse_worker_json(json: &str) -> anyhow::Result<WorkerState> {
     let v: serde_json::Value = serde_json::from_str(json)?;
     let status_str = v["status"].as_str().unwrap_or("");
     let status = WorkerStatus::parse(status_str).unwrap_or(WorkerStatus::Failed);
 
+    let repo = v["repo"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("worker state missing required field: repo"))?
+        .to_string();
+
+    let issue_num = v["issue_num"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("worker state missing required field: issue_num"))?;
+
+    let issue_title = v["issue_title"].as_str().unwrap_or("").to_string();
+    if issue_title.is_empty() {
+        eprintln!("sipag: worker state for {repo} missing field: issue_title");
+    }
+
+    let branch = v["branch"].as_str().unwrap_or("").to_string();
+    if branch.is_empty() {
+        eprintln!("sipag: worker state for {repo}#{issue_num} missing field: branch");
+    }
+
+    let container_name = v["container_name"].as_str().unwrap_or("").to_string();
+    if container_name.is_empty() {
+        eprintln!("sipag: worker state for {repo}#{issue_num} missing field: container_name");
+    }
+
     Ok(WorkerState {
-        repo: v["repo"].as_str().unwrap_or("").to_string(),
-        issue_num: v["issue_num"].as_u64().unwrap_or(0),
-        issue_title: v["issue_title"].as_str().unwrap_or("").to_string(),
-        branch: v["branch"].as_str().unwrap_or("").to_string(),
-        container_name: v["container_name"].as_str().unwrap_or("").to_string(),
+        repo,
+        issue_num,
+        issue_title,
+        branch,
+        container_name,
         pr_num: v["pr_num"].as_u64(),
         pr_url: v["pr_url"].as_str().map(|s| s.to_string()),
         status,
@@ -138,6 +166,58 @@ mod tests {
         let json = sample_json("bogus", None, None);
         let w = parse_worker_json(&json).unwrap();
         assert_eq!(w.status, WorkerStatus::Failed);
+    }
+
+    #[test]
+    fn parse_missing_repo_returns_error() {
+        let json = r#"{
+            "issue_num": 42,
+            "issue_title": "Fix the thing",
+            "branch": "sipag/issue-42",
+            "container_name": "sipag-issue-42",
+            "status": "running"
+        }"#;
+        let result = parse_worker_json(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing required field: repo"));
+    }
+
+    #[test]
+    fn parse_empty_repo_returns_error() {
+        let json = r#"{
+            "repo": "",
+            "issue_num": 42,
+            "issue_title": "Fix the thing",
+            "branch": "sipag/issue-42",
+            "container_name": "sipag-issue-42",
+            "status": "running"
+        }"#;
+        let result = parse_worker_json(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing required field: repo"));
+    }
+
+    #[test]
+    fn parse_missing_issue_num_returns_error() {
+        let json = r#"{
+            "repo": "Dorky-Robot/sipag",
+            "issue_title": "Fix the thing",
+            "branch": "sipag/issue-42",
+            "container_name": "sipag-issue-42",
+            "status": "running"
+        }"#;
+        let result = parse_worker_json(json);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing required field: issue_num"));
     }
 
     #[test]

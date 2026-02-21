@@ -30,3 +30,5 @@ source "${_SIPAG_WORKER_LIB}/worker/merge.sh"
 source "${_SIPAG_WORKER_LIB}/worker/docker.sh"
 # shellcheck source=worker/loop.sh
 source "${_SIPAG_WORKER_LIB}/worker/loop.sh"
+# shellcheck source=refresh-docs.sh
+source "${_SIPAG_WORKER_LIB}/refresh-docs.sh"
