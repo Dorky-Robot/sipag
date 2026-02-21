@@ -282,3 +282,55 @@ EOF
   run worker_has_open_pr "owner/repo" 5
   [[ "$status" -ne 0 ]]
 }
+
+# --- sipag_run_hook ---
+
+@test "sipag_run_hook: silently skips missing hook" {
+  run sipag_run_hook "on-nonexistent-hook"
+  [[ "$status" -eq 0 ]]
+}
+
+@test "sipag_run_hook: silently skips non-executable hook" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  echo "#!/usr/bin/env bash" > "${SIPAG_DIR}/hooks/on-worker-started"
+  # intentionally NOT chmod +x
+  run sipag_run_hook "on-worker-started"
+  [[ "$status" -eq 0 ]]
+}
+
+@test "sipag_run_hook: runs executable hook" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local marker="${TEST_TMPDIR}/hook-ran"
+  cat > "${SIPAG_DIR}/hooks/on-worker-completed" <<HOOK
+#!/usr/bin/env bash
+touch "${marker}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-worker-completed"
+  sipag_run_hook "on-worker-completed"
+  # wait for background hook (up to 2s)
+  local i=0
+  while [[ ! -f "$marker" && $i -lt 20 ]]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  [[ -f "$marker" ]]
+}
+
+@test "sipag_run_hook: hook inherits exported env vars" {
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local output_file="${TEST_TMPDIR}/hook-env"
+  cat > "${SIPAG_DIR}/hooks/on-worker-started" <<HOOK
+#!/usr/bin/env bash
+echo "\${SIPAG_EVENT}" > "${output_file}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-worker-started"
+  export SIPAG_EVENT="worker.started"
+  sipag_run_hook "on-worker-started"
+  # wait for background hook (up to 2s)
+  local i=0
+  while [[ ! -f "$output_file" && $i -lt 20 ]]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  grep -q "worker.started" "$output_file"
+}

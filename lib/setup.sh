@@ -173,7 +173,7 @@ _setup_dirs() {
 
 	mkdir -p "$sipag_dir"
 
-	for subdir in queue running done failed; do
+	for subdir in queue running done failed hooks; do
 		local dir="${sipag_dir}/${subdir}"
 		if [[ ! -d "$dir" ]]; then
 			mkdir -p "$dir"
