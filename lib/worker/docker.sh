@@ -39,22 +39,13 @@ ${body}
 ---
 *This PR was opened by a sipag worker. Commits will appear as work progresses.*"
 
-    prompt="You are working on the repository at /work.
-
-Your task:
-${title}
-
-${body}
-
-Instructions:
-- You are on branch ${branch} — do NOT create a new branch
-- A draft PR is already open for this branch — do not open another one
-- Implement the changes
-- Run \`make dev\` (fmt + clippy + test) before committing to validate your changes
-- Run any existing tests and make sure they pass
-- Commit your changes with a clear commit message and push to origin
-- The PR will be marked ready for review automatically when you finish
-- The PR should close issue #${issue_num}"
+    # Load prompt from template and substitute placeholders
+    local _tpl_title='{{TITLE}}' _tpl_body='{{BODY}}' _tpl_branch='{{BRANCH}}' _tpl_issue_num='{{ISSUE_NUM}}'
+    prompt=$(<"${_SIPAG_WORKER_LIB}/prompts/worker-issue.md")
+    prompt="${prompt//${_tpl_title}/${title}}"
+    prompt="${prompt//${_tpl_body}/${body}}"
+    prompt="${prompt//${_tpl_branch}/${branch}}"
+    prompt="${prompt//${_tpl_issue_num}/${issue_num}}"
 
     # Hook: worker started
     export SIPAG_EVENT="worker.started"
@@ -165,25 +156,17 @@ worker_run_pr_iteration() {
     # Capture current diff (capped to avoid overwhelming the prompt)
     pr_diff=$(gh pr diff "$pr_num" --repo "$repo" 2>/dev/null | head -c 50000 || true)
 
-    prompt="You are iterating on PR #${pr_num} in ${repo}.
-
-Original issue:
-${issue_body:-<not found>}
-
-Current PR diff:
-${pr_diff}
-
-Review feedback:
-${review_feedback}
-
-Instructions:
-- You are on branch ${branch_name} which already has work in progress
-- Read the review feedback carefully and address every point raised
-- Make targeted changes that address the feedback
-- Do NOT rewrite the PR from scratch — make surgical fixes
-- Run \`make dev\` (fmt + clippy + test) before committing to validate your changes
-- Commit with a message that references the feedback (do NOT amend existing commits)
-- Push to the same branch (git push origin ${branch_name}) — do NOT force push"
+    # Load prompt from template and substitute placeholders
+    local issue_body_display="${issue_body:-<not found>}"
+    local _tpl_pr_num='{{PR_NUM}}' _tpl_repo='{{REPO}}' _tpl_issue_body='{{ISSUE_BODY}}'
+    local _tpl_pr_diff='{{PR_DIFF}}' _tpl_review='{{REVIEW_FEEDBACK}}' _tpl_branch='{{BRANCH}}'
+    prompt=$(<"${_SIPAG_WORKER_LIB}/prompts/worker-iteration.md")
+    prompt="${prompt//${_tpl_pr_num}/${pr_num}}"
+    prompt="${prompt//${_tpl_repo}/${repo}}"
+    prompt="${prompt//${_tpl_issue_body}/${issue_body_display}}"
+    prompt="${prompt//${_tpl_pr_diff}/${pr_diff}}"
+    prompt="${prompt//${_tpl_review}/${review_feedback}}"
+    prompt="${prompt//${_tpl_branch}/${branch_name}}"
 
     # Hook: PR iteration started
     export SIPAG_EVENT="pr-iteration.started"
