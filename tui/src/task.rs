@@ -19,6 +19,8 @@ pub struct Task {
     pub status: Status,
     /// Absolute path to the `.md` file on disk (used to locate the companion `.log`).
     pub file_path: PathBuf,
+    /// Docker container name for running tasks (used for attach).
+    pub container: Option<String>,
 }
 
 impl From<TaskFile> for Task {
@@ -46,6 +48,7 @@ impl From<TaskFile> for Task {
             body: tf.body,
             status: tf.status,
             file_path: tf.file_path,
+            container: tf.container,
         }
     }
 }
@@ -118,7 +121,7 @@ mod tests {
             added: Some("2024-01-01T00:00:00Z".to_string()),
             started: None,
             ended: None,
-            container: None,
+            container: Some("sipag-container-123".to_string()),
             issue: None,
             title: "Fix the bug".to_string(),
             body: "Some description".to_string(),
@@ -132,6 +135,7 @@ mod tests {
         assert_eq!(task.priority, Some("high".to_string()));
         assert_eq!(task.body, "Some description");
         assert!(task.added.is_some());
+        assert_eq!(task.container, Some("sipag-container-123".to_string()));
     }
 
     #[test]
@@ -146,6 +150,7 @@ mod tests {
             body: String::new(),
             status: Status::Queue,
             file_path: std::path::PathBuf::new(),
+            container: None,
         };
         assert_eq!(task.format_age(), "-");
     }
@@ -162,6 +167,7 @@ mod tests {
             body: String::new(),
             status: Status::Queue,
             file_path: std::path::PathBuf::from("/nonexistent/path.md"),
+            container: None,
         };
         assert!(task.log_lines().is_empty());
     }
@@ -186,6 +192,7 @@ mod tests {
             body: String::new(),
             status: Status::Running,
             file_path: md_path,
+            container: None,
         };
         let lines = task.log_lines();
         assert_eq!(lines.len(), 5);

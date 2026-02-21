@@ -25,6 +25,9 @@ pub struct App {
     pub log_lines: Vec<String>,
     /// Vertical scroll offset within the log section of the detail view.
     pub log_scroll: usize,
+    /// Set when the user presses 'a' on a running task. The main loop
+    /// reads this, suspends the TUI, and runs `docker exec` to attach.
+    pub attach_request: Option<String>,
 }
 
 impl App {
@@ -37,6 +40,7 @@ impl App {
             view: View::List,
             log_lines: vec![],
             log_scroll: 0,
+            attach_request: None,
         };
         app.refresh_tasks()?;
         Ok(app)
@@ -150,6 +154,17 @@ impl App {
         self.close_detail();
     }
 
+    // ── Attach ────────────────────────────────────────────────────────────────
+
+    /// Get the container name for the selected running task.
+    pub fn selected_container_name(&self) -> Option<String> {
+        let task = self.tasks.get(self.selected)?;
+        if task.status != Status::Running {
+            return None;
+        }
+        task.container.clone()
+    }
+
     // ── Key handling ──────────────────────────────────────────────────────────
 
     /// Returns true if the app should quit.
@@ -169,6 +184,11 @@ impl App {
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
             KeyCode::Enter => self.open_detail(),
+            KeyCode::Char('a') => {
+                if let Some(container) = self.selected_container_name() {
+                    self.attach_request = Some(container);
+                }
+            }
             _ => {}
         }
         Ok(false)
@@ -231,6 +251,7 @@ mod tests {
             body: String::new(),
             status: TaskStatus::Queue,
             file_path: std::path::PathBuf::new(),
+            container: None,
         };
 
         let mut app = App {
@@ -240,6 +261,7 @@ mod tests {
             view: View::List,
             log_lines: vec![],
             log_scroll: 0,
+            attach_request: None,
         };
 
         app.select_next();

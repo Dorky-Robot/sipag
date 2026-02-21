@@ -74,14 +74,12 @@ pub fn render_list(f: &mut Frame, app: &App) {
         Constraint::Length(6),  // Age
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .title(" sipag ")
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded),
-        );
+    let table = Table::new(rows, widths).header(header).block(
+        Block::default()
+            .title(" sipag ")
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded),
+    );
 
     f.render_widget(table, chunks[0]);
 
@@ -115,7 +113,17 @@ pub fn render_list(f: &mut Frame, app: &App) {
         done,
         failed,
     );
-    let help = "  j/k:navigate  Enter:detail  q:quit";
+
+    let has_running_selected = app
+        .tasks
+        .get(app.selected)
+        .is_some_and(|t| t.status == Status::Running);
+
+    let help = if has_running_selected {
+        "  j/k:navigate  Enter:detail  a:attach  q:quit"
+    } else {
+        "  j/k:navigate  Enter:detail  q:quit"
+    };
 
     let bottom = Paragraph::new(vec![Line::from(legend), Line::from(help)]).block(
         Block::default().borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT),
