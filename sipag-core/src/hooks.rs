@@ -588,12 +588,16 @@ mod tests {
             })
             .unwrap();
 
-        // Give the async script a moment to run.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        assert!(
-            output_file.exists(),
-            "hook script should have created sentinel file"
-        );
+        // Poll for the sentinel file (hooks are fire-and-forget / async).
+        let mut found = false;
+        for _ in 0..20 {
+            if output_file.exists() {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(found, "hook script should have created sentinel file");
     }
 
     // ── FileHookRunner: env vars are passed to the hook script ────────────────
@@ -629,8 +633,15 @@ mod tests {
             })
             .unwrap();
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let content = fs::read_to_string(&output_file).unwrap_or_default();
+        // Poll for the output file (hooks are fire-and-forget / async).
+        let mut content = String::new();
+        for _ in 0..20 {
+            if let Ok(c) = fs::read_to_string(&output_file) {
+                content = c;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
         assert_eq!(content.trim(), "99");
     }
 }

@@ -1,16 +1,14 @@
 //! Main worker polling loop — Rust replacement for `lib/worker/loop.sh`.
 //!
-//! Called by `sipag work <repos...>`. Continuously polls GitHub for approved
+//! Called by `sipag work <repos...>`. Continuously polls GitHub for ready
 //! issues, dispatches Docker workers, and handles recovery/finalization.
 
 use std::collections::HashSet;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
 
 use anyhow::Result;
 
-use super::config::WorkerConfig;
 use super::decision::decide_issue_action;
 use super::dispatch::{
     dispatch_conflict_fix, dispatch_issue_worker, dispatch_pr_iteration, is_container_running,
@@ -20,10 +18,11 @@ use super::github::{
     find_prs_needing_iteration, has_pr_for_issue, list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
-use super::recovery::recover_and_finalize;
+use super::recovery::{recover_and_finalize, RecoveryOutcome};
 use super::status::WorkerStatus;
 use super::store::FileStateStore;
 use crate::auth;
+use crate::config::WorkerConfig;
 
 /// Entry point for `sipag work`.
 ///
@@ -38,7 +37,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     }
     println!("Label: {}", cfg.work_label);
     println!("Batch size: {}", cfg.batch_size);
-    println!("Poll interval: {}s", cfg.poll_interval);
+    println!("Poll interval: {}s", cfg.poll_interval.as_secs());
     println!("Logs: {}/logs/", sipag_dir.display());
     println!(
         "Started: {}",
@@ -64,6 +63,11 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             "[recovery] {} worker(s) processed on startup",
             outcomes.len()
         );
+        for outcome in &outcomes {
+            if let RecoveryOutcome::StaleHeartbeat { issue_num } = outcome {
+                println!("[recovery] WARNING: worker for issue #{issue_num} has a stale heartbeat");
+            }
+        }
     }
 
     // ── In-flight tracker (PR iteration / conflict-fix dedup) ────────────────
@@ -71,6 +75,10 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     // temp-file approach in lib/worker/dedup.sh.
     let mut prs_iterating: HashSet<u64> = HashSet::new();
     let mut prs_fixing_conflict: HashSet<u64> = HashSet::new();
+
+    // ── Session progress counter for event-driven reminders ───────────────
+    let mut completed_this_session: u64 = 0;
+    const REMINDER_THRESHOLD: u64 = 10;
 
     loop {
         // ── Drain check ──────────────────────────────────────────────────────
@@ -85,7 +93,34 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         // ── Finalize exited containers ───────────────────────────────────────
         // Runs at the top of each cycle so containers adopted by recovery
         // get their state updated without needing background threads.
-        let _ = recover_and_finalize(&docker_runtime, &gh_gateway, &store, &cfg.work_label);
+        if let Ok(cycle_outcomes) =
+            recover_and_finalize(&docker_runtime, &gh_gateway, &store, &cfg.work_label)
+        {
+            for outcome in &cycle_outcomes {
+                match outcome {
+                    RecoveryOutcome::StaleHeartbeat { issue_num } => {
+                        println!(
+                            "[{}] WARNING: worker for issue #{issue_num} has a stale heartbeat (no update in 10+ min)",
+                            hms()
+                        );
+                    }
+                    RecoveryOutcome::Finalized { .. } => {
+                        completed_this_session += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if completed_this_session >= REMINDER_THRESHOLD {
+                println!(
+                    "[sipag] {} issues processed this session. Stay the sipag way — see CLAUDE.md.",
+                    completed_this_session
+                );
+                println!(
+                    "[sipag] Review PRs: `gh pr diff N`. Merge: `gh pr merge N --squash --delete-branch`."
+                );
+                completed_this_session = 0;
+            }
+        }
 
         let mut found_work = false;
 
@@ -168,6 +203,8 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                                 duration_s: None,
                                 exit_code: None,
                                 log_path: None,
+                                last_heartbeat: None,
+                                phase: None,
                             };
                             let _ = store.save(&state);
                         }
@@ -193,7 +230,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "?".to_string());
                 println!(
-                    "[{}] [{}] {} approved, {} open total, {} PRs open. No work.",
+                    "[{}] [{}] {} ready, {} open total, {} PRs open. No work.",
                     hms(),
                     repo,
                     all_issues.len(),
@@ -271,8 +308,12 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             break;
         }
 
-        println!("[{}] Next poll in {}s...", hms(), cfg.poll_interval);
-        thread::sleep(Duration::from_secs(cfg.poll_interval));
+        println!(
+            "[{}] Next poll in {}s...",
+            hms(),
+            cfg.poll_interval.as_secs()
+        );
+        thread::sleep(cfg.poll_interval);
     }
 
     Ok(())

@@ -12,13 +12,7 @@ setup() {
   export WORKER_LOG_DIR="${TEST_TMPDIR}/worker-logs"
   mkdir -p "$WORKER_LOG_DIR"
 
-  unset SIPAG_WORK_LABEL
-  unset SIPAG_BATCH_SIZE
-
-  source "${SIPAG_ROOT}/lib/worker.sh"
-
-  # Override WORKER_LOG_DIR after sourcing (sourcing resets the default)
-  WORKER_LOG_DIR="${TEST_TMPDIR}/worker-logs"
+  source "${SIPAG_ROOT}/lib/refresh-docs.sh"
 }
 
 teardown() {

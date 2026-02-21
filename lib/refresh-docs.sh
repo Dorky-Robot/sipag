@@ -13,7 +13,9 @@
 # worker_load_config + worker_init first, or use cmd_refresh_docs in bin/sipag
 # which does this automatically.
 
-# shellcheck disable=SC2154  # WORKER_* globals set by lib/worker/config.sh
+# Resolve lib dir so we can find prompt templates regardless of how we were sourced.
+_SIPAG_WORKER_LIB="${_SIPAG_WORKER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+SIPAG_DIR="${SIPAG_DIR:-$HOME/.sipag}"
 
 # Check whether ARCHITECTURE.md is stale relative to the last merged PR.
 # A file is considered stale when it has never been committed (missing), or when
@@ -99,7 +101,8 @@ refresh_docs_run() {
     prompt="${prompt//${_tpl_repo}/${repo}}"
 
     # Datestamped branch: multiple runs on the same day reuse the same branch
-    local branch="sipag/refresh-docs-$(date +%Y%m%d)"
+    local branch
+    branch="sipag/refresh-docs-$(date +%Y%m%d)"
     local image="${WORKER_IMAGE:-ghcr.io/dorky-robot/sipag-worker:latest}"
     local timeout_cmd="${WORKER_TIMEOUT_CMD:-}"
     local timeout="${WORKER_TIMEOUT:-1800}"
