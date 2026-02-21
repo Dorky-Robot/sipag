@@ -72,7 +72,8 @@ fn preflight_auth(sipag_dir: &Path) -> Result<()> {
 
 /// Build the Claude prompt for a task.
 pub fn build_prompt(title: &str, body: &str, issue: Option<&str>) -> String {
-    let mut prompt = format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
+    let mut prompt =
+        format!("You are working on the repository at /work.\n\nYour task:\n{title}\n");
     if !body.is_empty() {
         prompt.push_str(body);
         prompt.push('\n');

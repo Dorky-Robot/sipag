@@ -92,6 +92,11 @@ setup_run() {
 	echo "Creating directories..."
 	_setup_dirs
 
+	# --- Shell completions ---
+	echo ""
+	echo "Setting up shell completions..."
+	_setup_completions
+
 	echo ""
 	echo "=== Setup complete ==="
 	echo ""
@@ -261,6 +266,64 @@ _setup_merge_with_jq() {
 
 	mv "$tmp_file" "$claude_settings"
 	_setup_ok "Updated ~/.claude/settings.json"
+}
+
+_setup_completions() {
+	local shell_name
+	shell_name="$(basename "${SHELL:-}")"
+
+	# Find sipag binary (Rust CLI)
+	local sipag_bin
+	if command -v sipag >/dev/null 2>&1; then
+		sipag_bin="sipag"
+	else
+		_setup_info "sipag binary not in PATH — skipping shell completions"
+		_setup_info "After installing: sipag completions bash|zsh|fish"
+		return 0
+	fi
+
+	case "$shell_name" in
+		bash)
+			local comp_dir="$HOME/.local/share/bash-completion/completions"
+			mkdir -p "$comp_dir"
+			local comp_file="$comp_dir/sipag"
+			"$sipag_bin" completions bash > "$comp_file"
+			_setup_ok "Bash completions installed: $comp_file"
+			_setup_info "Reload: source $comp_file"
+			;;
+		zsh)
+			# Try standard zsh completion dirs in order of preference
+			local comp_file=""
+			local zsh_dirs=("$HOME/.zsh/completions" "$HOME/.zfunc" "$HOME/.zsh_completions")
+			for d in "${zsh_dirs[@]}"; do
+				if [[ -d "$d" ]]; then
+					comp_file="$d/_sipag"
+					break
+				fi
+			done
+			if [[ -z "$comp_file" ]]; then
+				# Create preferred location
+				mkdir -p "$HOME/.zsh/completions"
+				comp_file="$HOME/.zsh/completions/_sipag"
+			fi
+			"$sipag_bin" completions zsh > "$comp_file"
+			_setup_ok "Zsh completions installed: $comp_file"
+			_setup_info "Ensure fpath contains $(dirname "$comp_file") and run: autoload -Uz compinit && compinit"
+			;;
+		fish)
+			local comp_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+			mkdir -p "$comp_dir"
+			"$sipag_bin" completions fish > "$comp_dir/sipag.fish"
+			_setup_ok "Fish completions installed: $comp_dir/sipag.fish"
+			;;
+		*)
+			_setup_info "Shell '$shell_name' not detected or unsupported for auto-install"
+			_setup_info "Manual install:"
+			_setup_info "  bash: sipag completions bash >> ~/.bashrc  (or source <(sipag completions bash))"
+			_setup_info "  zsh:  sipag completions zsh > ~/.zsh/completions/_sipag"
+			_setup_info "  fish: sipag completions fish > ~/.config/fish/completions/sipag.fish"
+			;;
+	esac
 }
 
 _setup_merge_with_python() {

@@ -126,6 +126,13 @@ pub enum Commands {
     /// Print version
     Version,
 
+    /// Print shell completion script (bash, zsh, or fish)
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_name = "SHELL")]
+        shell: String,
+    },
+
     /// Internal: run Docker task in background (do not use directly)
     #[command(name = "_bg-exec", hide = true)]
     BgExec {
@@ -188,6 +195,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Retry { name }) => cmd_retry(&name),
         Some(Commands::Repo { subcommand }) => cmd_repo(subcommand),
         Some(Commands::Status) => cmd_status(),
+        Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::BgExec {
             task_id,
             repo_url,
@@ -222,7 +230,8 @@ fn cmd_start() -> Result<()> {
     let queue_dir = dir.join("queue");
     let running_dir = dir.join("running");
     let failed_dir = dir.join("failed");
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -319,7 +328,8 @@ fn cmd_run(repo_url: &str, issue: Option<&str>, background: bool, description: &
     let task_id = generate_task_id(description);
     println!("Task ID: {task_id}");
 
-    let image = std::env::var("SIPAG_IMAGE").unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
+    let image = std::env::var("SIPAG_IMAGE")
+        .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string());
     let timeout = std::env::var("SIPAG_TIMEOUT")
         .unwrap_or_else(|_| "1800".to_string())
         .parse::<u64>()
@@ -615,9 +625,282 @@ fn cmd_repo(subcommand: RepoCommands) -> Result<()> {
     }
 }
 
+fn cmd_completions(shell: &str) -> Result<()> {
+    match shell {
+        "bash" => print!("{}", BASH_COMPLETION),
+        "zsh" => print!("{}", ZSH_COMPLETION),
+        "fish" => print!("{}", FISH_COMPLETION),
+        other => bail!(
+            "Unknown shell '{}'. Supported: bash, zsh, fish\n\nUsage:\n  sipag completions bash   # then: source <(sipag completions bash)\n  sipag completions zsh    # then: sipag completions zsh > ~/.zsh/completions/_sipag\n  sipag completions fish   # then: sipag completions fish > ~/.config/fish/completions/sipag.fish",
+            other
+        ),
+    }
+    Ok(())
+}
+
+const BASH_COMPLETION: &str = r#"_sipag() {
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        COMPREPLY=()
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    }
+
+    local commands="tui run ps logs kill start init add list next show retry repo status version completions"
+    local sipag_dir="${SIPAG_DIR:-$HOME/.sipag}"
+
+    _sipag_task_ids() {
+        local ids=()
+        for dir in running done failed queue; do
+            local d="$sipag_dir/$dir"
+            if [[ -d "$d" ]]; then
+                for f in "$d"/*.md; do
+                    [[ -f "$f" ]] && ids+=("$(basename "$f" .md)")
+                done
+            fi
+        done
+        echo "${ids[@]}"
+    }
+
+    _sipag_repo_names() {
+        local names=()
+        local conf="$sipag_dir/repos.conf"
+        if [[ -f "$conf" ]]; then
+            while IFS='=' read -r name _; do
+                [[ -n "$name" && "$name" != \#* ]] && names+=("$name")
+            done < "$conf"
+        fi
+        echo "${names[@]}"
+    }
+
+    case "$prev" in
+        logs|kill)
+            COMPREPLY=($(compgen -W "$(_sipag_task_ids)" -- "$cur"))
+            return ;;
+        show|retry)
+            COMPREPLY=($(compgen -W "$(_sipag_task_ids)" -- "$cur"))
+            return ;;
+        --repo)
+            # Check which subcommand is active
+            local i
+            for ((i=1; i < ${#words[@]} - 1; i++)); do
+                if [[ "${words[$i]}" == "add" ]]; then
+                    COMPREPLY=($(compgen -W "$(_sipag_repo_names)" -- "$cur"))
+                    return
+                fi
+            done ;;
+        --priority)
+            COMPREPLY=($(compgen -W "low medium high critical" -- "$cur"))
+            return ;;
+        repo)
+            COMPREPLY=($(compgen -W "add list" -- "$cur"))
+            return ;;
+        completions)
+            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+            return ;;
+    esac
+
+    # Check active subcommand for flag completion
+    local i
+    for ((i=1; i < ${#words[@]} - 1; i++)); do
+        case "${words[$i]}" in
+            run)
+                COMPREPLY=($(compgen -W "--repo --issue --background -b" -- "$cur"))
+                return ;;
+            add)
+                COMPREPLY=($(compgen -W "--repo --priority" -- "$cur"))
+                return ;;
+            list|next)
+                COMPREPLY=($(compgen -W "--file -f --continue -c --dry-run -n" -- "$cur"))
+                return ;;
+        esac
+    done
+
+    COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+}
+complete -F _sipag sipag
+"#;
+
+const ZSH_COMPLETION: &str = r##"#compdef sipag
+
+_sipag() {
+    local state
+    local -a commands
+
+    commands=(
+        'tui:Launch interactive TUI'
+        'run:Launch a Docker sandbox for a task'
+        'ps:List running and recent tasks'
+        'logs:Print the log for a task'
+        'kill:Kill a running container'
+        'start:Process queue serially'
+        'init:Create ~/.sipag directories'
+        'add:Queue a task'
+        'list:Print all tasks with status'
+        'next:Find first pending task and run'
+        'show:Print task file and log'
+        'retry:Move a failed task back to queue'
+        'repo:Manage the repo registry'
+        'status:Show queue state across all directories'
+        'version:Print version'
+        'completions:Print shell completion script'
+    )
+
+    _sipag_task_ids() {
+        local sipag_dir="${SIPAG_DIR:-$HOME/.sipag}"
+        local -a ids
+        local dir f
+        for dir in running done failed queue; do
+            local d="$sipag_dir/$dir"
+            if [[ -d "$d" ]]; then
+                for f in "$d"/*.md; do
+                    [[ -f "$f" ]] && ids+=("${f:t:r}")
+                done
+            fi
+        done
+        compadd "$@" -- "${ids[@]}"
+    }
+
+    _sipag_repo_names() {
+        local sipag_dir="${SIPAG_DIR:-$HOME/.sipag}"
+        local conf="$sipag_dir/repos.conf"
+        local -a names
+        if [[ -f "$conf" ]]; then
+            while IFS='=' read -r name _; do
+                [[ -n "$name" && "$name" != \#* ]] && names+=("$name")
+            done < "$conf"
+        fi
+        compadd "$@" -- "${names[@]}"
+    }
+
+    _arguments -C \
+        '1: :->command' \
+        '*: :->args' && return
+
+    case "$state" in
+        command)
+            _describe 'command' commands ;;
+        args)
+            case "${words[2]}" in
+                logs|kill|show|retry)
+                    _sipag_task_ids ;;
+                repo)
+                    local -a repo_cmds
+                    repo_cmds=(
+                        'add:Register a repo name'
+                        'list:List registered repos'
+                    )
+                    if (( CURRENT == 3 )); then
+                        _describe 'repo command' repo_cmds
+                    fi ;;
+                run)
+                    _arguments \
+                        '--repo[Repository URL]:url:' \
+                        '--issue[GitHub issue number]:number:' \
+                        '(-b --background)'{-b,--background}'[Run in background]' \
+                        ':description:' ;;
+                add)
+                    _arguments \
+                        '--repo[Repository name]:name:_sipag_repo_names' \
+                        '--priority[Priority level]:priority:(low medium high critical)' \
+                        ':title:' ;;
+                list|next)
+                    _arguments \
+                        '(-f --file)'{-f,--file}'[Task file path]:file:_files' \
+                        '(-c --continue)'{-c,--continue}'[Loop to next task]' \
+                        '(-n --dry-run)'{-n,--dry-run}'[Show what would run]' ;;
+                completions)
+                    compadd bash zsh fish ;;
+            esac ;;
+    esac
+}
+
+_sipag "$@"
+"##;
+
+const FISH_COMPLETION: &str = r#"# sipag completions for fish
+# Install: sipag completions fish > ~/.config/fish/completions/sipag.fish
+
+function __sipag_task_ids
+    set sipag_dir (set -q SIPAG_DIR && echo $SIPAG_DIR || echo "$HOME/.sipag")
+    for dir in running done failed queue
+        if test -d "$sipag_dir/$dir"
+            ls "$sipag_dir/$dir" 2>/dev/null | string replace -r '\.md$' ''
+        end
+    end
+end
+
+function __sipag_repo_names
+    set sipag_dir (set -q SIPAG_DIR && echo $SIPAG_DIR || echo "$HOME/.sipag")
+    set conf "$sipag_dir/repos.conf"
+    if test -f "$conf"
+        grep -v '^#' "$conf" 2>/dev/null | string replace -r '=.*$' ''
+    end
+end
+
+function __sipag_no_subcommand
+    for i in (commandline -opc)
+        switch $i
+            case tui run ps logs kill start init add list next show retry repo status version completions
+                return 1
+        end
+    end
+    return 0
+end
+
+# Main commands
+complete -c sipag -n __sipag_no_subcommand -f -a tui         -d 'Launch interactive TUI'
+complete -c sipag -n __sipag_no_subcommand -f -a run         -d 'Launch a Docker sandbox for a task'
+complete -c sipag -n __sipag_no_subcommand -f -a ps          -d 'List running and recent tasks'
+complete -c sipag -n __sipag_no_subcommand -f -a logs        -d 'Print the log for a task'
+complete -c sipag -n __sipag_no_subcommand -f -a kill        -d 'Kill a running container'
+complete -c sipag -n __sipag_no_subcommand -f -a start       -d 'Process queue serially'
+complete -c sipag -n __sipag_no_subcommand -f -a init        -d 'Create ~/.sipag directories'
+complete -c sipag -n __sipag_no_subcommand -f -a add         -d 'Queue a task'
+complete -c sipag -n __sipag_no_subcommand -f -a list        -d 'Print all tasks with status'
+complete -c sipag -n __sipag_no_subcommand -f -a next        -d 'Find first pending task and run'
+complete -c sipag -n __sipag_no_subcommand -f -a show        -d 'Print task file and log'
+complete -c sipag -n __sipag_no_subcommand -f -a retry       -d 'Move a failed task back to queue'
+complete -c sipag -n __sipag_no_subcommand -f -a repo        -d 'Manage the repo registry'
+complete -c sipag -n __sipag_no_subcommand -f -a status      -d 'Show queue state across all directories'
+complete -c sipag -n __sipag_no_subcommand -f -a version     -d 'Print version'
+complete -c sipag -n __sipag_no_subcommand -f -a completions -d 'Print shell completion script'
+
+# Task ID completions for logs, kill, show, retry
+complete -c sipag -n '__fish_seen_subcommand_from logs kill show retry' -f -a '(__sipag_task_ids)'
+
+# repo subcommands
+complete -c sipag -n '__fish_seen_subcommand_from repo' -f -a add  -d 'Register a repo name'
+complete -c sipag -n '__fish_seen_subcommand_from repo' -f -a list -d 'List registered repos'
+
+# run flags
+complete -c sipag -n '__fish_seen_subcommand_from run' -l repo       -d 'Repository URL'
+complete -c sipag -n '__fish_seen_subcommand_from run' -l issue      -d 'GitHub issue number'
+complete -c sipag -n '__fish_seen_subcommand_from run' -s b -l background -d 'Run in background'
+
+# add flags
+complete -c sipag -n '__fish_seen_subcommand_from add' -l repo     -d 'Repository name' -f -a '(__sipag_repo_names)'
+complete -c sipag -n '__fish_seen_subcommand_from add' -l priority -d 'Priority level' -f -a 'low medium high critical'
+
+# list and next flags
+complete -c sipag -n '__fish_seen_subcommand_from list next' -s f -l file     -d 'Task file path' -r
+complete -c sipag -n '__fish_seen_subcommand_from next'      -s c -l continue -d 'Loop to next task'
+complete -c sipag -n '__fish_seen_subcommand_from next'      -s n -l dry-run  -d 'Show what would run'
+
+# completions argument
+complete -c sipag -n '__fish_seen_subcommand_from completions' -f -a 'bash zsh fish'
+"#;
+
 fn cmd_status() -> Result<()> {
     let dir = sipag_dir();
-    let labels = [("Queue", "queue"), ("Running", "running"), ("Done", "done"), ("Failed", "failed")];
+    let labels = [
+        ("Queue", "queue"),
+        ("Running", "running"),
+        ("Done", "done"),
+        ("Failed", "failed"),
+    ];
 
     for (label, subdir) in &labels {
         let d = dir.join(subdir);

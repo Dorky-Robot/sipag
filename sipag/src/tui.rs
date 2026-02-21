@@ -131,10 +131,7 @@ fn render(frame: &mut Frame, app: &mut App) {
     };
 
     let help = Paragraph::new(vec![
-        Line::from(Span::styled(
-            detail_text,
-            Style::default().fg(Color::White),
-        )),
+        Line::from(Span::styled(detail_text, Style::default().fg(Color::White))),
         Line::from(Span::styled(
             " ↑/k: up   ↓/j: down   q/Esc: quit   r: refresh",
             Style::default().fg(Color::DarkGray),
