@@ -187,6 +187,100 @@ EOF
 20" ]]
 }
 
+# --- worker_find_conflicted_prs ---
+
+@test "worker_find_conflicted_prs returns PR numbers with CONFLICTING mergeable status" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '7\n15\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ "$output" == "7
+15" ]]
+}
+
+@test "worker_find_conflicted_prs returns empty when no conflicted PRs" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf ''
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$status" -eq 0 ]]
+  [[ -z "$output" ]]
+}
+
+@test "worker_find_conflicted_prs sorts output numerically" {
+  cat > "${TEST_TMPDIR}/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '30\n2\n14\n'
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_find_conflicted_prs "owner/repo"
+  [[ "$output" == "2
+14
+30" ]]
+}
+
+# --- PR merge-forward state tracking ---
+
+@test "worker_pr_merge_forward_is_running returns false when PR is not running" {
+  run worker_pr_merge_forward_is_running 42
+  [[ "$status" -ne 0 ]]
+}
+
+@test "worker_pr_merge_forward_mark_running creates the running marker file" {
+  worker_pr_merge_forward_mark_running 42
+  [[ -f "${WORKER_LOG_DIR}/pr-42-merge-forward-running" ]]
+}
+
+@test "worker_pr_merge_forward_is_running returns true after marking running" {
+  worker_pr_merge_forward_mark_running 99
+  run worker_pr_merge_forward_is_running 99
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_pr_merge_forward_mark_done removes the running marker file" {
+  worker_pr_merge_forward_mark_running 7
+  worker_pr_merge_forward_mark_done 7
+  [[ ! -f "${WORKER_LOG_DIR}/pr-7-merge-forward-running" ]]
+}
+
+@test "worker_pr_merge_forward_mark_done is idempotent when file does not exist" {
+  run worker_pr_merge_forward_mark_done 999
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_pr_merge_forward_is_running tracks multiple PRs independently" {
+  worker_pr_merge_forward_mark_running 10
+  worker_pr_merge_forward_mark_running 20
+  run worker_pr_merge_forward_is_running 10
+  [[ "$status" -eq 0 ]]
+  run worker_pr_merge_forward_is_running 20
+  [[ "$status" -eq 0 ]]
+  worker_pr_merge_forward_mark_done 10
+  run worker_pr_merge_forward_is_running 10
+  [[ "$status" -ne 0 ]]
+  run worker_pr_merge_forward_is_running 20
+  [[ "$status" -eq 0 ]]
+}
+
+@test "worker_pr_merge_forward state is independent from worker_pr iteration state" {
+  worker_pr_mark_running 5
+  run worker_pr_merge_forward_is_running 5
+  [[ "$status" -ne 0 ]]
+
+  worker_pr_merge_forward_mark_running 5
+  run worker_pr_is_running 5
+  # Both should be independently tracked
+  [[ "$status" -eq 0 ]]
+}
+
 # --- worker_slugify ---
 
 @test "worker_slugify lowercases title" {

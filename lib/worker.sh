@@ -133,6 +133,28 @@ worker_find_prs_needing_iteration() {
         ' 2>/dev/null | sort -n
 }
 
+# Track PR merge-forward state using temp files (reset on process restart)
+worker_pr_merge_forward_is_running() {
+    [[ -f "${WORKER_LOG_DIR}/pr-${1}-merge-forward-running" ]]
+}
+
+worker_pr_merge_forward_mark_running() {
+    touch "${WORKER_LOG_DIR}/pr-${1}-merge-forward-running"
+}
+
+worker_pr_merge_forward_mark_done() {
+    rm -f "${WORKER_LOG_DIR}/pr-${1}-merge-forward-running"
+}
+
+# Find open PRs with merge conflicts (mergeable == "CONFLICTING").
+# These need main merged forward — never rebased.
+worker_find_conflicted_prs() {
+    local repo="$1"
+    gh pr list --repo "$repo" --state open \
+        --json number,mergeable \
+        --jq '.[] | select(.mergeable == "CONFLICTING") | .number' 2>/dev/null | sort -n
+}
+
 # Close in-progress issues whose worker-created PR has since been merged.
 #
 # Only examines issues labeled "in-progress" (set by worker_run_issue), not all
@@ -401,6 +423,76 @@ Instructions:
     fi
 }
 
+# Merge main forward into a conflicted PR branch (never rebase, never force-push)
+worker_run_pr_merge_forward() {
+    local repo="$1"
+    local pr_num="$2"
+    local title branch_name prompt
+
+    worker_pr_merge_forward_mark_running "$pr_num"
+
+    title=$(gh pr view "$pr_num" --repo "$repo" --json title -q '.title' 2>/dev/null)
+    branch_name=$(gh pr view "$pr_num" --repo "$repo" --json headRefName -q '.headRefName' 2>/dev/null)
+
+    echo "[PR #${pr_num}] Merging main forward into ${branch_name}: $title"
+
+    prompt="You are resolving merge conflicts in PR #${pr_num} (${title}) in ${repo}.
+
+The branch ${branch_name} has fallen behind main and has merge conflicts.
+Your job is to merge main forward into this branch — NEVER rebase.
+
+Instructions:
+- You are on branch ${branch_name} which already has work in progress
+- Run: git fetch origin && git merge origin/main --no-edit
+- If there are merge conflicts, resolve them carefully:
+  - Keep the work from this branch where possible
+  - Use the main branch version where the branch work is clearly superseded
+  - After resolving all conflicts, stage the resolved files: git add <files>
+  - Complete the merge commit: git merge --continue
+- Run make dev (if available) or any existing tests to confirm nothing is broken
+- Push the updated branch: git push origin ${branch_name}
+- Never use git rebase
+- Never use git push --force or git push --force-with-lease"
+
+    # Hook: merge-forward started
+    export SIPAG_EVENT="pr-merge-forward.started"
+    export SIPAG_REPO="$repo"
+    export SIPAG_PR_NUM="$pr_num"
+    export SIPAG_ISSUE_TITLE="$title"
+    sipag_run_hook "on-pr-merge-forward-started"
+
+    PROMPT="$prompt" BRANCH="$branch_name" \
+        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
+        -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
+        -e GH_TOKEN="$WORKER_GH_TOKEN" \
+        -e PROMPT \
+        -e BRANCH \
+        "$WORKER_IMAGE" \
+        bash -c '
+            git clone https://github.com/'"${repo}"'.git /work && cd /work
+            git config user.name "sipag"
+            git config user.email "sipag@localhost"
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/'"${repo}"'.git"
+            git checkout "$BRANCH"
+            claude --print --dangerously-skip-permissions -p "$PROMPT"
+        ' > "${WORKER_LOG_DIR}/pr-${pr_num}-merge-forward.log" 2>&1
+
+    local exit_code=$?
+    worker_pr_merge_forward_mark_done "$pr_num"
+
+    # Hook: merge-forward done
+    export SIPAG_EVENT="pr-merge-forward.done"
+    export SIPAG_EXIT_CODE="$exit_code"
+    sipag_run_hook "on-pr-merge-forward-done"
+
+    if [[ $exit_code -eq 0 ]]; then
+        echo "[PR #${pr_num}] DONE merge-forward: $title"
+    else
+        echo "[PR #${pr_num}] FAILED merge-forward (exit ${exit_code}): $title"
+    fi
+}
+
 # Main polling loop
 worker_loop() {
     local repo="$1"
@@ -417,6 +509,39 @@ worker_loop() {
     while true; do
         # Reconcile: close issues that already have merged PRs
         worker_reconcile "$repo"
+
+        # Fix stale PRs: merge main forward into conflicted branches (never rebase)
+        local prs_to_merge_forward=()
+        mapfile -t conflicted_prs < <(worker_find_conflicted_prs "$repo")
+        for pr_num in "${conflicted_prs[@]}"; do
+            if worker_pr_merge_forward_is_running "$pr_num"; then
+                echo "[$(date +%H:%M:%S)] Skipping PR #${pr_num} merge-forward (already in progress)"
+                continue
+            fi
+            prs_to_merge_forward+=("$pr_num")
+        done
+
+        if [[ ${#prs_to_merge_forward[@]} -gt 0 ]]; then
+            echo "[$(date +%H:%M:%S)] Found ${#prs_to_merge_forward[@]} conflicted PRs (merging main forward): ${prs_to_merge_forward[*]}"
+
+            for ((i = 0; i < ${#prs_to_merge_forward[@]}; i += WORKER_BATCH_SIZE)); do
+                local mf_batch=("${prs_to_merge_forward[@]:i:WORKER_BATCH_SIZE}")
+                echo "--- Merge-forward batch: ${mf_batch[*]} ---"
+
+                local pids=()
+                for pr_num in "${mf_batch[@]}"; do
+                    worker_run_pr_merge_forward "$repo" "$pr_num" &
+                    pids+=($!)
+                done
+
+                for pid in "${pids[@]}"; do
+                    wait "$pid" 2>/dev/null || true
+                done
+
+                echo "--- Merge-forward batch complete ---"
+                echo ""
+            done
+        fi
 
         # Fetch open issues with the work label
         local -a label_args=()
