@@ -281,12 +281,13 @@ complete -c sipag -n '__fish_seen_subcommand_from completions' -a 'fish' -d 'Fis
 complete -c sipag -n '__fish_seen_subcommand_from repo' -a 'add'  -d 'Register a repo name → URL mapping'
 complete -c sipag -n '__fish_seen_subcommand_from repo' -a 'list' -d 'List registered repos'
 
-# Dynamic repo name completion for work/start/merge/triage
+# Dynamic repo name completion for work/start/merge
 complete -c sipag -n '__fish_seen_subcommand_from work start merge' -a '(__sipag_repos)'
 
 # triage flags
 complete -c sipag -n '__fish_seen_subcommand_from triage' -l dry-run -d 'Print report only, no changes'
 complete -c sipag -n '__fish_seen_subcommand_from triage' -l apply   -d 'Apply without confirmation'
+
 
 # run flags
 complete -c sipag -n '__fish_seen_subcommand_from run' -l repo       -d 'Repository URL'
