@@ -3,6 +3,7 @@
 //! Domain model:
 //!   - `WorkerStatus` — enum for worker lifecycle states
 //!   - `WorkerState`  — entity representing a single worker's state
+//!   - `auto_merge`   — typed auto-merge service (replaces lib/worker/merge.sh)
 //!   - `decision`     — pure functions for issue dispatch and finalization logic
 //!   - `ports`        — trait boundaries (ContainerRuntime, GitHubGateway, StateStore)
 //!   - `recovery`     — orchestration: recover and finalize active workers
@@ -14,6 +15,7 @@
 //!   - `dispatch` — Docker container dispatch for issue and PR workers
 //!   - `poll`     — main polling loop (`sipag work`)
 
+pub mod auto_merge;
 pub mod config;
 pub mod decision;
 pub mod dispatch;

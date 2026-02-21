@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
-use super::ports::{GitHubGateway, PrInfo};
+use super::ports::{GitHubGateway, MergeState, Mergeable, PrInfo, PrMergeCandidate, ReviewDecision};
 
 /// Production `GitHubGateway` that delegates to the `gh` CLI.
 pub struct GhGateway;
@@ -36,6 +36,14 @@ impl GitHubGateway for GhGateway {
         add: Option<&str>,
     ) -> Result<()> {
         transition_label(repo, issue_num, remove, add)
+    }
+
+    fn list_mergeable_prs(&self, repo: &str) -> Result<Vec<PrMergeCandidate>> {
+        list_mergeable_prs(repo)
+    }
+
+    fn merge_pr(&self, repo: &str, pr_num: u64, title: &str) -> Result<()> {
+        merge_pr(repo, pr_num, title)
     }
 }
 
@@ -298,6 +306,106 @@ pub fn reconcile_merged_prs(repo: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// List open PRs with the data needed for auto-merge decisions.
+///
+/// Returns one [`PrMergeCandidate`] per open PR, in the order returned
+/// by the GitHub API. Unknown enum values fall back to their `Unknown`
+/// or `None` variants so the caller always gets a typed value.
+pub fn list_mergeable_prs(repo: &str) -> Result<Vec<PrMergeCandidate>> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,headRefName,mergeable,mergeStateStatus,isDraft,reviewDecision",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .context("Failed to run gh pr list for auto-merge")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    let mut candidates = vec![];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = match item["number"].as_u64() {
+                Some(n) => n,
+                None => continue,
+            };
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let branch = item["headRefName"].as_str().unwrap_or("").to_string();
+            let mergeable = match item["mergeable"].as_str().unwrap_or("") {
+                "MERGEABLE" => Mergeable::Mergeable,
+                "CONFLICTING" => Mergeable::Conflicting,
+                _ => Mergeable::Unknown,
+            };
+            let merge_state = match item["mergeStateStatus"].as_str().unwrap_or("") {
+                "CLEAN" => MergeState::Clean,
+                "DIRTY" => MergeState::Dirty,
+                "BLOCKED" => MergeState::Blocked,
+                "UNSTABLE" => MergeState::Unstable,
+                "BEHIND" => MergeState::Behind,
+                _ => MergeState::Unknown,
+            };
+            let is_draft = item["isDraft"].as_bool().unwrap_or(false);
+            let review_decision = match item["reviewDecision"].as_str().unwrap_or("") {
+                "APPROVED" => ReviewDecision::Approved,
+                "CHANGES_REQUESTED" => ReviewDecision::ChangesRequested,
+                "REVIEW_REQUIRED" => ReviewDecision::ReviewRequired,
+                _ => ReviewDecision::None,
+            };
+            candidates.push(PrMergeCandidate {
+                number,
+                title,
+                branch,
+                mergeable,
+                merge_state,
+                is_draft,
+                review_decision,
+            });
+        }
+    }
+
+    Ok(candidates)
+}
+
+/// Merge a PR using squash strategy, deleting the head branch.
+pub fn merge_pr(repo: &str, pr_num: u64, title: &str) -> Result<()> {
+    let n = pr_num.to_string();
+    let status = Command::new("gh")
+        .args([
+            "pr",
+            "merge",
+            &n,
+            "--repo",
+            repo,
+            "--squash",
+            "--delete-branch",
+            "--subject",
+            title,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run gh pr merge")?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("gh pr merge failed for PR #{pr_num}")
+    }
 }
 
 /// Auto-merge clean sipag PRs.
