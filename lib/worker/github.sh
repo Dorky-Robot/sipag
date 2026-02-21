@@ -25,8 +25,11 @@ sipag_run_hook() {
 worker_has_pr() {
     local repo="$1" issue_num="$2"
     local candidates
-    candidates=$(gh pr list --repo "$repo" --state all --search "closes #${issue_num}" \
-        --json number,body,state,mergedAt 2>/dev/null)
+    if ! candidates=$(gh pr list --repo "$repo" --state all --search "closes #${issue_num}" \
+            --json number,body,state,mergedAt 2>/dev/null); then
+        echo "[worker] WARNING: gh pr list failed for repo=${repo} issue=#${issue_num}" >&2
+        return 1
+    fi
     echo "$candidates" | jq -e ".[] | select(
         (.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\")) and
         (.state == \"OPEN\" or .mergedAt != null)
@@ -37,8 +40,11 @@ worker_has_pr() {
 worker_has_open_pr() {
     local repo="$1" issue_num="$2"
     local candidates
-    candidates=$(gh pr list --repo "$repo" --state open --search "closes #${issue_num}" \
-        --json number,body 2>/dev/null)
+    if ! candidates=$(gh pr list --repo "$repo" --state open --search "closes #${issue_num}" \
+            --json number,body 2>/dev/null); then
+        echo "[worker] WARNING: gh pr list failed for repo=${repo} issue=#${issue_num}" >&2
+        return 1
+    fi
     echo "$candidates" | jq -e ".[] | select(.body // \"\" | test(\"(closes|fixes|resolves) #${issue_num}\\\\b\"))" &>/dev/null
 }
 
@@ -93,11 +99,15 @@ worker_reconcile() {
         # Use the timeline API: look for a cross-referenced event from a merged PR.
         # This is an exact link — GitHub sets this when a PR body contains
         # "Closes #N" and that PR is merged. No fuzzy matching involved.
-        local merged_pr
-        merged_pr=$(gh api "repos/${repo}/issues/${issue}/timeline" \
-            --jq '.[] | select(.event == "cross-referenced") |
-                  select(.source.issue.pull_request.merged_at != null) |
-                  .source.issue.number' 2>/dev/null | head -1)
+        local merged_pr timeline_raw
+        if ! timeline_raw=$(gh api "repos/${repo}/issues/${issue}/timeline" \
+                --jq '.[] | select(.event == "cross-referenced") |
+                      select(.source.issue.pull_request.merged_at != null) |
+                      .source.issue.number' 2>/dev/null); then
+            echo "[worker] WARNING: gh api timeline failed for repo=${repo} issue=#${issue}" >&2
+            continue
+        fi
+        merged_pr=$(echo "$timeline_raw" | head -1)
 
         [[ -z "$merged_pr" ]] && continue
 

@@ -65,16 +65,23 @@ worker_mark_state_done() {
     if [[ -f "$state_file" ]]; then
         local tmp
         tmp=$(mktemp)
-        jq \
-            --arg status "done" \
-            --arg ended_at "$now" \
-            --arg pr_num "$pr_num" \
-            --arg pr_url "$pr_url" \
-            '.status = $status |
-             .ended_at = (if .ended_at == null then $ended_at else .ended_at end) |
-             .pr_num = (if $pr_num == "" then .pr_num else ($pr_num | tonumber) end) |
-             .pr_url = (if $pr_url == "" then .pr_url else $pr_url end)' \
-            "$state_file" > "$tmp" && mv "$tmp" "$state_file"
+        # shellcheck disable=SC2064  # intentional: expand $tmp now to capture current path
+        trap "rm -f \"$tmp\"" EXIT
+        if jq \
+                --arg status "done" \
+                --arg ended_at "$now" \
+                --arg pr_num "$pr_num" \
+                --arg pr_url "$pr_url" \
+                '.status = $status |
+                 .ended_at = (if .ended_at == null then $ended_at else .ended_at end) |
+                 .pr_num = (if $pr_num == "" then .pr_num else ($pr_num | tonumber) end) |
+                 .pr_url = (if $pr_url == "" then .pr_url else $pr_url end)' \
+                "$state_file" > "$tmp"; then
+            mv "$tmp" "$state_file"
+        else
+            echo "[worker] ERROR: jq failed updating state to done for ${repo_slug}--${issue_num}" >&2
+            rm -f "$tmp"
+        fi
     else
         jq -n \
             --arg repo "${repo_slug/--//}" \

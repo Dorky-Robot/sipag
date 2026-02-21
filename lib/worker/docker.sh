@@ -89,20 +89,27 @@ _worker_update_state() {
     [[ -f "$state_file" ]] || return 0
     local tmp
     tmp=$(mktemp)
-    jq \
-        --arg status "$status" \
-        --argjson exit_code "$exit_code" \
-        --arg ended_at "$ended_at" \
-        --argjson duration_s "$duration_s" \
-        --arg pr_num "$pr_num" \
-        --arg pr_url "$pr_url" \
-        '.status = $status |
-         .exit_code = $exit_code |
-         .ended_at = $ended_at |
-         .duration_s = $duration_s |
-         .pr_num = (if $pr_num == "" then null else ($pr_num | tonumber) end) |
-         .pr_url = (if $pr_url == "" then null else $pr_url end)' \
-        "$state_file" > "$tmp" && mv "$tmp" "$state_file"
+    # shellcheck disable=SC2064  # intentional: expand $tmp now to capture current path
+    trap "rm -f \"$tmp\"" EXIT
+    if jq \
+            --arg status "$status" \
+            --argjson exit_code "$exit_code" \
+            --arg ended_at "$ended_at" \
+            --argjson duration_s "$duration_s" \
+            --arg pr_num "$pr_num" \
+            --arg pr_url "$pr_url" \
+            '.status = $status |
+             .exit_code = $exit_code |
+             .ended_at = $ended_at |
+             .duration_s = $duration_s |
+             .pr_num = (if $pr_num == "" then null else ($pr_num | tonumber) end) |
+             .pr_url = (if $pr_url == "" then null else $pr_url end)' \
+            "$state_file" > "$tmp"; then
+        mv "$tmp" "$state_file"
+    else
+        echo "[worker] ERROR: jq failed updating state for ${repo_slug}--${issue_num}" >&2
+        rm -f "$tmp"
+    fi
 }
 
 # Finalize a state file for a container that is no longer running.
@@ -178,9 +185,16 @@ worker_recover() {
             local tmp_enq now_enq
             now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             tmp_enq=$(mktemp)
-            jq --arg status "failed" --arg ended_at "$now_enq" \
+            # shellcheck disable=SC2064  # intentional: expand $tmp_enq now to capture current path
+            trap "rm -f \"$tmp_enq\"" EXIT
+            if jq --arg status "failed" --arg ended_at "$now_enq" \
                '.status = $status | .ended_at = $ended_at' \
-               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+               "$state_file" > "$tmp_enq"; then
+                mv "$tmp_enq" "$state_file"
+            else
+                echo "[worker] ERROR: jq failed updating enqueued state for #${issue_num}" >&2
+                rm -f "$tmp_enq"
+            fi
             finalized=$(( finalized + 1 ))
             continue
         fi
@@ -194,7 +208,14 @@ worker_recover() {
             if [[ "$status" == "recovering" ]]; then
                 local tmp
                 tmp=$(mktemp)
-                jq '.status = "running"' "$state_file" > "$tmp" && mv "$tmp" "$state_file"
+                # shellcheck disable=SC2064  # intentional: expand $tmp now to capture current path
+                trap "rm -f \"$tmp\"" EXIT
+                if jq '.status = "running"' "$state_file" > "$tmp"; then
+                    mv "$tmp" "$state_file"
+                else
+                    echo "[worker] ERROR: jq failed resetting recovering state for #${issue_num}" >&2
+                    rm -f "$tmp"
+                fi
             fi
 
             adopted=$(( adopted + 1 ))
@@ -244,9 +265,16 @@ worker_finalize_exited() {
             local tmp_enq now_enq
             now_enq=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
             tmp_enq=$(mktemp)
-            jq --arg status "failed" --arg ended_at "$now_enq" \
+            # shellcheck disable=SC2064  # intentional: expand $tmp_enq now to capture current path
+            trap "rm -f \"$tmp_enq\"" EXIT
+            if jq --arg status "failed" --arg ended_at "$now_enq" \
                '.status = $status | .ended_at = $ended_at' \
-               "$state_file" > "$tmp_enq" && mv "$tmp_enq" "$state_file"
+               "$state_file" > "$tmp_enq"; then
+                mv "$tmp_enq" "$state_file"
+            else
+                echo "[worker] ERROR: jq failed updating enqueued state for #${issue_num}" >&2
+                rm -f "$tmp_enq"
+            fi
             continue
         fi
 
@@ -321,8 +349,10 @@ ${body}
         "$WORKER_REPO_SLUG" "$issue_num" "$title" \
         "$branch" "$container_name" "$started_at" "$log_path"
 
+    local -a _timeout_args=()
+    [[ -n "${WORKER_TIMEOUT_CMD:-}" ]] && _timeout_args=("$WORKER_TIMEOUT_CMD" "$WORKER_TIMEOUT")
     PROMPT="$prompt" BRANCH="$branch" ISSUE_TITLE="$title" PR_BODY="$pr_body" \
-        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        "${_timeout_args[@]}" docker run --rm \
         --name "$container_name" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
@@ -497,8 +527,10 @@ worker_run_pr_iteration() {
     export SIPAG_ISSUE_TITLE="$title"
     sipag_run_hook "on-pr-iteration-started"
 
+    local -a _timeout_args=()
+    [[ -n "${WORKER_TIMEOUT_CMD:-}" ]] && _timeout_args=("$WORKER_TIMEOUT_CMD" "$WORKER_TIMEOUT")
     PROMPT="$prompt" BRANCH="$branch_name" \
-        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        "${_timeout_args[@]}" docker run --rm \
         --name "sipag-pr-${pr_num}" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
@@ -571,8 +603,10 @@ worker_run_conflict_fix() {
     prompt="${prompt//${_tpl_branch}/${branch_name}}"
     prompt="${prompt//${_tpl_pr_body}/${pr_body}}"
 
+    local -a _timeout_args=()
+    [[ -n "${WORKER_TIMEOUT_CMD:-}" ]] && _timeout_args=("$WORKER_TIMEOUT_CMD" "$WORKER_TIMEOUT")
     PROMPT="$prompt" BRANCH="$branch_name" \
-        ${WORKER_TIMEOUT_CMD:+$WORKER_TIMEOUT_CMD $WORKER_TIMEOUT} docker run --rm \
+        "${_timeout_args[@]}" docker run --rm \
         --name "sipag-conflict-${pr_num}" \
         -e CLAUDE_CODE_OAUTH_TOKEN="${WORKER_OAUTH_TOKEN}" \
         -e ANTHROPIC_API_KEY="${WORKER_API_KEY}" \
