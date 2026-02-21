@@ -99,6 +99,42 @@ EOF
   [[ "$WORKER_POLL_INTERVAL" == "60" ]]
 }
 
+# --- doc_refresh_interval ---
+
+@test "default WORKER_DOC_REFRESH_INTERVAL is 10" {
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "10" ]]
+}
+
+@test "SIPAG_DOC_REFRESH_INTERVAL env var sets initial doc_refresh_interval" {
+  SIPAG_DOC_REFRESH_INTERVAL=5 source "${SIPAG_ROOT}/lib/worker.sh"
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "5" ]]
+}
+
+@test "worker_load_config reads doc_refresh_interval from config file" {
+  echo "doc_refresh_interval=20" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "20" ]]
+}
+
+@test "worker_load_config: doc_refresh_interval=0 disables auto refresh" {
+  echo "doc_refresh_interval=0" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "0" ]]
+}
+
+@test "worker_load_config reads all config keys including doc_refresh_interval" {
+  cat > "${SIPAG_DIR}/config" <<'EOF'
+batch_size=3
+image=my-image:v2
+timeout=3600
+poll_interval=60
+work_label=triaged
+doc_refresh_interval=15
+EOF
+  worker_load_config
+  [[ "$WORKER_DOC_REFRESH_INTERVAL" == "15" ]]
+}
+
 @test "worker_load_config ignores comment lines" {
   cat > "${SIPAG_DIR}/config" <<'EOF'
 # This is a comment
