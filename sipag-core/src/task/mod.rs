@@ -1,9 +1,13 @@
+pub mod aggregate;
 pub mod naming;
 pub mod parser;
+pub mod repository;
 pub mod storage;
 
+pub use aggregate::{Task, TaskId};
 pub use naming::slugify;
 pub use parser::parse_task_content;
+pub use repository::{FileTaskRepository, TaskRepository};
 pub use storage::{
     append_ended, default_sipag_dir, list_tasks, next_filename, read_task_file, write_task_file,
     write_tracking_file,
