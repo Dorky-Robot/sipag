@@ -27,7 +27,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Launch the interactive TUI (default when no args given)
     Tui,
@@ -194,7 +194,7 @@ pub enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum RepoCommands {
     /// Register a repo name → URL mapping
     Add { name: String, url: String },
@@ -849,4 +849,470 @@ fn cmd_completions(shell: &str) -> Result<()> {
     };
     print!("{script}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    // ── shell_quote ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn shell_quote_simple_path() {
+        assert_eq!(shell_quote("/usr/bin/foo"), "'/usr/bin/foo'");
+    }
+
+    #[test]
+    fn shell_quote_path_with_spaces() {
+        assert_eq!(shell_quote("/home/user/my stuff"), "'/home/user/my stuff'");
+    }
+
+    #[test]
+    fn shell_quote_path_with_single_quotes() {
+        assert_eq!(
+            shell_quote("/home/user/it's here"),
+            "'/home/user/it'\\''s here'"
+        );
+    }
+
+    // ── compute_duration ─────────────────────────────────────────────────────
+
+    fn make_task_file(started: Option<&str>, ended: Option<&str>) -> sipag_core::task::TaskFile {
+        sipag_core::task::TaskFile {
+            name: "test".to_string(),
+            title: "test".to_string(),
+            body: String::new(),
+            repo: None,
+            priority: "medium".to_string(),
+            source: None,
+            added: None,
+            started: started.map(String::from),
+            ended: ended.map(String::from),
+            container: None,
+            issue: None,
+            status: sipag_core::task::TaskStatus::Queue,
+            file_path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn compute_duration_with_start_and_end() {
+        let task = make_task_file(Some("2024-01-01T00:00:00Z"), Some("2024-01-01T00:01:30Z"));
+        let now = chrono::Utc::now();
+        assert_eq!(compute_duration(&task, &now), "1m30s");
+    }
+
+    #[test]
+    fn compute_duration_no_start() {
+        let task = make_task_file(None, None);
+        let now = chrono::Utc::now();
+        assert_eq!(compute_duration(&task, &now), "-");
+    }
+
+    // ── resolve_repos ────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_repos_from_repos_conf() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("repos.conf"),
+            "sipag=https://github.com/Dorky-Robot/sipag.git\n\
+             other=https://github.com/Dorky-Robot/other\n",
+        )
+        .unwrap();
+
+        let repos = resolve_repos(dir.path()).unwrap();
+        assert_eq!(repos, vec!["Dorky-Robot/sipag", "Dorky-Robot/other"]);
+    }
+
+    #[test]
+    fn resolve_repos_skips_comments_and_blanks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("repos.conf"),
+            "# A comment\n\n  # another\nsipag=https://github.com/Dorky-Robot/sipag\n",
+        )
+        .unwrap();
+
+        let repos = resolve_repos(dir.path()).unwrap();
+        assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
+    }
+
+    #[test]
+    fn resolve_repos_empty_conf_falls_through_to_git() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("repos.conf"), "# nothing useful\n").unwrap();
+        // repos.conf has no entries, so resolve_repos falls through to
+        // `git remote get-url origin`. In CI or a git repo this may succeed
+        // or fail — we just verify it doesn't panic.
+        let _ = resolve_repos(dir.path());
+    }
+
+    // ── clap parsing ─────────────────────────────────────────────────────────
+    // These tests verify that every subcommand parses correctly.
+    // This is the kind of test that would have caught the `sipag status`
+    // regression — if the route is wrong, the variant won't match.
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).unwrap()
+    }
+
+    #[test]
+    fn parse_no_args_is_none() {
+        let cli = parse(&["sipag"]);
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parse_tui() {
+        let cli = parse(&["sipag", "tui"]);
+        assert!(matches!(cli.command, Some(Commands::Tui)));
+    }
+
+    #[test]
+    fn parse_status() {
+        let cli = parse(&["sipag", "status"]);
+        assert!(matches!(cli.command, Some(Commands::Status)));
+    }
+
+    #[test]
+    fn parse_version() {
+        let cli = parse(&["sipag", "version"]);
+        assert!(matches!(cli.command, Some(Commands::Version)));
+    }
+
+    #[test]
+    fn parse_init() {
+        let cli = parse(&["sipag", "init"]);
+        assert!(matches!(cli.command, Some(Commands::Init)));
+    }
+
+    #[test]
+    fn parse_ps() {
+        let cli = parse(&["sipag", "ps"]);
+        assert!(matches!(cli.command, Some(Commands::Ps)));
+    }
+
+    #[test]
+    fn parse_drain() {
+        let cli = parse(&["sipag", "drain"]);
+        assert!(matches!(cli.command, Some(Commands::Drain)));
+    }
+
+    #[test]
+    fn parse_resume() {
+        let cli = parse(&["sipag", "resume"]);
+        assert!(matches!(cli.command, Some(Commands::Resume)));
+    }
+
+    #[test]
+    fn parse_setup() {
+        let cli = parse(&["sipag", "setup"]);
+        assert!(matches!(cli.command, Some(Commands::Setup)));
+    }
+
+    #[test]
+    fn parse_doctor() {
+        let cli = parse(&["sipag", "doctor"]);
+        assert!(matches!(cli.command, Some(Commands::Doctor)));
+    }
+
+    #[test]
+    fn parse_work_with_repos() {
+        let cli = parse(&["sipag", "work", "Dorky-Robot/sipag", "other/repo"]);
+        match cli.command {
+            Some(Commands::Work { repos, once }) => {
+                assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
+                assert!(!once);
+            }
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_once() {
+        let cli = parse(&["sipag", "work", "--once", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { once, .. }) => assert!(once),
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_run() {
+        let cli = parse(&[
+            "sipag",
+            "run",
+            "--repo",
+            "https://github.com/test/repo",
+            "-b",
+            "Fix the bug",
+        ]);
+        match cli.command {
+            Some(Commands::Run {
+                repo,
+                background,
+                description,
+                issue,
+            }) => {
+                assert_eq!(repo, "https://github.com/test/repo");
+                assert!(background);
+                assert_eq!(description, "Fix the bug");
+                assert!(issue.is_none());
+            }
+            other => panic!("Expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_run_with_issue() {
+        let cli = parse(&[
+            "sipag",
+            "run",
+            "--repo",
+            "https://github.com/test/repo",
+            "--issue",
+            "42",
+            "Fix the bug",
+        ]);
+        match cli.command {
+            Some(Commands::Run { issue, .. }) => {
+                assert_eq!(issue, Some("42".to_string()));
+            }
+            other => panic!("Expected Run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_logs() {
+        let cli = parse(&["sipag", "logs", "task-123"]);
+        match cli.command {
+            Some(Commands::Logs { id }) => assert_eq!(id, "task-123"),
+            other => panic!("Expected Logs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_kill() {
+        let cli = parse(&["sipag", "kill", "task-123"]);
+        match cli.command {
+            Some(Commands::Kill { id }) => assert_eq!(id, "task-123"),
+            other => panic!("Expected Kill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_add() {
+        let cli = parse(&[
+            "sipag",
+            "add",
+            "my task",
+            "--repo",
+            "sipag",
+            "--priority",
+            "high",
+        ]);
+        match cli.command {
+            Some(Commands::Add {
+                title,
+                repo,
+                priority,
+            }) => {
+                assert_eq!(title, "my task");
+                assert_eq!(repo, "sipag");
+                assert_eq!(priority, "high");
+            }
+            other => panic!("Expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_add_default_priority() {
+        let cli = parse(&["sipag", "add", "my task", "--repo", "sipag"]);
+        match cli.command {
+            Some(Commands::Add { priority, .. }) => assert_eq!(priority, "medium"),
+            other => panic!("Expected Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_show() {
+        let cli = parse(&["sipag", "show", "task-name"]);
+        match cli.command {
+            Some(Commands::Show { name }) => assert_eq!(name, "task-name"),
+            other => panic!("Expected Show, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_retry() {
+        let cli = parse(&["sipag", "retry", "task-name"]);
+        match cli.command {
+            Some(Commands::Retry { name }) => assert_eq!(name, "task-name"),
+            other => panic!("Expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_add() {
+        let cli = parse(&[
+            "sipag",
+            "repo",
+            "add",
+            "myrepo",
+            "https://github.com/test/repo",
+        ]);
+        match cli.command {
+            Some(Commands::Repo {
+                subcommand: RepoCommands::Add { name, url },
+            }) => {
+                assert_eq!(name, "myrepo");
+                assert_eq!(url, "https://github.com/test/repo");
+            }
+            other => panic!("Expected Repo Add, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_repo_list() {
+        let cli = parse(&["sipag", "repo", "list"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Repo {
+                subcommand: RepoCommands::List
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_start_with_repo() {
+        let cli = parse(&["sipag", "start", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Start { repo }) => {
+                assert_eq!(repo, Some("Dorky-Robot/sipag".to_string()));
+            }
+            other => panic!("Expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_start_no_repo() {
+        let cli = parse(&["sipag", "start"]);
+        match cli.command {
+            Some(Commands::Start { repo }) => assert!(repo.is_none()),
+            other => panic!("Expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_merge() {
+        let cli = parse(&["sipag", "merge", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Merge { repo }) => {
+                assert_eq!(repo, Some("Dorky-Robot/sipag".to_string()));
+            }
+            other => panic!("Expected Merge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_refresh_docs() {
+        let cli = parse(&["sipag", "refresh-docs", "Dorky-Robot/sipag", "--check"]);
+        match cli.command {
+            Some(Commands::RefreshDocs { repo, check }) => {
+                assert_eq!(repo, "Dorky-Robot/sipag");
+                assert!(check);
+            }
+            other => panic!("Expected RefreshDocs, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_triage() {
+        let cli = parse(&["sipag", "triage", "Dorky-Robot/sipag", "--dry-run"]);
+        match cli.command {
+            Some(Commands::Triage {
+                repo,
+                dry_run,
+                apply,
+            }) => {
+                assert_eq!(repo, "Dorky-Robot/sipag");
+                assert!(dry_run);
+                assert!(!apply);
+            }
+            other => panic!("Expected Triage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_completions() {
+        let cli = parse(&["sipag", "completions", "zsh"]);
+        match cli.command {
+            Some(Commands::Completions { shell }) => assert_eq!(shell, "zsh"),
+            other => panic!("Expected Completions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_queue_run() {
+        let cli = parse(&["sipag", "queue-run"]);
+        assert!(matches!(cli.command, Some(Commands::QueueRun)));
+    }
+
+    // ── routing tests ────────────────────────────────────────────────────────
+    // Verify that the match arms in run() map to the expected commands.
+    // We test routes that DON'T need Docker, GitHub, or filesystem side effects.
+
+    #[test]
+    fn route_version_prints_version() {
+        let cli = parse(&["sipag", "version"]);
+        // run() should succeed without side effects
+        assert!(run(cli).is_ok());
+    }
+
+    #[test]
+    fn route_init_creates_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("SIPAG_DIR", dir.path());
+        let cli = parse(&["sipag", "init"]);
+        let result = run(cli);
+        std::env::remove_var("SIPAG_DIR");
+        assert!(result.is_ok());
+    }
+
+    // Verify that None, Tui, and Status all route to the same TUI exec path.
+    // We can't actually run sipag-tui in tests, but we verify the match hits
+    // the same branch by checking all three produce the same error when
+    // sipag-tui is absent from PATH.
+    #[test]
+    fn route_status_tui_and_none_all_exec_tui() {
+        // Temporarily override PATH so sipag-tui is not found
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "/nonexistent");
+
+        let err_none = run(parse(&["sipag"])).unwrap_err();
+        let err_tui = run(parse(&["sipag", "tui"])).unwrap_err();
+        let err_status = run(parse(&["sipag", "status"])).unwrap_err();
+
+        std::env::set_var("PATH", &original_path);
+
+        // All three should fail with the same sipag-tui error
+        let msg_none = format!("{err_none:#}");
+        let msg_tui = format!("{err_tui:#}");
+        let msg_status = format!("{err_status:#}");
+
+        assert!(
+            msg_none.contains("sipag-tui"),
+            "None route should exec sipag-tui: {msg_none}"
+        );
+        assert!(
+            msg_tui.contains("sipag-tui"),
+            "Tui route should exec sipag-tui: {msg_tui}"
+        );
+        assert!(
+            msg_status.contains("sipag-tui"),
+            "Status route should exec sipag-tui: {msg_status}"
+        );
+    }
 }
