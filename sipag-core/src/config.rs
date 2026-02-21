@@ -37,7 +37,7 @@ impl Default for Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("./tasks.md")),
             image: std::env::var("SIPAG_IMAGE")
-                .unwrap_or_else(|_| "sipag-worker:latest".to_string()),
+                .unwrap_or_else(|_| "ghcr.io/dorky-robot/sipag-worker:latest".to_string()),
             timeout: std::env::var("SIPAG_TIMEOUT")
                 .ok()
                 .and_then(|s| s.parse().ok())

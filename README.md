@@ -264,7 +264,7 @@ Simplify sipag to sandbox launcher
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIPAG_DIR` | `~/.sipag` | Data directory |
-| `SIPAG_IMAGE` | `sipag-worker:latest` | Docker base image |
+| `SIPAG_IMAGE` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker base image |
 | `SIPAG_TIMEOUT` | `1800` | Per-container timeout (seconds) |
 | `SIPAG_MODEL` | _(claude default)_ | Model override |
 | `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |

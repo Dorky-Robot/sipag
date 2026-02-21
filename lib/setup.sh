@@ -11,7 +11,7 @@ SETUP_CLAUDE_PERMISSIONS=(
 )
 
 # Docker image name for workers
-SETUP_WORKER_IMAGE="${SIPAG_IMAGE:-sipag-worker:latest}"
+SETUP_WORKER_IMAGE="${SIPAG_IMAGE:-ghcr.io/dorky-robot/sipag-worker:latest}"
 
 # Output helpers
 _setup_ok()   { printf "  OK  %s\n" "$*"; }
@@ -80,9 +80,9 @@ setup_run() {
 	echo "Setting up authentication..."
 	_setup_auth
 
-	# --- Build worker image ---
+	# --- Pull worker image ---
 	echo ""
-	echo "Building worker image..."
+	echo "Pulling worker image..."
 	if ! _setup_docker_image; then
 		return 1
 	fi
@@ -135,21 +135,31 @@ _setup_auth() {
 	fi
 }
 
-# Build or verify the sipag-worker Docker image.
+# Pull or build the sipag-worker Docker image.
+# Pulls from GHCR by default; falls back to local Dockerfile build for custom images.
 _setup_docker_image() {
 	local image="${SETUP_WORKER_IMAGE}"
 
 	if docker image inspect "$image" >/dev/null 2>&1; then
-		_setup_ok "${image} exists"
+		_setup_ok "${image} already present"
 		return 0
 	fi
 
-	# Try to find the Dockerfile relative to this script
+	# Try to pull from registry first
+	printf "  --  Pulling %s... " "$image"
+	if docker pull "$image" >/dev/null 2>&1; then
+		echo "done"
+		_setup_ok "${image} pulled"
+		return 0
+	fi
+	echo "FAILED"
+
+	# Fall back to building from local Dockerfile (useful for custom/local image names)
 	local dockerfile_dir
 	dockerfile_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 	if [[ -f "${dockerfile_dir}/Dockerfile" ]]; then
-		printf "  --  Building %s... " "$image"
+		printf "  --  Building %s from Dockerfile... " "$image"
 		if docker build -t "$image" "$dockerfile_dir" >/dev/null 2>&1; then
 			echo "done"
 			_setup_ok "${image} built"
@@ -159,8 +169,8 @@ _setup_docker_image() {
 			return 1
 		fi
 	else
-		_setup_err "${image} not found and no Dockerfile available to build from"
-		echo "      Run: docker build -t ${image} /path/to/sipag"
+		_setup_err "Could not pull ${image} and no Dockerfile found"
+		echo "      To use a custom image: SIPAG_IMAGE=my-image sipag setup"
 		return 1
 	fi
 }
