@@ -3,7 +3,7 @@ use crate::task::Status;
 use ratatui::{
     layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState},
     Frame,
 };
@@ -42,16 +42,31 @@ pub fn render_list(f: &mut Frame, app: &App) {
         .count();
 
     // ── Header bar ────────────────────────────────────────────────────────────
-    let header_text = format!(
+    let header_base = format!(
         " sipag Status [All]  running: {}  done: {}  failed: {}  queue: {}",
         running_count, done_count, failed_count, queue_count
     );
-    let header = Paragraph::new(Line::from(header_text)).style(
-        Style::default()
-            .fg(Color::White)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    );
+    let header_style = Style::default()
+        .fg(Color::White)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+
+    let header_line = if app.draining {
+        Line::from(vec![
+            Span::styled(header_base, header_style),
+            Span::styled(
+                "  [DRAINING]",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(header_base, header_style))
+    };
+
+    let header = Paragraph::new(header_line).style(Style::default().bg(Color::DarkGray));
     f.render_widget(header, chunks[0]);
 
     // ── Table column headers ──────────────────────────────────────────────────
@@ -128,14 +143,11 @@ pub fn render_list(f: &mut Frame, app: &App) {
     // ── Footer bar ────────────────────────────────────────────────────────────
     let selected_task = app.tasks.get(app.selected);
     let has_running = selected_task.is_some_and(|t| t.status == Status::Running);
-    let has_failed = selected_task.is_some_and(|t| t.status == Status::Failed);
 
     let footer_text = if has_running {
-        " [j/k] navigate  [Enter] details  [a] attach  [q] quit"
-    } else if has_failed {
-        " [j/k] navigate  [Enter] details  [r] retry  [q] quit"
+        " [↑↓/j] nav  [Enter] details  [a] attach  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
     } else {
-        " [j/k] navigate  [Enter] details  [q] quit"
+        " [↑↓/j] nav  [Enter] details  [d] drain  [k] kill  [K] kill all  [r] resume  [q] quit"
     };
 
     let footer = Paragraph::new(Line::from(footer_text))

@@ -70,6 +70,40 @@ fn parse_worker_state(json: &str) -> Result<WorkerState> {
     })
 }
 
+/// Update the status of a worker to "failed" in its JSON file.
+///
+/// Searches `<sipag_dir>/workers/*.json` for the file whose `container_name`
+/// matches the given name, then overwrites its `status` field in place.
+/// No-op if the file is not found or cannot be parsed.
+pub fn mark_worker_failed(sipag_dir: &Path, container_name: &str) -> Result<()> {
+    let workers_dir = sipag_dir.join("workers");
+    if !workers_dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&workers_dir)?.flatten() {
+        let path = entry.path();
+        if path.extension().map(|x| x != "json").unwrap_or(true) {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut v: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v["container_name"].as_str() == Some(container_name) {
+            v["status"] = serde_json::Value::String("failed".to_string());
+            if let Ok(updated) = serde_json::to_string_pretty(&v) {
+                let _ = fs::write(&path, updated);
+            }
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Format a duration in seconds to a human-readable string like "4m23s".
 pub fn format_worker_duration(duration_s: Option<i64>) -> String {
     match duration_s {

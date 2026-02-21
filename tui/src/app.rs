@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sipag_core::worker::list_workers;
+use sipag_core::worker::{list_workers, mark_worker_failed};
 use std::{fs, path::PathBuf};
 
 use crate::task::{Status, Task};
@@ -28,11 +28,14 @@ pub struct App {
     /// Set when the user presses 'a' on a running task. The main loop
     /// reads this, suspends the TUI, and runs `docker exec` to attach.
     pub attach_request: Option<String>,
+    /// True when `~/.sipag/drain` exists (workers won't pick up new issues).
+    pub draining: bool,
 }
 
 impl App {
     pub fn new() -> Result<Self> {
         let sipag_dir = Self::resolve_sipag_dir();
+        let draining = sipag_dir.join("drain").exists();
         let mut app = Self {
             sipag_dir,
             tasks: vec![],
@@ -41,6 +44,7 @@ impl App {
             log_lines: vec![],
             log_scroll: 0,
             attach_request: None,
+            draining,
         };
         app.refresh_tasks()?;
         Ok(app)
@@ -65,6 +69,8 @@ impl App {
         } else if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len() - 1;
         }
+        // Re-check drain signal on every refresh
+        self.draining = self.sipag_dir.join("drain").exists();
         Ok(())
     }
 
@@ -162,6 +168,71 @@ impl App {
         self.close_detail();
     }
 
+    /// Create the drain signal file (`~/.sipag/drain`).
+    ///
+    /// Workers will finish their current batch and then stop polling for new issues.
+    pub fn drain(&mut self) -> Result<()> {
+        let drain_path = self.sipag_dir.join("drain");
+        let _ = fs::write(&drain_path, "");
+        self.draining = true;
+        Ok(())
+    }
+
+    /// Remove the drain signal file (`~/.sipag/drain`), allowing workers to
+    /// resume picking up new issues.
+    pub fn resume(&mut self) -> Result<()> {
+        let drain_path = self.sipag_dir.join("drain");
+        if drain_path.exists() {
+            let _ = fs::remove_file(&drain_path);
+        }
+        self.draining = false;
+        Ok(())
+    }
+
+    /// Kill the Docker container for the currently selected running task and
+    /// mark its worker state JSON as `"failed"`.
+    pub fn kill_selected(&mut self) -> Result<()> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+        let task = &self.tasks[self.selected];
+        if task.status != Status::Running {
+            return Ok(());
+        }
+        let Some(container) = task.container.clone() else {
+            return Ok(());
+        };
+
+        let _ = std::process::Command::new("docker")
+            .args(["kill", &container])
+            .output();
+
+        let _ = mark_worker_failed(&self.sipag_dir, &container);
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
+    /// Kill all running Docker containers tracked in the worker state files
+    /// and mark each as `"failed"`.
+    pub fn kill_all(&mut self) -> Result<()> {
+        let containers: Vec<String> = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == Status::Running)
+            .filter_map(|t| t.container.clone())
+            .collect();
+
+        for container in &containers {
+            let _ = std::process::Command::new("docker")
+                .args(["kill", container.as_str()])
+                .output();
+            let _ = mark_worker_failed(&self.sipag_dir, container);
+        }
+
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
     // ── Attach ────────────────────────────────────────────────────────────────
 
     /// Get the container name for the selected running task.
@@ -190,13 +261,17 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
-            KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
+            KeyCode::Up => self.select_prev(),
             KeyCode::Enter => self.open_detail(),
             KeyCode::Char('a') => {
                 if let Some(container) = self.selected_container_name() {
                     self.attach_request = Some(container);
                 }
             }
+            KeyCode::Char('d') => self.drain()?,
+            KeyCode::Char('r') => self.resume()?,
+            KeyCode::Char('k') => self.kill_selected()?,
+            KeyCode::Char('K') => self.kill_all()?,
             _ => {}
         }
         Ok(false)
@@ -278,6 +353,7 @@ mod tests {
             log_lines: vec![],
             log_scroll: 0,
             attach_request: None,
+            draining: false,
         };
 
         app.select_next();
@@ -329,5 +405,83 @@ mod tests {
         assert_eq!(app.tasks.len(), 1);
         assert_eq!(app.tasks[0].issue, Some(42));
         assert_eq!(app.tasks[0].status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn drain_creates_file_and_resume_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+        };
+
+        assert!(!app.draining);
+        app.drain().unwrap();
+        assert!(app.draining);
+        assert!(dir.path().join("drain").exists());
+
+        app.resume().unwrap();
+        assert!(!app.draining);
+        assert!(!dir.path().join("drain").exists());
+    }
+
+    #[test]
+    fn resume_is_noop_when_not_draining() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+        };
+
+        // Should not panic or error when drain file does not exist
+        app.resume().unwrap();
+        assert!(!app.draining);
+    }
+
+    #[test]
+    fn kill_selected_noop_on_non_running() {
+        use crate::task::Task;
+
+        let dir = tempfile::tempdir().unwrap();
+        let task = Task {
+            id: 1,
+            title: "Test".to_string(),
+            repo: None,
+            priority: None,
+            source: None,
+            added: None,
+            body: String::new(),
+            status: Status::Queue,
+            issue: None,
+            file_path: std::path::PathBuf::new(),
+            container: Some("sipag-issue-1".to_string()),
+            log_path: None,
+        };
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![task],
+            selected: 0,
+            view: View::List,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            draining: false,
+        };
+
+        // Should not error — non-running task is ignored
+        app.kill_selected().unwrap();
+        assert_eq!(app.tasks[0].status, Status::Queue);
     }
 }
