@@ -9,6 +9,7 @@
 #   dedup.sh   — worker_is_seen/mark_seen/unsee, worker_pr_is/mark_running/done
 #   github.sh  — worker_has_pr/open_pr, find_prs_needing_iteration,
 #                worker_reconcile, worker_transition_label, sipag_run_hook
+#   merge.sh   — worker_auto_merge
 #   docker.sh  — worker_run_issue, worker_run_pr_iteration
 #   loop.sh    — worker_loop
 
@@ -22,6 +23,8 @@ source "${_SIPAG_WORKER_LIB}/worker/config.sh"
 source "${_SIPAG_WORKER_LIB}/worker/dedup.sh"
 # shellcheck source=worker/github.sh
 source "${_SIPAG_WORKER_LIB}/worker/github.sh"
+# shellcheck source=worker/merge.sh
+source "${_SIPAG_WORKER_LIB}/worker/merge.sh"
 # shellcheck source=worker/docker.sh
 source "${_SIPAG_WORKER_LIB}/worker/docker.sh"
 # shellcheck source=worker/loop.sh

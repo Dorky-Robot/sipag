@@ -34,6 +34,9 @@ worker_loop() {
         # Reconcile: close issues that already have merged PRs
         worker_reconcile "$repo"
 
+        # Auto-merge clean sipag PRs (prevents conflict cascades)
+        worker_auto_merge "$repo"
+
         # Fetch open issues with the work label
         local -a label_args=()
         [[ -n "$WORKER_WORK_LABEL" ]] && label_args=(--label "$WORKER_WORK_LABEL")

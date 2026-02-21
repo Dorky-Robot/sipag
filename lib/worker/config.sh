@@ -18,6 +18,7 @@ WORKER_TIMEOUT=1800
 WORKER_POLL_INTERVAL=120
 WORKER_WORK_LABEL="${SIPAG_WORK_LABEL:-approved}"
 WORKER_ONCE=0
+WORKER_AUTO_MERGE=true
 WORKER_REPO_SLUG=""
 
 # Load config
@@ -35,6 +36,7 @@ worker_load_config() {
             timeout) WORKER_TIMEOUT="$value" ;;
             poll_interval) WORKER_POLL_INTERVAL="$value" ;;
             work_label) WORKER_WORK_LABEL="$value" ;;
+            auto_merge) WORKER_AUTO_MERGE="$value" ;;
         esac
     done < "$config"
 }

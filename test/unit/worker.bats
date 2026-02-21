@@ -571,3 +571,155 @@ GHEOF
   run worker_loop "owner/repo"
   assert_output_contains "--once:"
 }
+
+# --- WORKER_AUTO_MERGE ---
+
+@test "WORKER_AUTO_MERGE defaults to true" {
+  [[ "$WORKER_AUTO_MERGE" == "true" ]]
+}
+
+@test "worker_load_config reads auto_merge from config file" {
+  echo "auto_merge=false" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_AUTO_MERGE" == "false" ]]
+}
+
+@test "worker_load_config: auto_merge=true enables auto-merge" {
+  echo "auto_merge=true" > "${SIPAG_DIR}/config"
+  worker_load_config
+  [[ "$WORKER_AUTO_MERGE" == "true" ]]
+}
+
+# --- worker_auto_merge ---
+
+@test "worker_auto_merge: skips all merges when WORKER_AUTO_MERGE=false" {
+  WORKER_AUTO_MERGE=false
+  # gh should not be called at all — if it were, the mock would fail
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+echo "gh should not be called" >&2
+exit 1
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Auto-merging"
+}
+
+@test "worker_auto_merge: does nothing when no candidates" {
+  WORKER_AUTO_MERGE=true
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+# pr list returns empty — no mergeable PRs
+echo ''
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_not_contains "Auto-merging"
+}
+
+@test "worker_auto_merge: merges a single clean PR" {
+  WORKER_AUTO_MERGE=true
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  echo "42"
+elif [[ "$args" == *"pr view"* ]]; then
+  echo "feat: add awesome feature"
+elif [[ "$args" == *"pr merge"* ]]; then
+  exit 0
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Auto-merging PR #42"
+  assert_output_contains "Merged PR #42"
+}
+
+@test "worker_auto_merge: logs failure when merge command fails" {
+  WORKER_AUTO_MERGE=true
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  echo "7"
+elif [[ "$args" == *"pr view"* ]]; then
+  echo "fix: something"
+elif [[ "$args" == *"pr merge"* ]]; then
+  exit 1
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  [[ "$status" -eq 0 ]]
+  assert_output_contains "Auto-merging PR #7"
+  assert_output_contains "Failed to merge PR #7"
+}
+
+@test "worker_auto_merge: fires on-pr-merged hook after successful merge" {
+  WORKER_AUTO_MERGE=true
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local marker="${TEST_TMPDIR}/hook-ran"
+  cat > "${SIPAG_DIR}/hooks/on-pr-merged" <<HOOK
+#!/usr/bin/env bash
+touch "${marker}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-pr-merged"
+
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  echo "99"
+elif [[ "$args" == *"pr view"* ]]; then
+  echo "chore: cleanup"
+elif [[ "$args" == *"pr merge"* ]]; then
+  exit 0
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  worker_auto_merge "owner/repo"
+  # wait for background hook (up to 2s)
+  local i=0
+  while [[ ! -f "$marker" && $i -lt 20 ]]; do
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  [[ -f "$marker" ]]
+}
+
+@test "worker_auto_merge: does not fire hook when merge fails" {
+  WORKER_AUTO_MERGE=true
+  mkdir -p "${SIPAG_DIR}/hooks"
+  local marker="${TEST_TMPDIR}/hook-should-not-run"
+  cat > "${SIPAG_DIR}/hooks/on-pr-merged" <<HOOK
+#!/usr/bin/env bash
+touch "${marker}"
+HOOK
+  chmod +x "${SIPAG_DIR}/hooks/on-pr-merged"
+
+  cat > "${TEST_TMPDIR}/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+args="$*"
+if [[ "$args" == *"pr list"* ]]; then
+  echo "55"
+elif [[ "$args" == *"pr view"* ]]; then
+  echo "fix: broken"
+elif [[ "$args" == *"pr merge"* ]]; then
+  exit 1
+fi
+GHEOF
+  chmod +x "${TEST_TMPDIR}/bin/gh"
+
+  run worker_auto_merge "owner/repo"
+  sleep 0.2
+  [[ ! -f "$marker" ]]
+}
