@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# ── Resolve prompt from file (avoids OS arg size limits) ─────────────────────
+if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
+    PROMPT="$(cat "$PROMPT_FILE")"
+    export PROMPT
+fi
+
 git clone "https://github.com/${REPO}.git" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"

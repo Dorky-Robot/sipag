@@ -695,6 +695,26 @@ fn run_worker_container(
         }
     };
 
+    // Write prompt and PR body to temp files to avoid OS argument size limits.
+    // These are bind-mounted into the container and read via PROMPT_FILE / PR_BODY_FILE.
+    let prompt_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("sipag: failed to create temp dir for prompt: {e}");
+            return false;
+        }
+    };
+    let prompt_file = prompt_dir.path().join("prompt.md");
+    if let Err(e) = fs::write(&prompt_file, prompt) {
+        eprintln!("sipag: failed to write prompt file: {e}");
+        return false;
+    }
+    let pr_body_file = prompt_dir.path().join("pr_body.md");
+    if let Err(e) = fs::write(&pr_body_file, pr_body) {
+        eprintln!("sipag: failed to write PR body file: {e}");
+        return false;
+    }
+
     let timeout_bin = resolve_timeout_command();
     let mut cmd;
     if let Some(ref bin) = timeout_bin {
@@ -722,6 +742,14 @@ fn run_worker_container(
         cmd.arg("--label").arg(format!("org.sipag.issues={issues}"));
     }
 
+    // Mount prompt files into container (avoids OS argument size limits).
+    cmd.arg("-v")
+        .arg(format!("{}:/sipag-prompt:ro", prompt_dir.path().display()))
+        .arg("-e")
+        .arg("PROMPT_FILE=/sipag-prompt/prompt.md")
+        .arg("-e")
+        .arg("PR_BODY_FILE=/sipag-prompt/pr_body.md");
+
     // Mount workers directory for state self-reporting.
     if let Some((workers_dir, state_filename)) = state_mount {
         cmd.arg("-v")
@@ -743,11 +771,6 @@ fn run_worker_container(
         .arg(format!("BRANCH={branch}"))
         .arg("-e")
         .arg(format!("ISSUE_TITLE={issue_title}"))
-        .arg("-e")
-        .arg(format!("PR_BODY={pr_body}"))
-        // The Claude prompt
-        .arg("-e")
-        .arg(format!("PROMPT={prompt}"))
         // Pass credential env vars (values set below or inherited)
         .arg("-e")
         .arg("CLAUDE_CODE_OAUTH_TOKEN")

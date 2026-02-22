@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Resolve prompt from file (avoids OS arg size limits) ─────────────────────
+if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
+    PROMPT="$(cat "$PROMPT_FILE")"
+    export PROMPT
+fi
+if [[ -n "${PR_BODY_FILE:-}" ]] && [[ -f "$PR_BODY_FILE" ]]; then
+    PR_BODY="$(cat "$PR_BODY_FILE")"
+    export PR_BODY
+fi
+
 # ── Resolve issue list ───────────────────────────────────────────────────────
 # ISSUE_NUMS (space-separated) is set for grouped workers; fall back to ISSUE_NUM.
 ALL_ISSUES="${ISSUE_NUMS:-${ISSUE_NUM:-}}"

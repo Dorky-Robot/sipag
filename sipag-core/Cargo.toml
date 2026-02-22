@@ -8,6 +8,4 @@ description = "Core library for sipag — sandbox launcher for Claude Code"
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde_json = "1"
-
-[dev-dependencies]
 tempfile = "3"
