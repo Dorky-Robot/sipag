@@ -202,6 +202,8 @@ pub enum Commands {
         #[arg(long)]
         description: String,
         #[arg(long)]
+        issue: Option<String>,
+        #[arg(long)]
         image: String,
         #[arg(long)]
         timeout: u64,
@@ -294,6 +296,7 @@ pub fn run(cli: Cli) -> Result<()> {
             task_id,
             repo_url,
             description,
+            issue,
             image,
             timeout,
             sipag_dir,
@@ -302,6 +305,7 @@ pub fn run(cli: Cli) -> Result<()> {
             &task_id,
             &repo_url,
             &description,
+            issue.as_deref(),
             &image,
             timeout,
         ),

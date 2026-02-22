@@ -56,24 +56,26 @@ pub fn run_impl(sipag_dir: &Path, cfg: RunConfig<'_>) -> Result<()> {
         // Re-invoke the binary with an internal subcommand so that the
         // post-completion file moves happen even after the parent exits.
         let exe = std::env::current_exe().unwrap_or_else(|_| "sipag".into());
-        Command::new(&exe)
-            .args([
-                "_bg-exec",
-                "--task-id",
-                task_id,
-                "--repo-url",
-                repo_url,
-                "--description",
-                description,
-                "--image",
-                image,
-                "--timeout",
-                &timeout_secs.to_string(),
-                "--sipag-dir",
-                &sipag_dir.to_string_lossy(),
-            ])
-            .spawn()
-            .context("Failed to spawn background worker")?;
+        let mut cmd = Command::new(&exe);
+        cmd.args([
+            "_bg-exec",
+            "--task-id",
+            task_id,
+            "--repo-url",
+            repo_url,
+            "--description",
+            description,
+            "--image",
+            image,
+            "--timeout",
+            &timeout_secs.to_string(),
+            "--sipag-dir",
+            &sipag_dir.to_string_lossy(),
+        ]);
+        if let Some(issue_num) = issue {
+            cmd.args(["--issue", issue_num]);
+        }
+        cmd.spawn().context("Failed to spawn background worker")?;
     } else {
         let token = auth::resolve_token(sipag_dir);
         exec_and_finalize(
@@ -99,10 +101,11 @@ pub fn run_bg_exec(
     task_id: &str,
     repo_url: &str,
     description: &str,
+    issue: Option<&str>,
     image: &str,
     timeout_secs: u64,
 ) -> Result<()> {
-    let prompt_text = prompt::build_prompt(description, "", None);
+    let prompt_text = prompt::build_prompt(description, "", issue);
     let token = auth::resolve_token(sipag_dir);
     exec_and_finalize(
         sipag_dir,
