@@ -108,7 +108,7 @@ running/     # active containers (tracking file + .log)
 done/        # completed
 failed/      # needs attention — use `sipag retry` to re-queue
 repos.conf   # name → URL registry
-config       # optional: batch_size, image, timeout, poll_interval, work_label
+config       # optional: image, timeout, poll_interval, work_label
 seen         # worker dedup list (issue numbers already dispatched)
 token        # Claude OAuth token for worker containers
 ```

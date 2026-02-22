@@ -119,7 +119,6 @@ Key config values and their sources:
 |-------|---------|------------|---------|
 | `SIPAG_DIR` | `SIPAG_DIR` | — | `~/.sipag` |
 | Worker image | `SIPAG_IMAGE` | `image` | `ghcr.io/dorky-robot/sipag-worker:latest` |
-| Batch size | — | `batch_size` | `4` |
 | Timeout | — | `timeout` | `1800` |
 | Poll interval | — | `poll_interval` | `120` |
 | Work label | `SIPAG_WORK_LABEL` | `work_label` | `approved` |
