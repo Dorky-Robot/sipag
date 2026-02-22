@@ -17,7 +17,7 @@ use super::dispatch::{
 };
 use super::github::{
     count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
-    list_labeled_issues, reconcile_merged_prs,
+    list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -29,8 +29,18 @@ use crate::config::WorkerConfig;
 /// Entry point for `sipag work`.
 ///
 /// Runs the polling loop until a drain signal is detected or `cfg.once` is
-/// true and one cycle has completed.
-pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) -> Result<()> {
+/// true and one cycle has completed. When `dry_run` is true, prints a preview
+/// of what would be dispatched without starting any containers.
+pub fn run_worker_loop(
+    repos: &[String],
+    sipag_dir: &Path,
+    cfg: WorkerConfig,
+    dry_run: bool,
+) -> Result<()> {
+    if dry_run {
+        return dry_run_preview(repos, sipag_dir, &cfg);
+    }
+
     // ── Print startup banner ─────────────────────────────────────────────────
     println!("sipag work");
     match repos.len() {
@@ -169,7 +179,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             }
 
             // ── Approved issues ──────────────────────────────────────────────
-            let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
+            let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
 
             let mut new_issues: Vec<u64> = Vec::new();
             for issue_num in &all_issues {
@@ -362,6 +372,91 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Print what `sipag work` would dispatch without starting any containers.
+fn dry_run_preview(repos: &[String], sipag_dir: &Path, cfg: &WorkerConfig) -> Result<()> {
+    println!("sipag work --dry-run");
+    match repos.len() {
+        1 => println!("Repo: {}", repos[0]),
+        n => println!("Repos ({}): {}", n, repos.join(", ")),
+    }
+    println!("Label: {}", cfg.work_label);
+    println!("Batch size: {}", cfg.batch_size);
+    println!();
+
+    let store = FileStateStore::new(sipag_dir);
+    let gh_gateway = super::github::GhGateway::new();
+
+    for repo in repos {
+        let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+
+        // Determine which issues would actually be dispatched (same logic as the
+        // live loop, but without writing any state).
+        let mut new_issues: Vec<u64> = Vec::new();
+        for issue_num in &all_issues {
+            let repo_slug = repo.replace('/', "--");
+            let worker_status = store
+                .load(&repo_slug, *issue_num)
+                .ok()
+                .flatten()
+                .map(|w| w.status);
+            let has_existing_pr = gh_gateway
+                .find_pr_for_branch(repo, &format!("sipag/issue-{issue_num}-*"))
+                .ok()
+                .flatten()
+                .is_some();
+            if let super::decision::IssueAction::Dispatch =
+                decide_issue_action(worker_status, has_existing_pr)
+            {
+                new_issues.push(*issue_num);
+            }
+        }
+
+        if repos.len() > 1 {
+            println!("[{repo}]");
+        }
+
+        if new_issues.is_empty() {
+            println!("No issues ready to dispatch.");
+            println!();
+            continue;
+        }
+
+        let issue_list: Vec<String> = new_issues.iter().map(|n| format!("#{n}")).collect();
+        println!(
+            "Found {} ready issue(s): {}",
+            new_issues.len(),
+            issue_list.join(" ")
+        );
+
+        if cfg.batch_size > 1 && new_issues.len() > 1 {
+            println!("With batch_size={}, would dispatch:", cfg.batch_size);
+            for (i, batch) in new_issues.chunks(cfg.batch_size).enumerate() {
+                let batch_issues: Vec<String> = batch.iter().map(|n| format!("#{n}")).collect();
+                let container = if batch.len() == 1 {
+                    format!("sipag-issue-{}", batch[0])
+                } else {
+                    format!("sipag-group-{}", batch[0])
+                };
+                println!(
+                    "  Batch {}: {} → {}",
+                    i + 1,
+                    batch_issues.join(" "),
+                    container
+                );
+            }
+        } else {
+            println!("Would dispatch {} container(s):", new_issues.len());
+            for &issue_num in &new_issues {
+                println!("  Issue #{issue_num} → sipag-issue-{issue_num}");
+            }
+        }
+        println!();
+    }
+
+    println!("No containers started (dry-run mode).");
+    Ok(())
+}
 
 fn hms() -> String {
     chrono::Utc::now().format("%H:%M:%S").to_string()

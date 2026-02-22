@@ -41,6 +41,10 @@ pub enum Commands {
         /// Process one polling cycle and exit
         #[arg(long)]
         once: bool,
+
+        /// Preview what would be dispatched without starting containers
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -213,7 +217,11 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Work { repos, once }) => cmd_work(repos, once),
+        Some(Commands::Work {
+            repos,
+            once,
+            dry_run,
+        }) => cmd_work(repos, once, dry_run),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -292,12 +300,21 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
+fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
     let mut cfg = WorkerConfig::load(&dir)?;
     cfg.once = once;
+
+    if dry_run {
+        // Dry-run only needs GitHub access to list issues.
+        preflight_gh_auth()?;
+        if repos.is_empty() {
+            repos = resolve_repos(&dir)?;
+        }
+        return run_worker_loop(&repos, &dir, cfg, true);
+    }
 
     // Preflight checks.
     sipag_core::auth::preflight_auth(&dir)?;
@@ -337,7 +354,7 @@ fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
         repos = resolve_repos(&dir)?;
     }
 
-    run_worker_loop(&repos, &dir, cfg)
+    run_worker_loop(&repos, &dir, cfg, false)
 }
 
 fn cmd_drain() -> Result<()> {
@@ -1225,10 +1242,24 @@ mod tests {
     fn parse_work_with_repos() {
         let cli = parse(&["sipag", "work", "Dorky-Robot/sipag", "other/repo"]);
         match cli.command {
-            Some(Commands::Work { repos, once }) => {
+            Some(Commands::Work {
+                repos,
+                once,
+                dry_run,
+            }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
+                assert!(!dry_run);
             }
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_dry_run() {
+        let cli = parse(&["sipag", "work", "--dry-run", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { dry_run, .. }) => assert!(dry_run),
             other => panic!("Expected Work, got {other:?}"),
         }
     }
