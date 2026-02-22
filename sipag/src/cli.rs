@@ -1049,8 +1049,11 @@ fn cmd_ps() -> Result<()> {
         if !d.exists() {
             continue;
         }
-        let mut paths: Vec<_> = fs::read_dir(&d)
-            .unwrap_or_else(|_| std::fs::read_dir("/dev/null").unwrap())
+        let entries = match fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let mut paths: Vec<_> = entries
             .flatten()
             .filter(|e| e.path().extension().map(|x| x == "md").unwrap_or(false))
             .map(|e| e.path())

@@ -61,16 +61,42 @@ pub fn write_tracking_file(
     fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
-/// Append "ended: <timestamp>" to an existing tracking file.
+/// Insert "ended: <timestamp>" inside the YAML frontmatter of an existing tracking file.
+///
+/// Rewrites the file so that `ended:` appears before the closing `---` delimiter,
+/// ensuring the parser can read it back. If no frontmatter is found the field is
+/// appended to the end as a fallback.
 ///
 /// `ended` is the ISO-8601 timestamp string (caller supplies via `chrono::Utc::now()`).
 pub fn append_ended(path: &Path, ended: &str) -> Result<()> {
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
-    writeln!(file, "ended: {ended}")?;
-    Ok(())
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
+
+    // Find the closing `---` of the frontmatter (the second occurrence).
+    let lines: Vec<&str> = content.lines().collect();
+    let closing_idx = lines
+        .iter()
+        .enumerate()
+        .skip(1) // skip the opening `---`
+        .find(|(_, l)| l.trim() == "---")
+        .map(|(i, _)| i);
+
+    let new_content = if let Some(idx) = closing_idx {
+        let mut out = String::with_capacity(content.len() + 40);
+        for (i, line) in lines.iter().enumerate() {
+            if i == idx {
+                out.push_str(&format!("ended: {ended}\n"));
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    } else {
+        // No frontmatter — fall back to appending at the end.
+        format!("{content}ended: {ended}\n")
+    };
+
+    fs::write(path, new_content).with_context(|| format!("Failed to write {}", path.display()))
 }
 
 /// Generate next sequential filename for a queue directory.
@@ -267,6 +293,35 @@ mod tests {
         .unwrap();
         let task = read_task_file(&path, TaskStatus::Queue).unwrap();
         assert_eq!(task.source, Some("github#42".to_string()));
+    }
+
+    #[test]
+    fn test_append_ended_inside_frontmatter() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("task.md");
+        write_tracking_file(
+            &path,
+            "https://github.com/org/repo",
+            Some("42"),
+            "sipag-20240101-fix",
+            "Fix the bug",
+            "2024-01-01T12:00:00Z",
+        )
+        .unwrap();
+
+        append_ended(&path, "2024-01-01T12:30:00Z").unwrap();
+
+        let task = read_task_file(&path, TaskStatus::Running).unwrap();
+        assert_eq!(task.ended, Some("2024-01-01T12:30:00Z".to_string()));
+
+        // Verify `ended:` is inside the frontmatter (before the closing `---`)
+        let raw = fs::read_to_string(&path).unwrap();
+        let ended_pos = raw.find("ended:").unwrap();
+        let close_pos = raw.find("\n---\n").unwrap();
+        assert!(
+            ended_pos < close_pos,
+            "ended: must appear before the closing --- delimiter"
+        );
     }
 
     #[test]
