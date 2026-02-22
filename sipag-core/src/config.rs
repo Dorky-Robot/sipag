@@ -25,6 +25,9 @@ use std::time::Duration;
 use std::{env, fs};
 
 const BATCH_SIZE_MAX: usize = 5;
+const BATCH_SIZE_MIN: usize = 1;
+const TIMEOUT_MIN_SECS: u64 = 1;
+const POLL_INTERVAL_MIN_SECS: u64 = 1;
 
 /// Default Docker image for worker containers.
 pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
@@ -102,19 +105,60 @@ impl WorkerConfig {
     fn apply_file_entry(&mut self, key: &str, value: &str) {
         match key {
             "batch_size" => {
-                if let Ok(n) = value.parse::<usize>() {
-                    self.batch_size = n.min(BATCH_SIZE_MAX);
+                match value.parse::<i64>() {
+                    Ok(n) if n < BATCH_SIZE_MIN as i64 => {
+                        eprintln!(
+                            "warning: config: batch_size={n} is invalid (minimum {BATCH_SIZE_MIN}); clamping to {BATCH_SIZE_MIN}"
+                        );
+                        self.batch_size = BATCH_SIZE_MIN;
+                    }
+                    Ok(n) => {
+                        let n = n as usize;
+                        if n > BATCH_SIZE_MAX {
+                            eprintln!(
+                                "warning: config: batch_size={n} exceeds maximum {BATCH_SIZE_MAX}; clamping to {BATCH_SIZE_MAX}"
+                            );
+                        }
+                        self.batch_size = n.min(BATCH_SIZE_MAX);
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "warning: config: batch_size={value:?} is not a valid integer; ignoring"
+                        );
+                    }
                 }
             }
             "image" => self.image = value.to_string(),
             "timeout" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    self.timeout = Duration::from_secs(n);
+                match value.parse::<i64>() {
+                    Ok(n) if n < TIMEOUT_MIN_SECS as i64 => {
+                        eprintln!(
+                            "warning: config: timeout={n} is invalid (minimum {TIMEOUT_MIN_SECS}); clamping to {TIMEOUT_MIN_SECS}"
+                        );
+                        self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
+                    }
+                    Ok(n) => self.timeout = Duration::from_secs(n as u64),
+                    Err(_) => {
+                        eprintln!(
+                            "warning: config: timeout={value:?} is not a valid integer; ignoring"
+                        );
+                    }
                 }
             }
             "poll_interval" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    self.poll_interval = Duration::from_secs(n);
+                match value.parse::<i64>() {
+                    Ok(n) if n < POLL_INTERVAL_MIN_SECS as i64 => {
+                        eprintln!(
+                            "warning: config: poll_interval={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}); clamping to {POLL_INTERVAL_MIN_SECS}"
+                        );
+                        self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
+                    }
+                    Ok(n) => self.poll_interval = Duration::from_secs(n as u64),
+                    Err(_) => {
+                        eprintln!(
+                            "warning: config: poll_interval={value:?} is not a valid integer; ignoring"
+                        );
+                    }
                 }
             }
             "work_label" => self.work_label = value.to_string(),
@@ -122,11 +166,19 @@ impl WorkerConfig {
             "doc_refresh_interval" => {
                 if let Ok(n) = value.parse::<u64>() {
                     self.doc_refresh_interval = n;
+                } else {
+                    eprintln!(
+                        "warning: config: doc_refresh_interval={value:?} is not a valid integer; ignoring"
+                    );
                 }
             }
             "state_max_age_days" => {
                 if let Ok(n) = value.parse::<u64>() {
                     self.state_max_age_days = n;
+                } else {
+                    eprintln!(
+                        "warning: config: state_max_age_days={value:?} is not a valid integer; ignoring"
+                    );
                 }
             }
             _ => {}
@@ -135,21 +187,58 @@ impl WorkerConfig {
 
     fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) {
         if let Some(v) = get_env("SIPAG_BATCH_SIZE") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.batch_size = n.min(BATCH_SIZE_MAX);
+            match v.parse::<i64>() {
+                Ok(n) if n < BATCH_SIZE_MIN as i64 => {
+                    eprintln!(
+                        "warning: SIPAG_BATCH_SIZE={n} is invalid (minimum {BATCH_SIZE_MIN}); clamping to {BATCH_SIZE_MIN}"
+                    );
+                    self.batch_size = BATCH_SIZE_MIN;
+                }
+                Ok(n) => {
+                    let n = n as usize;
+                    if n > BATCH_SIZE_MAX {
+                        eprintln!(
+                            "warning: SIPAG_BATCH_SIZE={n} exceeds maximum {BATCH_SIZE_MAX}; clamping to {BATCH_SIZE_MAX}"
+                        );
+                    }
+                    self.batch_size = n.min(BATCH_SIZE_MAX);
+                }
+                Err(_) => {
+                    eprintln!("warning: SIPAG_BATCH_SIZE={v:?} is not a valid integer; ignoring");
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_IMAGE") {
             self.image = v;
         }
         if let Some(v) = get_env("SIPAG_TIMEOUT") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.timeout = Duration::from_secs(n);
+            match v.parse::<i64>() {
+                Ok(n) if n < TIMEOUT_MIN_SECS as i64 => {
+                    eprintln!(
+                        "warning: SIPAG_TIMEOUT={n} is invalid (minimum {TIMEOUT_MIN_SECS}); clamping to {TIMEOUT_MIN_SECS}"
+                    );
+                    self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
+                }
+                Ok(n) => self.timeout = Duration::from_secs(n as u64),
+                Err(_) => {
+                    eprintln!("warning: SIPAG_TIMEOUT={v:?} is not a valid integer; ignoring");
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_POLL_INTERVAL") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.poll_interval = Duration::from_secs(n);
+            match v.parse::<i64>() {
+                Ok(n) if n < POLL_INTERVAL_MIN_SECS as i64 => {
+                    eprintln!(
+                        "warning: SIPAG_POLL_INTERVAL={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}); clamping to {POLL_INTERVAL_MIN_SECS}"
+                    );
+                    self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
+                }
+                Ok(n) => self.poll_interval = Duration::from_secs(n as u64),
+                Err(_) => {
+                    eprintln!(
+                        "warning: SIPAG_POLL_INTERVAL={v:?} is not a valid integer; ignoring"
+                    );
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_WORK_LABEL") {
@@ -158,11 +247,19 @@ impl WorkerConfig {
         if let Some(v) = get_env("SIPAG_DOC_REFRESH_INTERVAL") {
             if let Ok(n) = v.parse::<u64>() {
                 self.doc_refresh_interval = n;
+            } else {
+                eprintln!(
+                    "warning: SIPAG_DOC_REFRESH_INTERVAL={v:?} is not a valid integer; ignoring"
+                );
             }
         }
         if let Some(v) = get_env("SIPAG_STATE_MAX_AGE_DAYS") {
             if let Ok(n) = v.parse::<u64>() {
                 self.state_max_age_days = n;
+            } else {
+                eprintln!(
+                    "warning: SIPAG_STATE_MAX_AGE_DAYS={v:?} is not a valid integer; ignoring"
+                );
             }
         }
     }
@@ -448,6 +545,107 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.sipag_dir, dir.path());
+    }
+
+    #[test]
+    fn worker_config_batch_size_zero_clamped_to_min_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_batch_size_negative_clamped_to_min_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=-1\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_batch_size_zero_clamped_to_min_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BATCH_SIZE" {
+                Some("0".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_batch_size_negative_clamped_to_min_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BATCH_SIZE" {
+                Some("-1".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_timeout_zero_clamped_to_min_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(TIMEOUT_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_timeout_negative_clamped_to_min_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=-60\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(TIMEOUT_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_timeout_zero_clamped_to_min_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_TIMEOUT" {
+                Some("0".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(TIMEOUT_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_poll_interval_zero_clamped_to_min_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "poll_interval=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.poll_interval, Duration::from_secs(POLL_INTERVAL_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_poll_interval_negative_clamped_to_min_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_POLL_INTERVAL" {
+                Some("-10".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.poll_interval, Duration::from_secs(POLL_INTERVAL_MIN_SECS));
     }
 
     // ── Credentials tests ─────────────────────────────────────────────────
