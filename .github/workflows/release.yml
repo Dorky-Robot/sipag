@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -130,34 +131,30 @@ jobs:
           ARCHIVE_SHA256: ${{ steps.archive.outputs.sha256 }}
           ARCHIVE_URL: ${{ steps.archive.outputs.url }}
         run: |
-          VERSION_CLEAN="${VERSION#v}"  # strip leading 'v' for formula version field
+          VERSION_CLEAN="${VERSION#v}"
           mkdir -p homebrew-tap/Formula
-          cat > homebrew-tap/Formula/sipag.rb << 'FORMULA'
-class Sipag < Formula
-  desc "Autonomous dev agent powered by Claude Code"
-  homepage "https://github.com/Dorky-Robot/sipag"
-  url "ARCHIVE_URL_PLACEHOLDER"
-  sha256 "SHA256_PLACEHOLDER"
-  version "VERSION_PLACEHOLDER"
-  license "MIT"
-
-  depends_on "jq"
-  depends_on "gh"
-
-  def install
-    prefix.install "bin", "lib"
-    bin.install_symlink prefix/"bin/sipag"
-  end
-
-  test do
-    system "#{bin}/sipag", "version"
-  end
-end
-FORMULA
-          # Substitute the placeholders with actual values
-          sed -i "s|ARCHIVE_URL_PLACEHOLDER|${ARCHIVE_URL}|" homebrew-tap/Formula/sipag.rb
-          sed -i "s|SHA256_PLACEHOLDER|${ARCHIVE_SHA256}|" homebrew-tap/Formula/sipag.rb
-          sed -i "s|VERSION_PLACEHOLDER|${VERSION_CLEAN}|" homebrew-tap/Formula/sipag.rb
+          {
+            echo 'class Sipag < Formula'
+            echo '  desc "Autonomous dev agent powered by Claude Code"'
+            echo '  homepage "https://github.com/Dorky-Robot/sipag"'
+            echo "  url \"${ARCHIVE_URL}\""
+            echo "  sha256 \"${ARCHIVE_SHA256}\""
+            echo "  version \"${VERSION_CLEAN}\""
+            echo '  license "MIT"'
+            echo ''
+            echo '  depends_on "jq"'
+            echo '  depends_on "gh"'
+            echo ''
+            echo '  def install'
+            echo '    prefix.install "bin", "lib"'
+            echo '    bin.install_symlink prefix/"bin/sipag"'
+            echo '  end'
+            echo ''
+            echo '  test do'
+            echo '    system "#{bin}/sipag", "version"'
+            echo '  end'
+            echo 'end'
+          } > homebrew-tap/Formula/sipag.rb
 
       - name: Commit and push updated formula
         run: |
