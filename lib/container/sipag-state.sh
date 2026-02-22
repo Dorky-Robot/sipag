@@ -87,7 +87,7 @@ case "${1:-}" in
         started_at=$(jq -r '.started_at // empty' "$STATE_FILE" 2>/dev/null || true)
         duration_s="null"
         if [[ -n "$started_at" ]]; then
-            start_epoch=$(date -d "$started_at" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$started_at" +%s 2>/dev/null || echo "")
+            start_epoch=$(date -d "$started_at" +%s 2>/dev/null || echo "")
             if [[ -n "$start_epoch" ]]; then
                 now_epoch=$(date +%s)
                 duration_s=$(( now_epoch - start_epoch ))

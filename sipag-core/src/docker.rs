@@ -3,6 +3,24 @@ use std::fs::File;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+/// Find a working timeout command: `timeout` (Linux/coreutils) or `gtimeout` (macOS Homebrew).
+/// Returns `None` if neither is available — the caller should run Docker without a timeout wrapper.
+pub(crate) fn resolve_timeout_command() -> Option<String> {
+    for bin in ["timeout", "gtimeout"] {
+        if Command::new(bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(bin.to_string());
+        }
+    }
+    None
+}
+
 /// Check that Docker daemon is running and accessible.
 pub fn preflight_docker_running() -> Result<()> {
     let status = Command::new("docker")
@@ -63,6 +81,13 @@ exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)""#;
 /// Run a Docker container and stream output to `log_path`.
 ///
 /// Returns `true` if the container exited successfully, `false` otherwise.
+///
+/// Uses `timeout`/`gtimeout` if available on the host (macOS ships without
+/// `timeout` — the worker's own Docker has it, but the *host* wrapping call
+/// may not). Falls back to running Docker directly without a wrapper.
+///
+/// Also removes any pre-existing container with `container_name` before
+/// starting, so retries for the same task don't collide with a stale container.
 pub fn run_container(
     container_name: &str,
     repo_url: &str,
@@ -70,8 +95,16 @@ pub fn run_container(
     image: &str,
     timeout_secs: u64,
     oauth_token: Option<&str>,
+    api_key: Option<&str>,
     log_path: &Path,
 ) -> bool {
+    // Clean up any stale container from a previous cycle — idempotent.
+    let _ = Command::new("docker")
+        .args(["rm", "-f", container_name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
     let log_out = match File::create(log_path) {
         Ok(f) => f,
         Err(e) => {
@@ -93,15 +126,23 @@ pub fn run_container(
         }
     };
 
-    let mut cmd = Command::new("timeout");
-    cmd.arg(timeout_secs.to_string())
-        .arg("docker")
-        .arg("run")
-        .arg("--rm")
+    let timeout_bin = resolve_timeout_command();
+    let mut cmd;
+    if let Some(ref bin) = timeout_bin {
+        cmd = Command::new(bin);
+        cmd.arg(timeout_secs.to_string()).arg("docker").arg("run");
+    } else {
+        cmd = Command::new("docker");
+        cmd.arg("run");
+    }
+
+    cmd.arg("--rm")
         .arg("--name")
         .arg(container_name)
         .arg("-e")
         .arg("CLAUDE_CODE_OAUTH_TOKEN")
+        .arg("-e")
+        .arg("ANTHROPIC_API_KEY")
         .arg("-e")
         .arg("GH_TOKEN")
         .arg("-e")
@@ -117,6 +158,9 @@ pub fn run_container(
 
     if let Some(token) = oauth_token {
         cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
+    if let Some(key) = api_key {
+        cmd.env("ANTHROPIC_API_KEY", key);
     }
 
     cmd.status().map(|s| s.success()).unwrap_or(false)

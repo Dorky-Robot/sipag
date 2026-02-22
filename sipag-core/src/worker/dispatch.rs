@@ -715,7 +715,7 @@ fn run_worker_container(
         return false;
     }
 
-    let timeout_bin = resolve_timeout_command();
+    let timeout_bin = crate::docker::resolve_timeout_command();
     let mut cmd;
     if let Some(ref bin) = timeout_bin {
         cmd = Command::new(bin);
@@ -886,24 +886,6 @@ fn collect_inline_comments(repo: &str, pr_num: u64) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
-}
-
-/// Find a working timeout command: `timeout` (Linux/coreutils) or `gtimeout` (macOS Homebrew).
-/// Returns `None` if neither is available — the caller should run Docker without a timeout wrapper.
-fn resolve_timeout_command() -> Option<String> {
-    for bin in ["timeout", "gtimeout"] {
-        if Command::new(bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-        {
-            return Some(bin.to_string());
-        }
-    }
-    eprintln!("sipag: warning: neither `timeout` nor `gtimeout` found — running without timeout");
-    None
 }
 
 fn get_pr_diff(repo: &str, pr_num: u64) -> String {

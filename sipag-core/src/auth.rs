@@ -12,6 +12,15 @@ pub(crate) fn resolve_token(sipag_dir: &Path) -> Option<String> {
             return Some(token);
         }
     }
+    read_token_file(sipag_dir)
+}
+
+/// Read the OAuth token from `sipag_dir/token`, warning if permissions are too open.
+///
+/// Returns `None` if the file does not exist or is empty.
+/// This is the single source of truth for token-file reading — both
+/// [`resolve_token`] and `Credentials::resolve_oauth_token` delegate here.
+pub(crate) fn read_token_file(sipag_dir: &Path) -> Option<String> {
     let token_file = sipag_dir.join("token");
     if token_file.exists() {
         warn_if_token_world_readable(&token_file);

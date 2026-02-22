@@ -152,43 +152,80 @@ impl WorkerConfig {
             }
             "image" => self.image = value.to_string(),
             "timeout" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    if n < TIMEOUT_MIN_SECS {
+                match value.parse::<u64>() {
+                    Ok(n) if n < TIMEOUT_MIN_SECS => {
                         self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
                         return Some(format!(
                             "config: timeout={n} is invalid (minimum {TIMEOUT_MIN_SECS}s); using {TIMEOUT_MIN_SECS}s"
                         ));
                     }
-                    self.timeout = Duration::from_secs(n);
+                    Ok(n) => self.timeout = Duration::from_secs(n),
+                    Err(_) => {
+                        return Some(format!(
+                            "config: timeout={value} is not a valid number; using default 1800s"
+                        ));
+                    }
                 }
             }
             "poll_interval" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    if n < POLL_INTERVAL_MIN_SECS {
+                match value.parse::<u64>() {
+                    Ok(n) if n < POLL_INTERVAL_MIN_SECS => {
                         self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
                         return Some(format!(
                             "config: poll_interval={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}s); using {POLL_INTERVAL_MIN_SECS}s"
                         ));
                     }
-                    self.poll_interval = Duration::from_secs(n);
+                    Ok(n) => self.poll_interval = Duration::from_secs(n),
+                    Err(_) => {
+                        return Some(format!(
+                            "config: poll_interval={value} is not a valid number; using default 120s"
+                        ));
+                    }
                 }
             }
             "work_label" => self.work_label = value.to_string(),
             "auto_merge" => self.auto_merge = value == "true",
             "brainstorm" => self.brainstorm = value != "false",
             "doc_refresh_interval" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    self.doc_refresh_interval = n;
+                match value.parse::<u64>() {
+                    Ok(0) => {
+                        self.doc_refresh_interval = 0;
+                        return Some(
+                            "config: doc_refresh_interval=0 disables documentation refresh entirely".to_string(),
+                        );
+                    }
+                    Ok(n) => self.doc_refresh_interval = n,
+                    Err(_) => {
+                        return Some(format!(
+                            "config: doc_refresh_interval={value} is not a valid number; using default 10"
+                        ));
+                    }
                 }
             }
             "state_max_age_days" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    self.state_max_age_days = n;
+                match value.parse::<u64>() {
+                    Ok(0) => {
+                        self.state_max_age_days = 0;
+                        return Some(
+                            "config: state_max_age_days=0 disables state file pruning (files kept forever)".to_string(),
+                        );
+                    }
+                    Ok(n) => self.state_max_age_days = n,
+                    Err(_) => {
+                        return Some(format!(
+                            "config: state_max_age_days={value} is not a valid number; using default 7"
+                        ));
+                    }
                 }
             }
             "max_open_prs" => {
-                if let Ok(n) = value.parse::<usize>() {
-                    self.max_open_prs = n;
+                match value.parse::<usize>() {
+                    Ok(n) => self.max_open_prs = n,
+                    Err(_) => {
+                        return Some(format!(
+                            "config: max_open_prs={value} is not a valid number; using default 5"
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -204,45 +241,72 @@ impl WorkerConfig {
             self.image = v;
         }
         if let Some(v) = get_env("SIPAG_TIMEOUT") {
-            if let Ok(n) = v.parse::<u64>() {
-                if n < TIMEOUT_MIN_SECS {
+            match v.parse::<u64>() {
+                Ok(n) if n < TIMEOUT_MIN_SECS => {
                     self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
                     warnings.push(format!(
                         "SIPAG_TIMEOUT={n} is invalid (minimum {TIMEOUT_MIN_SECS}s); using {TIMEOUT_MIN_SECS}s"
                     ));
-                } else {
-                    self.timeout = Duration::from_secs(n);
                 }
+                Ok(n) => self.timeout = Duration::from_secs(n),
+                Err(_) => warnings.push(format!(
+                    "SIPAG_TIMEOUT={v} is not a valid number; using default 1800s"
+                )),
             }
         }
         if let Some(v) = get_env("SIPAG_POLL_INTERVAL") {
-            if let Ok(n) = v.parse::<u64>() {
-                if n < POLL_INTERVAL_MIN_SECS {
+            match v.parse::<u64>() {
+                Ok(n) if n < POLL_INTERVAL_MIN_SECS => {
                     self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
                     warnings.push(format!(
                         "SIPAG_POLL_INTERVAL={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}s); using {POLL_INTERVAL_MIN_SECS}s"
                     ));
-                } else {
-                    self.poll_interval = Duration::from_secs(n);
                 }
+                Ok(n) => self.poll_interval = Duration::from_secs(n),
+                Err(_) => warnings.push(format!(
+                    "SIPAG_POLL_INTERVAL={v} is not a valid number; using default 120s"
+                )),
             }
         }
         if let Some(v) = get_env("SIPAG_WORK_LABEL") {
             self.work_label = v;
         }
         if let Some(v) = get_env("SIPAG_DOC_REFRESH_INTERVAL") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.doc_refresh_interval = n;
+            match v.parse::<u64>() {
+                Ok(0) => {
+                    self.doc_refresh_interval = 0;
+                    warnings.push(
+                        "SIPAG_DOC_REFRESH_INTERVAL=0 disables documentation refresh entirely"
+                            .to_string(),
+                    );
+                }
+                Ok(n) => self.doc_refresh_interval = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_DOC_REFRESH_INTERVAL={v} is not a valid number; using default 10"
+                )),
             }
         }
         if let Some(v) = get_env("SIPAG_STATE_MAX_AGE_DAYS") {
-            if let Ok(n) = v.parse::<u64>() {
-                self.state_max_age_days = n;
+            match v.parse::<u64>() {
+                Ok(0) => {
+                    self.state_max_age_days = 0;
+                    warnings.push(
+                        "SIPAG_STATE_MAX_AGE_DAYS=0 disables state file pruning (files kept forever)"
+                            .to_string(),
+                    );
+                }
+                Ok(n) => self.state_max_age_days = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_STATE_MAX_AGE_DAYS={v} is not a valid number; using default 7"
+                )),
             }
         }
         if let Some(v) = get_env("SIPAG_MAX_OPEN_PRS") {
-            if let Ok(n) = v.parse::<usize>() {
-                self.max_open_prs = n;
+            match v.parse::<usize>() {
+                Ok(n) => self.max_open_prs = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_MAX_OPEN_PRS={v} is not a valid number; using default 5"
+                )),
             }
         }
         if let Some(v) = get_env("SIPAG_BRAINSTORM") {
@@ -315,14 +379,30 @@ fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
                 clamped_to: "120 (default)".to_string(),
             },
         },
-        "doc_refresh_interval" | "state_max_age_days" | "max_open_prs" => {
-            match value.parse::<u64>() {
-                Ok(_) => ConfigEntryStatus::Valid,
-                Err(_) => ConfigEntryStatus::InvalidValue {
-                    clamped_to: "default".to_string(),
-                },
-            }
-        }
+        "doc_refresh_interval" => match value.parse::<u64>() {
+            Ok(0) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "0 (disables doc refresh)".to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "10 (default)".to_string(),
+            },
+        },
+        "state_max_age_days" => match value.parse::<u64>() {
+            Ok(0) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "0 (disables pruning — files kept forever)".to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "7 (default)".to_string(),
+            },
+        },
+        "max_open_prs" => match value.parse::<u64>() {
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "5 (default)".to_string(),
+            },
+        },
         "image" | "work_label" => ConfigEntryStatus::Valid,
         "brainstorm" | "auto_merge" => {
             if value == "true" || value == "false" {
@@ -409,22 +489,14 @@ impl Credentials {
         sipag_dir: &Path,
         get_env: &impl Fn(&str) -> Option<String>,
     ) -> Option<String> {
+        // Check env var first (allows test injection via get_env).
         if let Some(token) = get_env("CLAUDE_CODE_OAUTH_TOKEN") {
             if !token.is_empty() {
                 return Some(token);
             }
         }
-        let token_file = sipag_dir.join("token");
-        if token_file.exists() {
-            crate::auth::warn_if_token_world_readable(&token_file);
-            if let Ok(contents) = fs::read_to_string(&token_file) {
-                let trimmed = contents.trim().to_string();
-                if !trimmed.is_empty() {
-                    return Some(trimmed);
-                }
-            }
-        }
-        None
+        // Delegate file reading to auth::read_token_file — single source of truth.
+        crate::auth::read_token_file(sipag_dir)
     }
 
     fn resolve_gh_token(get_env: &impl Fn(&str) -> Option<String>) -> Result<String> {

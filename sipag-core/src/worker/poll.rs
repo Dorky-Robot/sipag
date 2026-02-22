@@ -139,12 +139,20 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     fs::create_dir_all(&logs_dir).ok();
     let event_log = EventLog::open(&logs_dir);
 
-    // ── Resolve credentials once ─────────────────────────────────────────────
-    let oauth_token = auth::resolve_token(sipag_dir);
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty());
-    let gh_token = super::github::get_gh_token();
+    // ── Credentials resolved at startup; re-resolved each cycle below ────────
+    // Initial values are unused directly — each cycle re-resolves to pick up
+    // token rotation (e.g. `gh auth login`, updated ~/.sipag/token file).
+    // We still resolve once here to validate credentials on startup.
+    {
+        let initial_token = auth::resolve_token(sipag_dir);
+        let initial_gh = super::github::get_gh_token();
+        if initial_token.is_none() && std::env::var("ANTHROPIC_API_KEY").unwrap_or_default().is_empty() {
+            eprintln!("sipag warning: no Claude credentials found (CLAUDE_CODE_OAUTH_TOKEN, ~/.sipag/token, or ANTHROPIC_API_KEY)");
+        }
+        if initial_gh.is_none() {
+            eprintln!("sipag warning: GH_TOKEN not found — GitHub operations may fail");
+        }
+    }
 
     // ── Startup recovery ─────────────────────────────────────────────────────
     // Recover containers that were left running when a previous worker crashed.
@@ -220,6 +228,14 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                 completed_this_session = 0;
             }
         }
+
+        // ── Re-resolve credentials each cycle ────────────────────────────────
+        // Picks up token rotation without requiring a process restart.
+        let oauth_token = auth::resolve_token(sipag_dir);
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty());
+        let gh_token = super::github::get_gh_token();
 
         // ── Force-dispatch flag (kick signal or SIPAG_FORCE_DISPATCH=1) ──────
         // When active, the back-pressure check is skipped for this cycle.
@@ -302,10 +318,13 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     .map(|w| w.status);
 
                 // Check for a single-issue worker branch (fast path).
-                let pr_by_branch = gh_gateway
-                    .find_pr_for_branch(repo, &format!("sipag/issue-{issue_num}-*"))
-                    .ok()
-                    .flatten();
+                // Use prefix-based search rather than a glob (gh --head is exact match only).
+                let pr_by_branch = super::github::find_pr_by_branch_prefix(
+                    repo,
+                    &format!("sipag/issue-{issue_num}-"),
+                )
+                .ok()
+                .flatten();
 
                 // If no branch PR found, search by "Closes #N" — this catches
                 // grouped worker PRs (sipag/group-*) and stale single-issue PRs
@@ -581,14 +600,14 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     let duration_s = dispatch_start.elapsed().as_secs();
                     let success = result.is_ok();
 
-                    // Look up the PR for the branch.
-                    let branch_pattern = if grouped {
-                        format!("sipag/group-{anchor_num}-*")
+                    // Look up the PR for the branch using prefix search (gh --head is exact only).
+                    let branch_prefix = if grouped {
+                        format!("sipag/group-{anchor_num}-")
                     } else {
-                        format!("sipag/issue-{anchor_num}-*")
+                        format!("sipag/issue-{anchor_num}-")
                     };
-                    let pr =
-                        super::github::find_pr_for_branch(repo, &branch_pattern).unwrap_or(None);
+                    let pr = super::github::find_pr_by_branch_prefix(repo, &branch_prefix)
+                        .unwrap_or(None);
                     event_log.worker_result(
                         repo,
                         issues_to_dispatch,

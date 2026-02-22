@@ -136,6 +136,11 @@ fn exec_and_finalize(
     let log_path = running_dir.join(format!("{task_id}.log"));
     let container_name = format!("sipag-{task_id}");
 
+    // Also pass ANTHROPIC_API_KEY for users who authenticate via API key.
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty());
+
     let success = docker::run_container(
         &container_name,
         repo_url,
@@ -143,6 +148,7 @@ fn exec_and_finalize(
         image,
         timeout_secs,
         token,
+        api_key.as_deref(),
         &log_path,
     );
 

@@ -27,11 +27,11 @@ uninstall:
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 test:
-	cargo test
+	cargo test --workspace
 
 # ── Code quality ──────────────────────────────────────────────────────────────
 lint:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets -- -D warnings
 
 fmt:
 	cargo fmt
