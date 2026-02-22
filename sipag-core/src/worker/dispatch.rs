@@ -198,11 +198,22 @@ pub fn dispatch_issue_worker(
         store.save(&done_state)?;
         println!("[#{issue_num}] DONE: {title}");
     } else {
+        let failure_reason = extract_failure_reason(&log_path);
+
+        // Surface clone failures prominently so they're visible without digging through logs.
+        if let Some(ref reason) = failure_reason {
+            println!("[#{issue_num}]   Hint: {reason}");
+            if let Some(stem) = log_path.file_stem().and_then(|s| s.to_str()) {
+                println!("[#{issue_num}]   Full log: sipag logs {stem}");
+            }
+        }
+
         let mut fail_state = running_state.clone();
         fail_state.status = WorkerStatus::Failed;
         fail_state.ended_at = Some(ended_at);
         fail_state.duration_s = Some(duration_s);
         fail_state.exit_code = Some(1);
+        fail_state.phase = failure_reason;
         store.save(&fail_state)?;
         println!(
             "[#{issue_num}] FAILED: {title} — returned to {}",
@@ -414,6 +425,16 @@ pub fn dispatch_grouped_worker(
             }
         }
     } else {
+        let failure_reason = extract_failure_reason(&log_path);
+
+        // Surface clone failures prominently so they're visible without digging through logs.
+        if let Some(ref reason) = failure_reason {
+            println!("[group]   Hint: {reason}");
+            if let Some(stem) = log_path.file_stem().and_then(|s| s.to_str()) {
+                println!("[group]   Full log: sipag logs {stem}");
+            }
+        }
+
         for &issue_num in issue_nums {
             let (title, _) = github::get_issue_details(repo, issue_num)
                 .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
@@ -432,7 +453,7 @@ pub fn dispatch_grouped_worker(
                 exit_code: Some(1),
                 log_path: Some(log_path.clone()),
                 last_heartbeat: None,
-                phase: None,
+                phase: failure_reason.clone(),
             };
             store.save(&fail_state)?;
             println!(
@@ -646,6 +667,60 @@ pub fn dispatch_conflict_fix(
 
 fn now_utc() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Extract a concise failure reason from a worker log file.
+///
+/// Scans the last 50 lines for known error patterns (git clone failures,
+/// network errors, auth failures) and returns a short diagnostic string.
+/// Falls back to the last non-empty log line if no recognized pattern is found.
+pub(crate) fn extract_failure_reason(log_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(log_path).ok()?;
+    let lines: Vec<&str> = content.lines().collect();
+    let tail: &[&str] = if lines.len() > 50 {
+        &lines[lines.len() - 50..]
+    } else {
+        &lines
+    };
+
+    for line in tail.iter().rev() {
+        let lower = line.to_lowercase();
+        if lower.contains("repository")
+            && (lower.contains("not found") || lower.contains("does not exist"))
+        {
+            return Some(
+                "git clone failed: repository not found — check repo URL and token".to_string(),
+            );
+        }
+        if lower.contains("could not resolve host") || lower.contains("name or service not known") {
+            return Some(
+                "git clone failed: could not resolve host — check network connectivity".to_string(),
+            );
+        }
+        if lower.contains("authentication failed")
+            || (lower.contains("permission denied")
+                && (lower.contains("git") || lower.contains("clone")))
+        {
+            return Some(
+                "git clone failed: authentication failed — check token permissions".to_string(),
+            );
+        }
+        if lower.starts_with("fatal:")
+            && (lower.contains("repository")
+                || lower.contains("remote")
+                || lower.contains("clone")
+                || lower.contains("unable to access"))
+        {
+            let msg = line.trim().trim_start_matches("fatal:").trim();
+            return Some(format!("git fatal: {msg}"));
+        }
+    }
+
+    // Fallback: last non-empty line
+    tail.iter()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
 }
 
 /// Run the Docker container for a worker, streaming output to `log_path`.
@@ -1111,5 +1186,90 @@ Closes #103
                 || ISSUE_CONTAINER_SCRIPT.contains("closes|fixes|resolves"),
             "Container script should parse PR body for addressed issues on success"
         );
+    }
+
+    // ── extract_failure_reason ───────────────────────────────────────────────
+
+    fn write_log(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn failure_reason_repo_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            "test.log",
+            "Cloning into '/work'...\nfatal: repository 'https://github.com/owner/bad-repo.git/' not found\n",
+        );
+        let reason = extract_failure_reason(&log).unwrap();
+        assert!(
+            reason.contains("repository not found"),
+            "Expected repo not found message, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn failure_reason_could_not_resolve_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            "test.log",
+            "Cloning into '/work'...\nfatal: unable to access 'https://github.com/owner/repo.git/': Could not resolve host: github.com\n",
+        );
+        let reason = extract_failure_reason(&log).unwrap();
+        assert!(
+            reason.contains("could not resolve host"),
+            "Expected network error message, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn failure_reason_authentication_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            "test.log",
+            "Cloning into '/work'...\nremote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/owner/repo.git/'\n",
+        );
+        let reason = extract_failure_reason(&log).unwrap();
+        assert!(
+            reason.contains("authentication failed"),
+            "Expected auth failure message, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn failure_reason_fallback_to_last_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(
+            dir.path(),
+            "test.log",
+            "Some output\nAnother line\nclaude exited with code 1\n",
+        );
+        let reason = extract_failure_reason(&log).unwrap();
+        assert_eq!(reason, "claude exited with code 1");
+    }
+
+    #[test]
+    fn failure_reason_empty_log_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(dir.path(), "test.log", "");
+        assert!(extract_failure_reason(&log).is_none());
+    }
+
+    #[test]
+    fn failure_reason_whitespace_only_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = write_log(dir.path(), "test.log", "   \n   \n");
+        assert!(extract_failure_reason(&log).is_none());
+    }
+
+    #[test]
+    fn failure_reason_missing_log_returns_none() {
+        let path = std::path::PathBuf::from("/nonexistent/log/file.log");
+        assert!(extract_failure_reason(&path).is_none());
     }
 }

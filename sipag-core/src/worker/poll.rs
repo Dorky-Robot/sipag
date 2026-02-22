@@ -17,7 +17,7 @@ use super::dispatch::{
 };
 use super::github::{
     count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
-    list_labeled_issues, reconcile_merged_prs,
+    list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -169,7 +169,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             }
 
             // ── Approved issues ──────────────────────────────────────────────
-            let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
+            let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
 
             let mut new_issues: Vec<u64> = Vec::new();
             for issue_num in &all_issues {

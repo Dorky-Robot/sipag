@@ -13,7 +13,7 @@ pub fn preflight_docker_running() -> Result<()> {
     match status {
         Ok(s) if s.success() => Ok(()),
         _ => anyhow::bail!(
-            "Error: Docker is not running.\n\n  To fix:\n\n    Open Docker Desktop    (macOS)\n    systemctl start docker (Linux)"
+            "Docker is not running.\n\n  To fix:\n\n    Open Docker Desktop    (macOS)\n    systemctl start docker (Linux)"
         ),
     }
 }
@@ -28,7 +28,7 @@ pub fn preflight_docker_image(image: &str) -> Result<()> {
     match status {
         Ok(s) if s.success() => Ok(()),
         _ => anyhow::bail!(
-            "Error: Docker image '{}' not found.\n\n  To fix, run:\n\n    sipag setup\n\n  Or build manually:\n\n    docker build -t {} .",
+            "Docker image '{}' not found.\n\n  To fix, run:\n\n    sipag setup\n\n  Or build manually:\n\n    docker build -t {} .",
             image,
             image
         ),
