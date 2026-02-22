@@ -35,14 +35,15 @@ transition_label_one() {
 
     if [[ -n "$remove" ]]; then
         # Only remove if the label is actually present.
-        if echo "$current_labels" | grep -qx "$remove" 2>/dev/null; then
+        # Use -F (fixed string) to avoid treating label names as regex patterns.
+        if echo "$current_labels" | grep -qxF "$remove" 2>/dev/null; then
             gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
         fi
     fi
 
     if [[ -n "$add" ]]; then
         # Skip if already present (idempotent).
-        if echo "$current_labels" | grep -qx "$add" 2>/dev/null; then
+        if echo "$current_labels" | grep -qxF "$add" 2>/dev/null; then
             return 0
         fi
 
@@ -50,20 +51,20 @@ transition_label_one() {
         # Lifecycle: ready (0) < in-progress (1) < needs-review (2).
         local effective_labels="$current_labels"
         if [[ -n "$remove" ]]; then
-            effective_labels=$(echo "$current_labels" | grep -vx "$remove" 2>/dev/null || true)
+            effective_labels=$(echo "$current_labels" | grep -vxF "$remove" 2>/dev/null || true)
         fi
 
         local should_add=true
         if [[ "$add" == "in-progress" ]]; then
             # Don't regress from needs-review → in-progress.
-            if echo "$effective_labels" | grep -qx "needs-review" 2>/dev/null; then
+            if echo "$effective_labels" | grep -qxF "needs-review" 2>/dev/null; then
                 echo "[sipag] Skipping: cannot add 'in-progress' to #$issue (already at 'needs-review')" >&2
                 should_add=false
             fi
         elif [[ "$add" == "${WORK_LABEL:-ready}" ]]; then
             # Don't regress from in-progress or needs-review → work label.
-            if echo "$effective_labels" | grep -qx "needs-review" 2>/dev/null || \
-               echo "$effective_labels" | grep -qx "in-progress" 2>/dev/null; then
+            if echo "$effective_labels" | grep -qxF "needs-review" 2>/dev/null || \
+               echo "$effective_labels" | grep -qxF "in-progress" 2>/dev/null; then
                 echo "[sipag] Skipping: cannot add '$add' to #$issue (already at later lifecycle stage)" >&2
                 should_add=false
             fi
@@ -100,9 +101,16 @@ git checkout -b "$BRANCH"
 # Clean up stale remote branch from a previous cycle (e.g. closed PR).
 # Without this, git push fails with "non-fast-forward" when the branch name
 # is deterministic and a previous cycle used the same name.
+# Safety: never delete a branch that has an open PR pointing at it.
 if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
-    echo "[sipag] Deleting stale remote branch: $BRANCH"
-    git push origin --delete "$BRANCH" 2>/dev/null || true
+    open_pr=$(gh pr list --repo "${REPO}" --head "$BRANCH" \
+        --state open --json number -q '.[0].number' 2>/dev/null || true)
+    if [[ -n "$open_pr" ]]; then
+        echo "[sipag] Branch $BRANCH has open PR #${open_pr} — skipping stale-branch deletion" >&2
+    else
+        echo "[sipag] Deleting stale remote branch: $BRANCH"
+        git push origin --delete "$BRANCH" 2>/dev/null || true
+    fi
 fi
 
 git push -u origin "$BRANCH"
@@ -138,6 +146,8 @@ sipag-state phase "running claude" || true
     done
 ) &
 HEARTBEAT_PID=$!
+# Ensure heartbeat is killed even if set -e triggers an early exit.
+trap 'kill $HEARTBEAT_PID 2>/dev/null || true; wait $HEARTBEAT_PID 2>/dev/null || true' EXIT
 
 # Pass prompt via pipe (not CLI arg) to avoid exec argument size limits.
 if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
@@ -159,6 +169,11 @@ wait $TAIL_PID 2>/dev/null || true
 wait $HEARTBEAT_PID 2>/dev/null || true
 
 CLAUDE_EXIT=$(cat /tmp/.claude-exit 2>/dev/null || echo 1)
+# Guard against non-numeric content (e.g. tmux writes a partial line).
+if ! [[ "$CLAUDE_EXIT" =~ ^[0-9]+$ ]]; then
+    echo "[sipag] Warning: non-numeric exit code '${CLAUDE_EXIT}', treating as 1" >&2
+    CLAUDE_EXIT=1
+fi
 
 sipag-state phase "finalizing" || true
 

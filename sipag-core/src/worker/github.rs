@@ -44,9 +44,14 @@ impl GitHubGateway for GhGateway {
 /// List open issues with the given label, sorted by number ascending.
 ///
 /// If `label` is empty, returns all open issues.
+/// Logs a warning when the result hits the 100-issue limit, suggesting there
+/// may be more issues not returned.
 pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
+    const LIMIT: usize = 100;
+    let limit_str = LIMIT.to_string();
     let mut args = vec![
-        "issue", "list", "--repo", repo, "--state", "open", "--json", "number", "--limit", "100",
+        "issue", "list", "--repo", repo, "--state", "open", "--json", "number", "--limit",
+        &limit_str,
     ];
     // Allocate label args here to keep them alive for the borrow.
     let label_args;
@@ -73,6 +78,13 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
             if let Some(n) = item["number"].as_u64() {
                 issues.push(n);
             }
+        }
+        if arr.len() == LIMIT {
+            eprintln!(
+                "sipag warning: list_labeled_issues returned {LIMIT} issues for '{repo}' \
+                 (limit reached) — some issues may be missing. \
+                 Set SIPAG_WORK_LABEL or reduce open issues to avoid truncation."
+            );
         }
     }
     issues.sort_unstable();
@@ -166,12 +178,23 @@ pub fn list_all_open_issues(repo: &str) -> Result<Vec<(u64, String, String)>> {
 }
 
 /// Fetch issue title and body.
+///
+/// Returns an error if `gh issue view` fails (e.g. issue not found, rate limit,
+/// network error). Callers that want a graceful fallback should use
+/// `.unwrap_or_else(|_| (format!("Issue #{n}"), String::new()))`.
 pub fn get_issue_details(repo: &str, issue_num: u64) -> Result<(String, String)> {
     let n = issue_num.to_string();
     let output = Command::new("gh")
         .args(["issue", "view", &n, "--repo", repo, "--json", "title,body"])
         .output()
         .context("Failed to run gh issue view")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "gh issue view #{issue_num} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
 
     let text = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
@@ -205,8 +228,15 @@ pub fn preflight_gh_auth() -> Result<()> {
     }
 }
 
-/// Find an open or merged PR for a branch.
+/// Find an open or merged PR for an exact branch name.
+///
+/// Returns `Ok(None)` immediately for an empty branch (avoids `gh --head ""`
+/// returning unexpected results on some gh CLI versions).
 pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
+    if branch.is_empty() {
+        return Ok(None);
+    }
+
     let output = Command::new("gh")
         .args([
             "pr",
@@ -237,6 +267,52 @@ pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
         let url = first["url"].as_str().unwrap_or("").to_string();
         if number > 0 {
             return Ok(Some(PrInfo { number, url }));
+        }
+    }
+    Ok(None)
+}
+
+/// Find a PR whose branch name starts with the given prefix.
+///
+/// Unlike [`find_pr_for_branch`], which uses `gh --head` (exact match only),
+/// this function fetches recent PRs and filters client-side. Use this when
+/// the exact branch slug is unknown, e.g. `sipag/issue-42-` prefix search.
+pub fn find_pr_by_branch_prefix(repo: &str, prefix: &str) -> Result<Option<PrInfo>> {
+    if prefix.is_empty() {
+        return Ok(None);
+    }
+
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--json",
+            "number,url,headRefName",
+            "--limit",
+            "50",
+        ])
+        .output()
+        .context("Failed to run gh pr list for prefix search")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let url = item["url"].as_str().unwrap_or("").to_string();
+            let head_ref = item["headRefName"].as_str().unwrap_or("");
+            if number > 0 && head_ref.starts_with(prefix) {
+                return Ok(Some(PrInfo { number, url }));
+            }
         }
     }
     Ok(None)
@@ -401,10 +477,36 @@ pub fn find_prs_needing_iteration(repo: &str) -> Vec<u64> {
     }
 }
 
+/// Check whether a PR body contains an exact "closes/fixes/resolves #N" reference.
+///
+/// Uses word-boundary logic: the issue number must not be immediately followed
+/// by another digit, preventing `closes #3` from matching `closes #300`.
+fn pr_body_closes_issue(body: &str, issue_num: u64) -> bool {
+    let pattern = format!("#{issue_num}");
+    let lower = body.to_lowercase();
+    for keyword in &["closes ", "fixes ", "resolves "] {
+        let mut search_from = 0;
+        while let Some(pos) = lower[search_from..].find(keyword) {
+            let abs_pos = search_from + pos + keyword.len();
+            let rest = &body[abs_pos..];
+            if rest.starts_with(&pattern) {
+                let after = &rest[pattern.len()..];
+                if after.is_empty() || !after.starts_with(|c: char| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+            search_from = abs_pos;
+        }
+    }
+    false
+}
+
 /// Close issues whose worker-created PRs have since been merged.
 ///
 /// Examines issues labeled `in-progress` and removes the label for any
 /// whose associated PR (searched by "closes #N" in body) was merged.
+/// Post-filters results with word-boundary checks to avoid false matches
+/// (e.g. `closes #3` matching `closes #300`).
 /// Mirrors `lib/worker/github.sh::worker_reconcile`.
 pub fn reconcile_merged_prs(repo: &str) -> Result<()> {
     // List issues with the in-progress label.
@@ -440,12 +542,15 @@ pub fn reconcile_merged_prs(repo: &str) -> Result<()> {
                 None => continue,
             };
 
-            // Check for a merged PR that closes this issue.
+            // Search for a merged PR that references this issue.
+            // Note: GitHub search for "closes #N" is a substring match and can
+            // return false positives (e.g. "closes #30" for issue #3).
+            // We post-filter by fetching PR body and applying word-boundary check.
             let search = format!("closes #{issue_num}");
             let pr_out = Command::new("gh")
                 .args([
                     "pr", "list", "--repo", repo, "--state", "merged", "--search", &search,
-                    "--json", "number", "--limit", "1",
+                    "--json", "number,body", "--limit", "5",
                 ])
                 .output();
 
@@ -453,7 +558,14 @@ pub fn reconcile_merged_prs(repo: &str) -> Result<()> {
                 let pr_text = String::from_utf8_lossy(&o.stdout);
                 let pr_parsed: serde_json::Value =
                     serde_json::from_str(&pr_text).unwrap_or(serde_json::json!([]));
-                if pr_parsed.as_array().is_some_and(|a| !a.is_empty()) {
+                let found = pr_parsed.as_array().is_some_and(|prs| {
+                    prs.iter().any(|pr| {
+                        pr["body"]
+                            .as_str()
+                            .is_some_and(|b| pr_body_closes_issue(b, issue_num))
+                    })
+                });
+                if found {
                     // PR merged — remove the in-progress label.
                     let _ = transition_label(repo, issue_num, Some("in-progress"), None);
                     println!("[reconcile] #{issue_num}: removed in-progress (PR merged)");
@@ -505,11 +617,12 @@ pub fn reconcile_closed_prs(repo: &str, work_label: &str) -> Result<()> {
             };
 
             // Check for an open PR that closes this issue — if one exists, leave it alone.
+            // Post-filter with word-boundary check to avoid false matches.
             let search = format!("closes #{issue_num}");
             let open_out = Command::new("gh")
                 .args([
                     "pr", "list", "--repo", repo, "--state", "open", "--search", &search, "--json",
-                    "number", "--limit", "1",
+                    "number,body", "--limit", "5",
                 ])
                 .output();
 
@@ -517,7 +630,14 @@ pub fn reconcile_closed_prs(repo: &str, work_label: &str) -> Result<()> {
                 let pr_text = String::from_utf8_lossy(&o.stdout);
                 let pr_parsed: serde_json::Value =
                     serde_json::from_str(&pr_text).unwrap_or(serde_json::json!([]));
-                if pr_parsed.as_array().is_some_and(|a| !a.is_empty()) {
+                let has_open_pr = pr_parsed.as_array().is_some_and(|prs| {
+                    prs.iter().any(|pr| {
+                        pr["body"]
+                            .as_str()
+                            .is_some_and(|b| pr_body_closes_issue(b, issue_num))
+                    })
+                });
+                if has_open_pr {
                     continue; // Open PR exists — needs-review is correct.
                 }
             }
@@ -534,9 +654,9 @@ pub fn reconcile_closed_prs(repo: &str, work_label: &str) -> Result<()> {
                     "--search",
                     &search,
                     "--json",
-                    "number,mergedAt",
+                    "number,mergedAt,body",
                     "--limit",
-                    "1",
+                    "5",
                 ])
                 .output();
 
@@ -544,18 +664,27 @@ pub fn reconcile_closed_prs(repo: &str, work_label: &str) -> Result<()> {
                 let pr_text = String::from_utf8_lossy(&o.stdout);
                 let pr_parsed: serde_json::Value =
                     serde_json::from_str(&pr_text).unwrap_or(serde_json::json!([]));
-                if let Some(first) = pr_parsed.as_array().and_then(|a| a.first()) {
-                    // Only revert if the PR was closed WITHOUT merging.
-                    let was_merged = first["mergedAt"].as_str().is_some_and(|s| !s.is_empty());
-                    if !was_merged {
-                        let _ = transition_label(
-                            repo,
-                            issue_num,
-                            Some("needs-review"),
-                            Some(work_label),
-                        );
-                        println!("[reconcile] #{issue_num}: reverted to {work_label} (PR closed without merge)");
-                    }
+                let should_revert = pr_parsed.as_array().is_some_and(|prs| {
+                    prs.iter().any(|pr| {
+                        // Only revert if body has exact reference AND PR was not merged.
+                        let has_ref = pr["body"]
+                            .as_str()
+                            .is_some_and(|b| pr_body_closes_issue(b, issue_num));
+                        let was_merged =
+                            pr["mergedAt"].as_str().is_some_and(|s| !s.is_empty());
+                        has_ref && !was_merged
+                    })
+                });
+                if should_revert {
+                    let _ = transition_label(
+                        repo,
+                        issue_num,
+                        Some("needs-review"),
+                        Some(work_label),
+                    );
+                    println!(
+                        "[reconcile] #{issue_num}: reverted to {work_label} (PR closed without merge)"
+                    );
                 }
             }
         }
