@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use anyhow::Result;
@@ -15,6 +15,7 @@ use super::dispatch::{
     dispatch_conflict_fix, dispatch_grouped_worker, dispatch_issue_worker, dispatch_pr_iteration,
     is_container_running,
 };
+use super::event_log::EventLog;
 use super::github::{
     count_open_issues, count_open_prs, count_open_sipag_prs, find_conflicted_prs,
     find_prs_needing_iteration, list_labeled_issues, reconcile_closed_prs, reconcile_merged_prs,
@@ -130,6 +131,13 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     );
     println!();
 
+    // ── Structured event log ─────────────────────────────────────────────────
+    // Writes JSONL to ~/.sipag/logs/worker.log so a parent session can
+    // monitor progress via `tail -f ~/.sipag/logs/worker.log`.
+    let logs_dir = sipag_dir.join("logs");
+    fs::create_dir_all(&logs_dir).ok();
+    let event_log = EventLog::open(&logs_dir);
+
     // ── Resolve credentials once ─────────────────────────────────────────────
     let oauth_token = auth::resolve_token(sipag_dir);
     let api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -221,6 +229,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         let mut dispatch_paused_any = false;
 
         for repo in repos {
+            event_log.cycle_start(repo);
             // ── Per-repo: reconcile + dispatch ──────────────────────────────
             let _ = reconcile_merged_prs(repo);
             let _ = reconcile_closed_prs(repo, &cfg.work_label);
@@ -275,16 +284,57 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     .flatten()
                     .map(|w| w.status);
 
-                let has_existing_pr = gh_gateway
+                // Check for a single-issue worker branch (fast path).
+                let pr_by_branch = gh_gateway
                     .find_pr_for_branch(repo, &format!("sipag/issue-{issue_num}-*"))
                     .ok()
-                    .flatten()
-                    .is_some();
+                    .flatten();
+
+                // If no branch PR found, search by "Closes #N" — this catches
+                // grouped worker PRs (sipag/group-*) and stale single-issue PRs
+                // that the branch glob may have missed.
+                let pr_by_body = if pr_by_branch.is_none() {
+                    super::github::find_open_pr_for_issue(repo, *issue_num)
+                } else {
+                    None
+                };
+
+                // Also skip issues already marked needs-review (PR exists but
+                // body search may not match due to manual edits or draft state).
+                let has_needs_review = if pr_by_branch.is_none() && pr_by_body.is_none() {
+                    super::github::issue_has_label(repo, *issue_num, "needs-review")
+                } else {
+                    false
+                };
+
+                let has_existing_pr =
+                    pr_by_branch.is_some() || pr_by_body.is_some() || has_needs_review;
 
                 match decide_issue_action(worker_status, has_existing_pr) {
                     super::decision::IssueAction::Skip(reason) => {
                         use super::decision::SkipReason;
                         if reason == SkipReason::ExistingPr {
+                            // Log which PR is blocking re-dispatch.
+                            if let Some(ref pr) = pr_by_branch.as_ref().or(pr_by_body.as_ref()) {
+                                println!(
+                                    "[#{}] Skipping — already has PR #{}",
+                                    issue_num, pr.number
+                                );
+                                event_log.issue_skipped(
+                                    repo,
+                                    *issue_num,
+                                    "existing_pr",
+                                    Some(pr.number),
+                                );
+                            } else if has_needs_review {
+                                println!("[#{}] Skipping — has needs-review label", issue_num);
+                                event_log.issue_skipped(
+                                    repo,
+                                    *issue_num,
+                                    "needs_review_label",
+                                    None,
+                                );
+                            }
                             // Record as done so we skip next cycle.
                             let state = super::state::WorkerState {
                                 repo: repo.clone(),
@@ -292,8 +342,14 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                                 issue_title: String::new(),
                                 branch: String::new(),
                                 container_name: String::new(),
-                                pr_num: None,
-                                pr_url: None,
+                                pr_num: pr_by_branch
+                                    .as_ref()
+                                    .or(pr_by_body.as_ref())
+                                    .map(|p| p.number),
+                                pr_url: pr_by_branch
+                                    .as_ref()
+                                    .or(pr_by_body.as_ref())
+                                    .map(|p| p.url.clone()),
                                 status: WorkerStatus::Done,
                                 started_at: None,
                                 ended_at: Some(now_utc()),
@@ -334,6 +390,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     total,
                     open_prs
                 );
+                event_log.cycle_end(repo);
                 continue;
             }
 
@@ -386,6 +443,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                                     open,
                                     cfg.max_open_prs
                                 );
+                                event_log.back_pressure(repo, open, cfg.max_open_prs);
                                 true
                             } else {
                                 false
@@ -417,19 +475,43 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     );
 
                     if issues_to_dispatch.len() == 1 {
-                        println!("--- Issue #{} ---", issues_to_dispatch[0]);
-                        let _ = dispatch_issue_worker(
+                        let issue_num = issues_to_dispatch[0];
+                        let container_name = format!("sipag-issue-{issue_num}");
+                        event_log.issue_dispatch(repo, issues_to_dispatch, &container_name, false);
+                        println!("--- Issue #{issue_num} ---");
+                        let dispatch_start = Instant::now();
+                        let result = dispatch_issue_worker(
                             repo,
-                            issues_to_dispatch[0],
+                            issue_num,
                             &cfg,
                             sipag_dir,
                             gh_token.as_deref(),
                             oauth_token.as_deref(),
                             api_key.as_deref(),
                         );
+                        let duration_s = dispatch_start.elapsed().as_secs();
+                        let success = result.is_ok();
+                        // Look up the PR that was created (if any) for the log.
+                        let pr = super::github::find_pr_for_branch(
+                            repo,
+                            &format!("sipag/issue-{issue_num}-*"),
+                        )
+                        .unwrap_or(None);
+                        event_log.worker_result(
+                            repo,
+                            issues_to_dispatch,
+                            success,
+                            duration_s,
+                            pr.as_ref().map(|p| p.number),
+                            pr.as_ref().map(|p| p.url.as_str()),
+                        );
                     } else {
+                        let anchor_num = issues_to_dispatch[0];
+                        let container_name = format!("sipag-group-{anchor_num}");
+                        event_log.issue_dispatch(repo, issues_to_dispatch, &container_name, true);
                         println!("--- Grouped: {:?} ---", issues_to_dispatch);
-                        let _ = dispatch_grouped_worker(
+                        let dispatch_start = Instant::now();
+                        let result = dispatch_grouped_worker(
                             repo,
                             issues_to_dispatch,
                             &cfg,
@@ -438,12 +520,23 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                             oauth_token.as_deref(),
                             api_key.as_deref(),
                         );
+                        let duration_s = dispatch_start.elapsed().as_secs();
+                        let success = result.is_ok();
+                        event_log.worker_result(
+                            repo,
+                            issues_to_dispatch,
+                            success,
+                            duration_s,
+                            None,
+                            None,
+                        );
                     }
                     println!("--- Worker complete ---");
                     println!();
                 }
             }
 
+            event_log.cycle_end(repo);
             println!("[{}] [{}] Cycle done.", hms(), repo);
         }
 

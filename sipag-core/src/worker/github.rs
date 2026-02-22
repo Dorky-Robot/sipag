@@ -438,6 +438,65 @@ pub fn find_conflicted_prs(repo: &str) -> Vec<u64> {
     }
 }
 
+/// Find the first open PR whose body references "Closes #N" for the given issue.
+///
+/// This catches both single-issue workers (`sipag/issue-N-*`) and grouped
+/// workers (`sipag/group-*`) that have already addressed an issue, so that
+/// the dispatch loop does not create duplicate PRs.
+pub fn find_open_pr_for_issue(repo: &str, issue_num: u64) -> Option<PrInfo> {
+    let search = format!("closes #{issue_num}");
+    let output = Command::new("gh")
+        .args([
+            "pr", "list", "--repo", repo, "--state", "open", "--search", &search, "--json",
+            "number,url", "--limit", "1",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    if let Some(first) = parsed.as_array().and_then(|a| a.first()) {
+        let number = first["number"].as_u64().unwrap_or(0);
+        let url = first["url"].as_str().unwrap_or("").to_string();
+        if number > 0 {
+            return Some(PrInfo { number, url });
+        }
+    }
+    None
+}
+
+/// Check whether an issue currently has the given label.
+pub fn issue_has_label(repo: &str, issue_num: u64, label: &str) -> bool {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "labels",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+            parsed["labels"]
+                .as_array()
+                .is_some_and(|labels| labels.iter().any(|l| l["name"].as_str() == Some(label)))
+        }
+        _ => false,
+    }
+}
+
 /// Get total open issue count (for idle-cycle status display).
 pub fn count_open_issues(repo: &str) -> Option<usize> {
     let output = Command::new("gh")
