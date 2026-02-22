@@ -5,7 +5,6 @@
 //! ```text
 //! Field                   Env Var                      Config Key               Default
 //! ─────────────────────── ──────────────────────────── ──────────────────────── ────────
-//! batch_size              SIPAG_BATCH_SIZE             batch_size               1 (max 5)
 //! poll_interval           SIPAG_POLL_INTERVAL          poll_interval            120s
 //! work_label              SIPAG_WORK_LABEL             work_label               "ready"
 //! image                   SIPAG_IMAGE                  image                    ghcr.io/dorky-robot/sipag-worker:latest
@@ -25,8 +24,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{env, fs};
 
-const BATCH_SIZE_MIN: usize = 1;
-const BATCH_SIZE_MAX: usize = 5;
 const TIMEOUT_MIN_SECS: u64 = 1;
 const POLL_INTERVAL_MIN_SECS: u64 = 1;
 
@@ -35,7 +32,7 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 
 /// All known keys in the `~/.sipag/config` file.
 const KNOWN_KEYS: &[&str] = &[
-    "batch_size",
+    "batch_size", // Ignored but accepted for backward compat
     "max_open_prs",
     "poll_interval",
     "work_label",
@@ -53,11 +50,6 @@ const KNOWN_KEYS: &[&str] = &[
 pub struct WorkerConfig {
     /// Base directory for sipag state (`~/.sipag` by default).
     pub sipag_dir: PathBuf,
-    /// Maximum issues to group into a single worker container (`SIPAG_BATCH_SIZE`, clamped to [1, 5]; default 1).
-    /// When 1 (default), each issue gets its own container (legacy behavior).
-    /// When > 1, multiple ready issues are dispatched to one container and Claude
-    /// decides which to address together in a cohesive PR.
-    pub batch_size: usize,
     /// Sleep duration between polling cycles (`SIPAG_POLL_INTERVAL` seconds; default 120).
     pub poll_interval: Duration,
     /// GitHub issue label that marks a task ready for dispatch (`SIPAG_WORK_LABEL`; default "ready").
@@ -87,7 +79,7 @@ impl WorkerConfig {
     ///
     /// Resolution order: env var > config file > default.
     ///
-    /// Prints warnings to stderr if any config values are invalid (e.g., `batch_size=0`).
+    /// Prints warnings to stderr if any config values are invalid (e.g., `timeout=0`).
     pub fn load(sipag_dir: &Path) -> Result<Self> {
         let (cfg, warnings) = Self::load_with_env_inner(sipag_dir, |k| env::var(k).ok())?;
         for w in &warnings {
@@ -129,7 +121,6 @@ impl WorkerConfig {
     fn defaults(sipag_dir: &Path) -> Self {
         Self {
             sipag_dir: sipag_dir.to_path_buf(),
-            batch_size: 1,
             poll_interval: Duration::from_secs(120),
             work_label: "ready".to_string(),
             image: DEFAULT_IMAGE.to_string(),
@@ -147,15 +138,8 @@ impl WorkerConfig {
     fn apply_file_entry(&mut self, key: &str, value: &str) -> Option<String> {
         match key {
             "batch_size" => {
-                if let Ok(n) = value.parse::<usize>() {
-                    if n < BATCH_SIZE_MIN {
-                        self.batch_size = BATCH_SIZE_MIN;
-                        return Some(format!(
-                            "config: batch_size={n} is invalid (minimum {BATCH_SIZE_MIN}); using {BATCH_SIZE_MIN}"
-                        ));
-                    }
-                    self.batch_size = n.min(BATCH_SIZE_MAX);
-                }
+                // Ignored — batch_size was removed. All ready issues are always
+                // dispatched to a single worker.
             }
             "image" => self.image = value.to_string(),
             "timeout" => {
@@ -205,18 +189,7 @@ impl WorkerConfig {
     fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        if let Some(v) = get_env("SIPAG_BATCH_SIZE") {
-            if let Ok(n) = v.parse::<usize>() {
-                if n < BATCH_SIZE_MIN {
-                    self.batch_size = BATCH_SIZE_MIN;
-                    warnings.push(format!(
-                        "SIPAG_BATCH_SIZE={n} is invalid (minimum {BATCH_SIZE_MIN}); using {BATCH_SIZE_MIN}"
-                    ));
-                } else {
-                    self.batch_size = n.min(BATCH_SIZE_MAX);
-                }
-            }
-        }
+        // SIPAG_BATCH_SIZE is ignored — all ready issues go to one worker.
         if let Some(v) = get_env("SIPAG_IMAGE") {
             self.image = v;
         }
@@ -310,18 +283,7 @@ pub fn validate_config_file_for_doctor(sipag_dir: &Path) -> Option<Vec<ConfigFil
 
 fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
     match key {
-        "batch_size" => match value.parse::<usize>() {
-            Ok(n) if n < BATCH_SIZE_MIN => ConfigEntryStatus::InvalidValue {
-                clamped_to: BATCH_SIZE_MIN.to_string(),
-            },
-            Ok(n) if n > BATCH_SIZE_MAX => ConfigEntryStatus::InvalidValue {
-                clamped_to: BATCH_SIZE_MAX.to_string(),
-            },
-            Ok(_) => ConfigEntryStatus::Valid,
-            Err(_) => ConfigEntryStatus::InvalidValue {
-                clamped_to: BATCH_SIZE_MIN.to_string(),
-            },
-        },
+        "batch_size" => ConfigEntryStatus::Valid, // Ignored, kept for backward compat
         "timeout" => match value.parse::<u64>() {
             Ok(n) if n < TIMEOUT_MIN_SECS => ConfigEntryStatus::InvalidValue {
                 clamped_to: TIMEOUT_MIN_SECS.to_string(),
@@ -505,7 +467,6 @@ mod tests {
     fn worker_config_defaults() {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, 1);
         assert_eq!(cfg.poll_interval, Duration::from_secs(120));
         assert_eq!(cfg.work_label, "ready");
         assert_eq!(cfg.image, DEFAULT_IMAGE);
@@ -522,12 +483,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("config"),
-            "batch_size=3\nimage=custom-image:v1\ntimeout=900\npoll_interval=60\nwork_label=ready\nauto_merge=true\ndoc_refresh_interval=5\nstate_max_age_days=3\n",
+            "image=custom-image:v1\ntimeout=900\npoll_interval=60\nwork_label=ready\nauto_merge=true\ndoc_refresh_interval=5\nstate_max_age_days=3\n",
         )
         .unwrap();
 
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, 3);
         assert_eq!(cfg.image, "custom-image:v1");
         assert_eq!(cfg.timeout, Duration::from_secs(900));
         assert_eq!(cfg.poll_interval, Duration::from_secs(60));
@@ -540,20 +500,14 @@ mod tests {
     #[test]
     fn worker_config_env_overrides_file() {
         let dir = TempDir::new().unwrap();
-        fs::write(
-            dir.path().join("config"),
-            "image=file-image:latest\nbatch_size=2\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join("config"), "image=file-image:latest\n").unwrap();
 
         let cfg = WorkerConfig::load_with_env(dir.path(), |k| match k {
             "SIPAG_IMAGE" => Some("env-image:latest".to_string()),
-            "SIPAG_BATCH_SIZE" => Some("4".to_string()),
             _ => None,
         })
         .unwrap();
         assert_eq!(cfg.image, "env-image:latest");
-        assert_eq!(cfg.batch_size, 4);
     }
 
     #[test]
@@ -594,50 +548,14 @@ mod tests {
     }
 
     #[test]
-    fn worker_config_batch_size_clamped_from_file() {
+    fn worker_config_batch_size_in_config_file_is_ignored() {
+        // batch_size was removed — all ready issues go to one worker.
+        // Config files with batch_size should still parse without error.
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("config"), "batch_size=10\n").unwrap();
-
+        fs::write(dir.path().join("config"), "batch_size=5\n").unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, BATCH_SIZE_MAX);
-    }
-
-    #[test]
-    fn worker_config_batch_size_clamped_from_env() {
-        let dir = TempDir::new().unwrap();
-        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
-            if k == "SIPAG_BATCH_SIZE" {
-                Some("99".to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap();
-        assert_eq!(cfg.batch_size, BATCH_SIZE_MAX);
-    }
-
-    #[test]
-    fn worker_config_batch_size_zero_clamped_to_min() {
-        // Issue #330: batch_size=0 must be clamped to 1, not silently break dispatch.
-        let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
-
-        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
-    }
-
-    #[test]
-    fn worker_config_batch_size_zero_env_clamped_to_min() {
-        let dir = TempDir::new().unwrap();
-        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
-            if k == "SIPAG_BATCH_SIZE" {
-                Some("0".to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap();
-        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+        // No batch_size field on config; just verify it loads without error
+        assert_eq!(cfg.poll_interval, Duration::from_secs(120)); // default
     }
 
     #[test]
@@ -668,12 +586,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("config"),
-            "# comment\n\n  # indented comment\nbatch_size=2\n",
+            "# comment\n\n  # indented comment\ntimeout=900\n",
         )
         .unwrap();
 
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, 2);
+        assert_eq!(cfg.timeout, Duration::from_secs(900));
         assert_eq!(cfg.image, DEFAULT_IMAGE); // unchanged
     }
 
@@ -682,12 +600,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("config"),
-            "unknown_key=some_value\nbatch_size=2\n",
+            "unknown_key=some_value\ntimeout=900\n",
         )
         .unwrap();
 
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, 2);
+        assert_eq!(cfg.timeout, Duration::from_secs(900));
     }
 
     #[test]
@@ -695,7 +613,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // No config file — should use defaults without error
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        assert_eq!(cfg.batch_size, 1);
+        assert_eq!(cfg.poll_interval, Duration::from_secs(120)); // default
     }
 
     #[test]
@@ -703,16 +621,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(
             dir.path().join("config"),
-            "batch_size=not_a_number\ntimeout=also_bad\nbatch_size=2\n",
+            "timeout=also_bad\npoll_interval=not_valid\n",
         )
         .unwrap();
 
-        // The second valid batch_size=2 should win; invalid values are skipped
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
-        // First bad parse is ignored, second entry sets it to 2
-        assert_eq!(cfg.batch_size, 2);
-        // timeout should still be the default since the only value was invalid
+        // Invalid values are skipped, defaults remain
         assert_eq!(cfg.timeout, Duration::from_secs(1800));
+        assert_eq!(cfg.poll_interval, Duration::from_secs(120));
     }
 
     #[test]
@@ -825,16 +741,14 @@ mod tests {
     }
 
     #[test]
-    fn doctor_invalid_batch_size_zero() {
+    fn doctor_batch_size_accepted_as_valid() {
+        // batch_size is ignored but accepted for backward compat.
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
 
         let entries = validate_config_file_for_doctor(dir.path()).unwrap();
         assert_eq!(entries.len(), 1);
-        assert!(matches!(
-            entries[0].status,
-            ConfigEntryStatus::InvalidValue { .. }
-        ));
+        assert_eq!(entries[0].status, ConfigEntryStatus::Valid);
     }
 
     #[test]

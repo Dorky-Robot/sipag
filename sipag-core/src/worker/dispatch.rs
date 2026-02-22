@@ -19,8 +19,7 @@ use crate::task::slugify;
 
 // ── Prompt templates (embedded at compile time) ───────────────────────────────
 
-const WORKER_ISSUE_PROMPT: &str = include_str!("../../../lib/prompts/worker-issue.md");
-const WORKER_GROUPED_PROMPT: &str = include_str!("../../../lib/prompts/worker-grouped.md");
+const WORKER_PROMPT: &str = include_str!("../../../lib/prompts/worker-grouped.md");
 const WORKER_ITERATION_PROMPT: &str = include_str!("../../../lib/prompts/worker-iteration.md");
 const WORKER_CONFLICT_FIX_PROMPT: &str =
     include_str!("../../../lib/prompts/worker-conflict-fix.md");
@@ -63,175 +62,13 @@ pub fn is_container_running(container_name: &str) -> bool {
 
 // ── Issue worker ──────────────────────────────────────────────────────────────
 
-/// Launch a Docker container to implement a GitHub issue.
+/// Launch a single Docker container to address one or more GitHub issues.
 ///
-/// Mirrors `worker_run_issue` in `lib/worker/docker.sh`:
-/// 1. Write enqueued state (crash-safe).
-/// 2. Transition label: `work_label` → `in-progress`.
-/// 3. Fetch issue details.
-/// 4. Build prompt from template.
-/// 5. Run Docker container (blocking).
-/// 6. Update state to `done` or `failed`.
-/// 7. Transition label on completion.
-pub fn dispatch_issue_worker(
-    repo: &str,
-    issue_num: u64,
-    cfg: &WorkerConfig,
-    sipag_dir: &Path,
-    gh_token: Option<&str>,
-    oauth_token: Option<&str>,
-    api_key: Option<&str>,
-) -> Result<()> {
-    let repo_slug = repo.replace('/', "--");
-    let log_dir = sipag_dir.join("logs");
-    fs::create_dir_all(&log_dir)?;
-    let log_path = log_dir.join(format!("{repo_slug}--{issue_num}.log"));
-
-    let store = FileStateStore::new(sipag_dir);
-
-    // 1. Write enqueued state immediately (crash-safe).
-    let container_name = format!("sipag-issue-{issue_num}");
-    let enqueued_state = WorkerState {
-        repo: repo.to_string(),
-        issue_num,
-        issue_title: String::new(),
-        branch: String::new(),
-        container_name: container_name.clone(),
-        pr_num: None,
-        pr_url: None,
-        status: WorkerStatus::Enqueued,
-        started_at: Some(now_utc()),
-        ended_at: None,
-        duration_s: None,
-        exit_code: None,
-        log_path: Some(log_path.clone()),
-        last_heartbeat: None,
-        phase: None,
-    };
-    store.save(&enqueued_state)?;
-
-    // 2. Fetch issue details (label transition is handled inside the container).
-    let (title, body) = github::get_issue_details(repo, issue_num)
-        .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
-
-    println!("[#{issue_num}] Starting: {title}");
-
-    // 4. Build prompt and branch name.
-    let slug: String = slugify(&title).chars().take(50).collect();
-    let branch = format!("sipag/issue-{issue_num}-{slug}");
-
-    let pr_body = format!(
-        "Closes #{issue_num}\n\n{body}\n\n---\n*This PR was opened by a sipag worker. Commits will appear as work progresses.*"
-    );
-
-    let prompt = WORKER_ISSUE_PROMPT
-        .replace("{{TITLE}}", &title)
-        .replace("{{BODY}}", &body)
-        .replace("{{BRANCH}}", &branch)
-        .replace("{{ISSUE_NUM}}", &issue_num.to_string());
-
-    // 5. Write running state.
-    let started_at = now_utc();
-    let running_state = WorkerState {
-        repo: repo.to_string(),
-        issue_num,
-        issue_title: title.clone(),
-        branch: branch.clone(),
-        container_name: container_name.clone(),
-        pr_num: None,
-        pr_url: None,
-        status: WorkerStatus::Running,
-        started_at: Some(started_at.clone()),
-        ended_at: None,
-        duration_s: None,
-        exit_code: None,
-        log_path: Some(log_path.clone()),
-        last_heartbeat: Some(started_at.clone()),
-        phase: Some("starting container".to_string()),
-    };
-    store.save(&running_state)?;
-
-    // 6. Run Docker container (blocking).
-    //    The container handles label transitions (ready → in-progress → needs-review/restored).
-    let start = Instant::now();
-    let workers_dir = sipag_dir.join("workers");
-    let state_filename = format!("{repo_slug}--{issue_num}.json");
-    let issue_num_str = issue_num.to_string();
-    let success = run_worker_container(
-        &container_name,
-        repo,
-        &branch,
-        &title,
-        &pr_body,
-        &prompt,
-        &cfg.image,
-        cfg.timeout.as_secs(),
-        gh_token,
-        oauth_token,
-        api_key,
-        ISSUE_CONTAINER_SCRIPT,
-        &log_path,
-        Some((&workers_dir, &state_filename)),
-        &[
-            ("ISSUE_NUM", &issue_num_str),
-            ("WORK_LABEL", &cfg.work_label),
-        ],
-    );
-    let duration_s = start.elapsed().as_secs() as i64;
-    let ended_at = now_utc();
-
-    // 7. Update state file. Label transitions are handled by the container itself.
-    if success {
-        // Find the PR that was created (container may have already recorded it
-        // in the state file, but confirm via GitHub for reliability).
-        let pr = github::find_pr_for_branch(repo, &branch).unwrap_or(None);
-
-        let mut done_state = running_state.clone();
-        done_state.status = WorkerStatus::Done;
-        done_state.ended_at = Some(ended_at);
-        done_state.duration_s = Some(duration_s);
-        done_state.exit_code = Some(0);
-        if let Some(ref p) = pr {
-            done_state.pr_num = Some(p.number);
-            done_state.pr_url = Some(p.url.clone());
-        }
-        store.save(&done_state)?;
-        println!("[#{issue_num}] DONE: {title}");
-    } else {
-        let failure_reason = extract_failure_reason(&log_path);
-
-        // Surface clone failures prominently so they're visible without digging through logs.
-        if let Some(ref reason) = failure_reason {
-            println!("[#{issue_num}]   Hint: {reason}");
-            if let Some(stem) = log_path.file_stem().and_then(|s| s.to_str()) {
-                println!("[#{issue_num}]   Full log: sipag logs {stem}");
-            }
-        }
-
-        let mut fail_state = running_state.clone();
-        fail_state.status = WorkerStatus::Failed;
-        fail_state.ended_at = Some(ended_at);
-        fail_state.duration_s = Some(duration_s);
-        fail_state.exit_code = Some(1);
-        fail_state.phase = failure_reason;
-        store.save(&fail_state)?;
-        println!(
-            "[#{issue_num}] FAILED: {title} — returned to {}",
-            cfg.work_label
-        );
-    }
-
-    Ok(())
-}
-
-// ── Grouped issue worker ─────────────────────────────────────────────────────
-
-/// Launch a single Docker container to address multiple GitHub issues together.
-///
-/// Claude receives all issue details and decides which to address in one
+/// The worker receives the full project landscape (all open issues) as context
+/// and the ready issues as candidates. Claude decides which to address in one
 /// cohesive PR. Issues not addressed (no `Closes #N` in the PR body) stay
 /// `ready` for the next polling cycle.
-pub fn dispatch_grouped_worker(
+pub fn dispatch_worker(
     repo: &str,
     issue_nums: &[u64],
     cfg: &WorkerConfig,
@@ -247,8 +84,16 @@ pub fn dispatch_grouped_worker(
     fs::create_dir_all(&log_dir)?;
 
     let anchor_num = issue_nums[0];
-    let container_name = format!("sipag-group-{anchor_num}");
-    let log_path = log_dir.join(format!("{repo_slug}--group-{anchor_num}.log"));
+    let container_name = if issue_nums.len() == 1 {
+        format!("sipag-issue-{anchor_num}")
+    } else {
+        format!("sipag-group-{anchor_num}")
+    };
+    let log_path = if issue_nums.len() == 1 {
+        log_dir.join(format!("{repo_slug}--{anchor_num}.log"))
+    } else {
+        log_dir.join(format!("{repo_slug}--group-{anchor_num}.log"))
+    };
 
     let store = FileStateStore::new(sipag_dir);
 
@@ -275,8 +120,15 @@ pub fn dispatch_grouped_worker(
         store.save(&enqueued_state)?;
     }
 
-    // 2. Fetch issue details for all issues.
-    let mut issues_section = String::new();
+    // 2. Fetch full project landscape (all open issues) for context.
+    let all_open = github::list_all_open_issues(repo).unwrap_or_default();
+    let mut all_issues_section = String::new();
+    for (num, title, body) in &all_open {
+        all_issues_section.push_str(&format!("### Issue #{num}: {title}\n\n{body}\n\n"));
+    }
+
+    // 3. Fetch details for ready issues (candidates for this cycle).
+    let mut ready_issues_section = String::new();
     let mut first_title = String::new();
     for &issue_num in issue_nums {
         let (title, body) = github::get_issue_details(repo, issue_num)
@@ -284,23 +136,32 @@ pub fn dispatch_grouped_worker(
         if first_title.is_empty() {
             first_title = title.clone();
         }
-        issues_section.push_str(&format!("### Issue #{issue_num}: {title}\n\n{body}\n\n"));
+        ready_issues_section.push_str(&format!("### Issue #{issue_num}: {title}\n\n{body}\n\n"));
     }
 
-    // 3. Build branch name and prompt.
+    // 4. Build branch name and prompt.
     let slug: String = slugify(&first_title).chars().take(50).collect();
-    let branch = format!("sipag/group-{anchor_num}-{slug}");
+    let branch = if issue_nums.len() == 1 {
+        format!("sipag/issue-{anchor_num}-{slug}")
+    } else {
+        format!("sipag/group-{anchor_num}-{slug}")
+    };
 
     let issue_refs: Vec<String> = issue_nums.iter().map(|n| format!("#{n}")).collect();
-    let pr_title = format!("sipag: address issues {}", issue_refs.join(", "));
+    let pr_title = if issue_nums.len() == 1 {
+        format!("sipag: {first_title}")
+    } else {
+        format!("sipag: address issues {}", issue_refs.join(", "))
+    };
     let pr_body_closes: Vec<String> = issue_nums.iter().map(|n| format!("Closes #{n}")).collect();
     let pr_body = format!(
         "{}\n\n---\n*This PR was opened by a sipag worker. Claude will update `Closes` references based on which issues are actually addressed.*",
         pr_body_closes.join("\n")
     );
 
-    let prompt = WORKER_GROUPED_PROMPT
-        .replace("{{ISSUES}}", &issues_section)
+    let prompt = WORKER_PROMPT
+        .replace("{{ALL_ISSUES}}", &all_issues_section)
+        .replace("{{READY_ISSUES}}", &ready_issues_section)
         .replace("{{BRANCH}}", &branch);
 
     let issue_nums_str: Vec<String> = issue_nums.iter().map(|n| n.to_string()).collect();
@@ -1116,61 +977,75 @@ Closes #103
 
 ## Test plan
 - [x] `make dev` passes
-- [x] Manual test with batch_size=3
+- [x] Manual test with multiple issues
 
 ---
 *This PR was opened by a sipag worker.*";
         assert_eq!(extract_all_issue_nums_from_body(body), vec![101, 103]);
     }
 
-    // ── Grouped prompt template ──────────────────────────────────────────────
+    // ── Worker prompt template ──────────────────────────────────────────────
 
     #[test]
-    fn grouped_prompt_has_expected_placeholders() {
+    fn worker_prompt_has_expected_placeholders() {
         assert!(
-            WORKER_GROUPED_PROMPT.contains("{{ISSUES}}"),
-            "Missing {{{{ISSUES}}}} placeholder"
+            WORKER_PROMPT.contains("{{ALL_ISSUES}}"),
+            "Missing {{{{ALL_ISSUES}}}} placeholder"
         );
         assert!(
-            WORKER_GROUPED_PROMPT.contains("{{BRANCH}}"),
+            WORKER_PROMPT.contains("{{READY_ISSUES}}"),
+            "Missing {{{{READY_ISSUES}}}} placeholder"
+        );
+        assert!(
+            WORKER_PROMPT.contains("{{BRANCH}}"),
             "Missing {{{{BRANCH}}}} placeholder"
         );
     }
 
     #[test]
-    fn grouped_prompt_substitution_produces_valid_output() {
-        let issues = "### Issue #1: Fix bug\n\nBug description\n\n### Issue #2: Add feature\n\nFeature description\n\n";
+    fn worker_prompt_substitution_produces_valid_output() {
+        let all_issues = "### Issue #1: Fix bug\n\nBug description\n\n### Issue #2: Add feature\n\nFeature description\n\n### Issue #3: Background task\n\nNot ready yet\n\n";
+        let ready_issues = "### Issue #1: Fix bug\n\nBug description\n\n### Issue #2: Add feature\n\nFeature description\n\n";
         let branch = "sipag/group-1-fix-bug";
 
-        let prompt = WORKER_GROUPED_PROMPT
-            .replace("{{ISSUES}}", issues)
+        let prompt = WORKER_PROMPT
+            .replace("{{ALL_ISSUES}}", all_issues)
+            .replace("{{READY_ISSUES}}", ready_issues)
             .replace("{{BRANCH}}", branch);
 
         assert!(prompt.contains("### Issue #1: Fix bug"));
-        assert!(prompt.contains("### Issue #2: Add feature"));
+        assert!(prompt.contains("### Issue #3: Background task"));
         assert!(prompt.contains("sipag/group-1-fix-bug"));
-        assert!(!prompt.contains("{{ISSUES}}"));
+        assert!(!prompt.contains("{{ALL_ISSUES}}"));
+        assert!(!prompt.contains("{{READY_ISSUES}}"));
         assert!(!prompt.contains("{{BRANCH}}"));
     }
 
     #[test]
-    fn grouped_prompt_mentions_closes_instruction() {
-        // The prompt should instruct Claude about Closes #N usage.
-        let lower = WORKER_GROUPED_PROMPT.to_lowercase();
+    fn worker_prompt_mentions_closes_instruction() {
+        let lower = WORKER_PROMPT.to_lowercase();
         assert!(
             lower.contains("closes #n") || lower.contains("closes"),
-            "Grouped prompt should mention 'Closes #N' for addressed issues"
+            "Worker prompt should mention 'Closes #N' for addressed issues"
         );
     }
 
-    // ── Issue prompt template ────────────────────────────────────────────────
+    #[test]
+    fn worker_prompt_mentions_boy_scout_rule() {
+        let lower = WORKER_PROMPT.to_lowercase();
+        assert!(
+            lower.contains("boy scout"),
+            "Worker prompt should mention Boy Scout Rule"
+        );
+    }
 
     #[test]
-    fn issue_prompt_has_expected_placeholders() {
-        assert!(WORKER_ISSUE_PROMPT.contains("{{TITLE}}"));
-        assert!(WORKER_ISSUE_PROMPT.contains("{{BODY}}"));
-        assert!(WORKER_ISSUE_PROMPT.contains("{{BRANCH}}"));
-        assert!(WORKER_ISSUE_PROMPT.contains("{{ISSUE_NUM}}"));
+    fn worker_prompt_mentions_test_curation() {
+        let lower = WORKER_PROMPT.to_lowercase();
+        assert!(
+            lower.contains("test suite") || lower.contains("curate"),
+            "Worker prompt should mention test suite curation"
+        );
     }
 
     // ── Container script embeds ──────────────────────────────────────────────

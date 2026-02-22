@@ -12,8 +12,7 @@ use anyhow::Result;
 
 use super::decision::decide_issue_action;
 use super::dispatch::{
-    dispatch_conflict_fix, dispatch_grouped_worker, dispatch_issue_worker, dispatch_pr_iteration,
-    is_container_running,
+    dispatch_conflict_fix, dispatch_pr_iteration, dispatch_worker, is_container_running,
 };
 use super::event_log::EventLog;
 use super::github::{
@@ -31,11 +30,10 @@ use crate::config::WorkerConfig;
 /// Preview which issues would be dispatched without starting any containers.
 ///
 /// Called by `sipag work --dry-run`. Lists approved issues per repo and shows
-/// how they would be grouped given the current `batch_size` setting.
+/// the dispatch plan for each repo.
 pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
     println!("sipag work --dry-run");
     println!("Label:      {}", cfg.work_label);
-    println!("Batch size: {}", cfg.batch_size);
     if cfg.max_open_prs > 0 {
         println!("Max open PRs: {}", cfg.max_open_prs);
     }
@@ -58,30 +56,15 @@ pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
             issue_strs.join(" ")
         );
 
-        let cap = if cfg.batch_size > 0 {
-            all_issues.len().min(cfg.batch_size)
-        } else {
-            all_issues.len()
-        };
-        let to_dispatch = &all_issues[..cap];
-        let anchor = to_dispatch[0];
-        let issue_strs_dispatch: Vec<String> =
-            to_dispatch.iter().map(|n| format!("#{n}")).collect();
-
-        if to_dispatch.len() == 1 {
-            println!("Would dispatch 1 worker: #{anchor} → sipag/issue-{anchor}-<slug>");
+        let anchor = all_issues[0];
+        if all_issues.len() == 1 {
+            println!("Would dispatch 1 worker: #{anchor} \u{2192} sipag/issue-{anchor}-<slug>");
         } else {
             println!(
-                "Would dispatch 1 worker ({} issues): {} → sipag/group-{}-<slug>",
-                to_dispatch.len(),
-                issue_strs_dispatch.join(" "),
+                "Would dispatch 1 worker ({} issues): {} \u{2192} sipag/group-{}-<slug>",
+                all_issues.len(),
+                issue_strs.join(" "),
                 anchor
-            );
-        }
-        if all_issues.len() > cap {
-            println!(
-                "  ({} issue(s) deferred to next cycle)",
-                all_issues.len() - cap
             );
         }
         println!();
@@ -123,7 +106,6 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         n => println!("Repos ({}): {}", n, repos.join(", ")),
     }
     println!("Label: {}", cfg.work_label);
-    println!("Batch size: {}", cfg.batch_size);
     println!("Poll interval: {}s", cfg.poll_interval.as_secs());
     println!("Logs: {}/logs/", sipag_dir.display());
     println!(
@@ -275,8 +257,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     let gh2 = gh_token.clone();
                     let oauth2 = oauth_token.clone();
                     let api2 = api_key.clone();
-                    // Run synchronously (one at a time) to keep implementation simple.
-                    // Parallelism can be added in a follow-up once batch_size > 1 is needed.
+                    // Run synchronously (one at a time).
                     let _ = dispatch_conflict_fix(
                         &repo2,
                         pr_num,
@@ -422,22 +403,20 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     to_iterate.len(),
                     to_iterate
                 );
-                for batch in to_iterate.chunks(cfg.batch_size) {
-                    println!("--- PR iteration batch: {:?} ---", batch);
-                    for &pr_num in batch {
-                        prs_iterating.insert(pr_num);
-                        let _ = dispatch_pr_iteration(
-                            repo,
-                            pr_num,
-                            &cfg,
-                            sipag_dir,
-                            gh_token.as_deref(),
-                            oauth_token.as_deref(),
-                            api_key.as_deref(),
-                        );
-                        prs_iterating.remove(&pr_num);
-                    }
-                    println!("--- PR iteration batch complete ---");
+                for &pr_num in &to_iterate {
+                    prs_iterating.insert(pr_num);
+                    println!("--- PR iteration: #{pr_num} ---");
+                    let _ = dispatch_pr_iteration(
+                        repo,
+                        pr_num,
+                        &cfg,
+                        sipag_dir,
+                        gh_token.as_deref(),
+                        oauth_token.as_deref(),
+                        api_key.as_deref(),
+                    );
+                    prs_iterating.remove(&pr_num);
+                    println!("--- PR iteration complete ---");
                     println!();
                 }
             }
@@ -475,86 +454,57 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                 }
 
                 if !dispatch_paused {
-                    // Cap visible issues to batch_size (Claude sees all, picks the
-                    // highest-impact cohesive PR). One container, one PR per cycle.
-                    let cap = if cfg.batch_size > 0 {
-                        new_issues.len().min(cfg.batch_size)
-                    } else {
-                        new_issues.len()
-                    };
-                    let issues_to_dispatch = &new_issues[..cap];
+                    // All ready issues go to one worker. Claude sees the full
+                    // project landscape and crafts the most impactful PR.
+                    let issues_to_dispatch = &new_issues[..];
+                    let anchor_num = issues_to_dispatch[0];
+                    let grouped = issues_to_dispatch.len() > 1;
 
                     println!(
-                        "[{}] {} ready issue(s), dispatching {} to one worker: {:?}",
+                        "[{}] {} ready issue(s), dispatching to one worker: {:?}",
                         hms(),
-                        new_issues.len(),
                         issues_to_dispatch.len(),
                         issues_to_dispatch
                     );
 
-                    if issues_to_dispatch.len() == 1 {
-                        let issue_num = issues_to_dispatch[0];
-                        let container_name = format!("sipag-issue-{issue_num}");
-                        event_log.issue_dispatch(repo, issues_to_dispatch, &container_name, false);
-                        println!("--- Issue #{issue_num} ---");
-                        let dispatch_start = Instant::now();
-                        let result = dispatch_issue_worker(
-                            repo,
-                            issue_num,
-                            &cfg,
-                            sipag_dir,
-                            gh_token.as_deref(),
-                            oauth_token.as_deref(),
-                            api_key.as_deref(),
-                        );
-                        let duration_s = dispatch_start.elapsed().as_secs();
-                        let success = result.is_ok();
-                        // Look up the PR that was created (if any) for the log.
-                        let pr = super::github::find_pr_for_branch(
-                            repo,
-                            &format!("sipag/issue-{issue_num}-*"),
-                        )
-                        .unwrap_or(None);
-                        event_log.worker_result(
-                            repo,
-                            issues_to_dispatch,
-                            success,
-                            duration_s,
-                            pr.as_ref().map(|p| p.number),
-                            pr.as_ref().map(|p| p.url.as_str()),
-                        );
+                    let container_name = if grouped {
+                        format!("sipag-group-{anchor_num}")
                     } else {
-                        let anchor_num = issues_to_dispatch[0];
-                        let container_name = format!("sipag-group-{anchor_num}");
-                        event_log.issue_dispatch(repo, issues_to_dispatch, &container_name, true);
-                        println!("--- Grouped: {:?} ---", issues_to_dispatch);
-                        let dispatch_start = Instant::now();
-                        let result = dispatch_grouped_worker(
-                            repo,
-                            issues_to_dispatch,
-                            &cfg,
-                            sipag_dir,
-                            gh_token.as_deref(),
-                            oauth_token.as_deref(),
-                            api_key.as_deref(),
-                        );
-                        let duration_s = dispatch_start.elapsed().as_secs();
-                        let success = result.is_ok();
-                        // Look up the PR for the grouped branch.
-                        let pr = super::github::find_pr_for_branch(
-                            repo,
-                            &format!("sipag/group-{anchor_num}-*"),
-                        )
-                        .unwrap_or(None);
-                        event_log.worker_result(
-                            repo,
-                            issues_to_dispatch,
-                            success,
-                            duration_s,
-                            pr.as_ref().map(|p| p.number),
-                            pr.as_ref().map(|p| p.url.as_str()),
-                        );
-                    }
+                        format!("sipag-issue-{anchor_num}")
+                    };
+                    event_log.issue_dispatch(repo, issues_to_dispatch, &container_name, grouped);
+                    println!("--- Worker: {:?} ---", issues_to_dispatch);
+
+                    let dispatch_start = Instant::now();
+                    let result = dispatch_worker(
+                        repo,
+                        issues_to_dispatch,
+                        &cfg,
+                        sipag_dir,
+                        gh_token.as_deref(),
+                        oauth_token.as_deref(),
+                        api_key.as_deref(),
+                    );
+                    let duration_s = dispatch_start.elapsed().as_secs();
+                    let success = result.is_ok();
+
+                    // Look up the PR for the branch.
+                    let branch_pattern = if grouped {
+                        format!("sipag/group-{anchor_num}-*")
+                    } else {
+                        format!("sipag/issue-{anchor_num}-*")
+                    };
+                    let pr =
+                        super::github::find_pr_for_branch(repo, &branch_pattern).unwrap_or(None);
+                    event_log.worker_result(
+                        repo,
+                        issues_to_dispatch,
+                        success,
+                        duration_s,
+                        pr.as_ref().map(|p| p.number),
+                        pr.as_ref().map(|p| p.url.as_str()),
+                    );
+
                     println!("--- Worker complete ---");
                     println!();
                 }

@@ -79,6 +79,49 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
     Ok(issues)
 }
 
+/// Fetch all open issues with number, title, and body.
+///
+/// Used to give the worker full project context — not just the `ready` subset.
+/// Returns tuples of `(number, title, body)`, sorted by number ascending.
+pub fn list_all_open_issues(repo: &str) -> Result<Vec<(u64, String, String)>> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,body",
+            "--limit",
+            "200",
+        ])
+        .output()
+        .context("Failed to run gh issue list")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    let mut issues = vec![];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let body = item["body"].as_str().unwrap_or("").to_string();
+            if number > 0 {
+                issues.push((number, title, body));
+            }
+        }
+    }
+    issues.sort_by_key(|(n, _, _)| *n);
+    Ok(issues)
+}
+
 /// Fetch issue title and body.
 pub fn get_issue_details(repo: &str, issue_num: u64) -> Result<(String, String)> {
     let n = issue_num.to_string();
@@ -191,7 +234,7 @@ pub fn transition_label(
             // Compute effective labels after the remove, then check lifecycle ordering.
             let effective: Vec<&str> = current_labels
                 .iter()
-                .filter(|l| remove.map_or(true, |r| l.as_str() != r))
+                .filter(|l| remove != Some(l.as_str()))
                 .map(|l| l.as_str())
                 .collect();
 
@@ -733,10 +776,7 @@ mod tests {
     fn regression_in_progress_when_needs_review_present() {
         // The bug scenario: new worker tries to add in-progress, but issue
         // already has needs-review from a prior completed worker.
-        assert!(is_lifecycle_regression(
-            "in-progress",
-            &["needs-review"]
-        ));
+        assert!(is_lifecycle_regression("in-progress", &["needs-review"]));
     }
 
     #[test]
@@ -752,10 +792,7 @@ mod tests {
     #[test]
     fn no_regression_needs_review_when_in_progress_present() {
         // Advancing forward is never a regression.
-        assert!(!is_lifecycle_regression(
-            "needs-review",
-            &["in-progress"]
-        ));
+        assert!(!is_lifecycle_regression("needs-review", &["in-progress"]));
     }
 
     #[test]
@@ -782,10 +819,7 @@ mod tests {
     fn no_regression_when_same_level_already_present() {
         // The idempotency check (already present) is handled before lifecycle check,
         // but if it weren't, same-level should not be a regression.
-        assert!(!is_lifecycle_regression(
-            "in-progress",
-            &["in-progress"]
-        ));
+        assert!(!is_lifecycle_regression("in-progress", &["in-progress"]));
     }
 
     #[test]

@@ -402,7 +402,9 @@ impl RepoLock {
                 if let Ok(pid) = content.trim().parse::<u32>() {
                     if is_process_alive(pid) {
                         if force {
-                            eprintln!("sipag work: killing existing process (PID {pid}) for {repo}");
+                            eprintln!(
+                                "sipag work: killing existing process (PID {pid}) for {repo}"
+                            );
                             kill_process(pid);
                             // Brief pause to let the killed process clean up.
                             std::thread::sleep(std::time::Duration::from_millis(500));
