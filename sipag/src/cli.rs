@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = env!("SIPAG_GIT_HASH");
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +44,10 @@ pub enum Commands {
         /// Process one polling cycle and exit
         #[arg(long)]
         once: bool,
+
+        /// Kill any existing sipag work process for the same repo(s) and take over
+        #[arg(long)]
+        force: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -215,7 +220,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Work { repos, once }) => cmd_work(repos, once),
+        Some(Commands::Work { repos, once, force }) => cmd_work(repos, once, force),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -248,7 +253,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }) => triage::run_triage(&repo, dry_run, apply),
         Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
-            println!("sipag {VERSION}");
+            println!("sipag {VERSION} ({GIT_HASH})");
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
@@ -294,7 +299,98 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
+// ── Per-repo work locks ───────────────────────────────────────────────────────
+
+/// A PID-file lock for a single repo. Released (file deleted) when dropped.
+struct WorkLock {
+    path: PathBuf,
+}
+
+impl WorkLock {
+    /// Try to acquire the lock for `repo`.
+    ///
+    /// If another process holds the lock and `force` is false, returns an error
+    /// with the incumbent PID. If `force` is true, the old process is sent
+    /// SIGTERM and we take over.
+    fn acquire(locks_dir: &Path, repo: &str, force: bool) -> Result<Self> {
+        let slug = repo.replace('/', "--");
+        let path = locks_dir.join(format!("{slug}.lock"));
+
+        if path.exists() {
+            let contents = fs::read_to_string(&path).unwrap_or_default();
+            let incumbent_pid: Option<u32> = contents.trim().parse().ok();
+
+            if let Some(pid) = incumbent_pid {
+                if is_process_alive(pid) {
+                    if force {
+                        eprintln!(
+                            "Warning: killing existing sipag work process (PID {pid}) for {repo}."
+                        );
+                        kill_process(pid);
+                        // Give the old process a moment to clean up.
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    } else {
+                        bail!(
+                            "Another sipag work process (PID {pid}) is already running for {repo}.\n\
+                             Use --force to override."
+                        );
+                    }
+                }
+                // Stale lock (PID is dead) — silently take over.
+            }
+        }
+
+        let pid = std::process::id();
+        fs::write(&path, pid.to_string())
+            .with_context(|| format!("Failed to write lock file: {}", path.display()))?;
+
+        Ok(Self { path })
+    }
+}
+
+impl Drop for WorkLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Acquire per-repo locks for all repos. Returns the guards (released on drop).
+fn acquire_work_locks(dir: &Path, repos: &[String], force: bool) -> Result<Vec<WorkLock>> {
+    let locks_dir = dir.join("locks");
+    fs::create_dir_all(&locks_dir)
+        .with_context(|| format!("Failed to create locks dir: {}", locks_dir.display()))?;
+
+    let mut locks = Vec::new();
+    for repo in repos {
+        locks.push(WorkLock::acquire(&locks_dir, repo, force)?);
+    }
+    Ok(locks)
+}
+
+/// Check whether a process with the given PID is currently alive.
+///
+/// Uses `kill -0` which sends no signal but returns an error if the process
+/// doesn't exist. Works on all POSIX platforms; on Windows always returns false.
+fn is_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Send SIGTERM to a process. Best-effort; ignores errors.
+fn kill_process(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+fn cmd_work(mut repos: Vec<String>, once: bool, force: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
@@ -338,6 +434,9 @@ fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
     if repos.is_empty() {
         repos = resolve_repos(&dir)?;
     }
+
+    // Acquire per-repo locks to prevent duplicate worker instances.
+    let _locks = acquire_work_locks(&dir, &repos, force)?;
 
     run_worker_loop(&repos, &dir, cfg)
 }
@@ -1253,9 +1352,10 @@ mod tests {
     fn parse_work_with_repos() {
         let cli = parse(&["sipag", "work", "Dorky-Robot/sipag", "other/repo"]);
         match cli.command {
-            Some(Commands::Work { repos, once }) => {
+            Some(Commands::Work { repos, once, force }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
+                assert!(!force);
             }
             other => panic!("Expected Work, got {other:?}"),
         }
@@ -1266,6 +1366,15 @@ mod tests {
         let cli = parse(&["sipag", "work", "--once", "Dorky-Robot/sipag"]);
         match cli.command {
             Some(Commands::Work { once, .. }) => assert!(once),
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_force() {
+        let cli = parse(&["sipag", "work", "--force", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { force, .. }) => assert!(force),
             other => panic!("Expected Work, got {other:?}"),
         }
     }

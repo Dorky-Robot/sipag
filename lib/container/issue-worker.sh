@@ -9,15 +9,37 @@ ALL_ISSUES="${ISSUE_NUMS:-${ISSUE_NUM:-}}"
 # The container owns label transitions so they happen atomically with the work.
 # WORK_LABEL is passed via env var from the host.
 
-# Transition a label on a single issue.
+# Transition a label on a single issue (idempotent).
+#
+# Checks current labels before modifying so:
+#   - Adding an already-present label is a no-op
+#   - Removing an already-absent label is a no-op
+#   - needs-review is the terminal label; in-progress won't regress it
 transition_label_one() {
     local issue="${1:-}" remove="${2:-}" add="${3:-}"
     if [[ -z "$issue" ]]; then return 0; fi
+
+    # Fetch current labels (comma-separated) once per call.
+    local current_labels
+    current_labels=$(gh issue view "$issue" --repo "${REPO}" --json labels \
+        --jq '[.labels[].name] | join(",")' 2>/dev/null || true)
+
     if [[ -n "$remove" ]]; then
-        gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+        # Only remove if the label is currently present.
+        if echo ",$current_labels," | grep -q ",${remove},"; then
+            gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+        fi
     fi
     if [[ -n "$add" ]]; then
-        gh issue edit "$issue" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+        # Skip if label is already present.
+        if echo ",$current_labels," | grep -q ",${add},"; then
+            : # already present — no-op
+        # Lifecycle protection: don't regress from needs-review to in-progress.
+        elif [[ "$add" == "in-progress" ]] && echo ",$current_labels," | grep -q ",needs-review,"; then
+            : # don't regress
+        else
+            gh issue edit "$issue" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+        fi
     fi
 }
 

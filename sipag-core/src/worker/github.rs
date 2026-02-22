@@ -156,9 +156,13 @@ pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
     Ok(None)
 }
 
-/// Transition labels on a GitHub issue.
+/// Transition labels on a GitHub issue (idempotent).
 ///
-/// Removes `remove` (if non-empty) then adds `add` (if non-empty).
+/// Removes `remove` (if non-empty and currently present) then adds `add`
+/// (if non-empty and not already present). Respects lifecycle ordering:
+/// `needs-review` is the terminal label and won't be regressed to
+/// `in-progress`.
+///
 /// Ignores errors (e.g. label already absent or issue closed).
 pub fn transition_label(
     repo: &str,
@@ -167,8 +171,12 @@ pub fn transition_label(
     add: Option<&str>,
 ) -> Result<()> {
     let n = issue_num.to_string();
+
+    // Fetch current labels once so we can make this idempotent.
+    let current = get_issue_labels(repo, issue_num).unwrap_or_default();
+
     if let Some(label) = remove {
-        if !label.is_empty() {
+        if !label.is_empty() && current.iter().any(|l| l.as_str() == label) {
             let _ = Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--remove-label", label])
                 .stdout(Stdio::null())
@@ -177,7 +185,11 @@ pub fn transition_label(
         }
     }
     if let Some(label) = add {
-        if !label.is_empty() {
+        if !label.is_empty() && !current.iter().any(|l| l.as_str() == label) {
+            // Lifecycle protection: don't regress from needs-review to in-progress.
+            if label == "in-progress" && current.iter().any(|l| l.as_str() == "needs-review") {
+                return Ok(());
+            }
             let _ = Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
                 .stdout(Stdio::null())
@@ -186,6 +198,36 @@ pub fn transition_label(
         }
     }
     Ok(())
+}
+
+/// Fetch the current labels on a GitHub issue.
+///
+/// Returns an empty vec on any error so callers can degrade gracefully.
+fn get_issue_labels(repo: &str, issue_num: u64) -> Result<Vec<String>> {
+    let n = issue_num.to_string();
+    let output = Command::new("gh")
+        .args(["issue", "view", &n, "--repo", repo, "--json", "labels"])
+        .output()
+        .context("Failed to get current labels via gh")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+
+    let labels: Vec<String> = parsed["labels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l["name"].as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(labels)
 }
 
 /// Find open PRs that need another worker pass.
