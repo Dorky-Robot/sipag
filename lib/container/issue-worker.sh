@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Resolve prompt from file (avoids OS arg size limits) ─────────────────────
-if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
-    PROMPT="$(cat "$PROMPT_FILE")"
-    export PROMPT
-fi
+# ── Resolve prompt/PR-body from file (avoids OS arg size limits) ─────────────
+# PR_BODY is small enough to keep as an env var (used by gh pr create below).
 if [[ -n "${PR_BODY_FILE:-}" ]] && [[ -f "$PR_BODY_FILE" ]]; then
     PR_BODY="$(cat "$PR_BODY_FILE")"
     export PR_BODY
@@ -142,8 +139,14 @@ sipag-state phase "running claude" || true
 ) &
 HEARTBEAT_PID=$!
 
-tmux new-session -d -s claude \
-    "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+# Pass prompt via pipe (not CLI arg) to avoid exec argument size limits.
+if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
+    tmux new-session -d -s claude \
+        "cat '$PROMPT_FILE' | claude --dangerously-skip-permissions --print; echo \$? > /tmp/.claude-exit"
+else
+    tmux new-session -d -s claude \
+        "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+fi
 tmux set-option -t claude history-limit 50000
 touch /tmp/claude.log
 tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"

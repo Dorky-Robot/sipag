@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Resolve prompt from file (avoids OS arg size limits) ─────────────────────
-if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
-    PROMPT="$(cat "$PROMPT_FILE")"
-    export PROMPT
-fi
-
 git clone "https://github.com/${REPO}.git" /work && cd /work
 git config user.name "sipag"
 git config user.email "sipag@localhost"
@@ -19,8 +13,14 @@ if git merge origin/main --no-edit; then
     exit 0
 fi
 echo "[sipag] Conflicts detected in $BRANCH, running Claude to resolve..."
-tmux new-session -d -s claude \
-    "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+# Pass prompt via pipe (not CLI arg) to avoid exec argument size limits.
+if [[ -n "${PROMPT_FILE:-}" ]] && [[ -f "$PROMPT_FILE" ]]; then
+    tmux new-session -d -s claude \
+        "cat '$PROMPT_FILE' | claude --dangerously-skip-permissions --print; echo \$? > /tmp/.claude-exit"
+else
+    tmux new-session -d -s claude \
+        "claude --dangerously-skip-permissions -p \"\$PROMPT\"; echo \$? > /tmp/.claude-exit"
+fi
 tmux set-option -t claude history-limit 50000
 touch /tmp/claude.log
 tmux pipe-pane -t claude -o "cat >> /tmp/claude.log"
