@@ -15,6 +15,7 @@
 //!
 //! Configuration lives in `crate::config::WorkerConfig` (not in this module).
 
+pub(crate) mod brainstorm;
 pub(crate) mod decision;
 pub(crate) mod dispatch;
 pub(crate) mod event_log;

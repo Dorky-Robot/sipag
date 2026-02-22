@@ -12,6 +12,8 @@ These issues have been marked as ready for work. They are your starting point, b
 
 {{READY_ISSUES}}
 
+{{BRAINSTORM_PLAN}}
+
 ## How to work
 
 1. **Find the disease, not the symptoms.** Read every issue above before writing a line of code. Multiple issues often point at the same architectural weakness — a missing abstraction, a leaky boundary, an implicit contract that should be explicit. If three issues complain about different error messages, the real problem might be "there's no unified error handling." Fix that, and you fix all three — plus prevent future issues nobody has filed yet.

@@ -79,6 +79,49 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
     Ok(issues)
 }
 
+/// Fetch all open issues with number and title only (no body).
+///
+/// Much cheaper than [`list_all_open_issues`] — used as the first stage of
+/// the issue selection funnel. Returns tuples of `(number, title)`, sorted
+/// by number ascending.
+pub fn list_all_open_issue_titles(repo: &str) -> Result<Vec<(u64, String)>> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title",
+            "--limit",
+            "200",
+        ])
+        .output()
+        .context("Failed to run gh issue list")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    let mut issues = vec![];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            if number > 0 {
+                issues.push((number, title));
+            }
+        }
+    }
+    issues.sort_by_key(|(n, _)| *n);
+    Ok(issues)
+}
+
 /// Fetch all open issues with number, title, and body.
 ///
 /// Used to give the worker full project context — not just the `ready` subset.

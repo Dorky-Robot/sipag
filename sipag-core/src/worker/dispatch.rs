@@ -40,6 +40,68 @@ const ITERATION_CONTAINER_SCRIPT: &str = include_str!("../../../lib/container/it
 const CONFLICT_FIX_CONTAINER_SCRIPT: &str =
     include_str!("../../../lib/container/conflict-fix-worker.sh");
 
+// ── Issue context (shared between brainstorm and dispatch) ───────────────────
+
+/// Pre-fetched issue context, built once in the poll loop and shared between
+/// the brainstorm phase and worker dispatch. Avoids double-fetching from GitHub.
+pub(crate) struct IssueContext {
+    /// Formatted section with all open issues (full project landscape).
+    pub all_issues_section: String,
+    /// Formatted section with ready issues (candidates for this cycle).
+    pub ready_issues_section: String,
+    /// Title of the first (anchor) issue — used for branch naming.
+    pub first_title: String,
+}
+
+/// Fetch issue context from GitHub, suitable for both brainstorm and dispatch.
+///
+/// When `context_issue_nums` is provided, only those issues are fetched for the
+/// all-issues section (funnel-narrowed set). When `None`, falls back to fetching
+/// all open issues (current behavior).
+pub(crate) fn fetch_issue_context(
+    repo: &str,
+    issue_nums: &[u64],
+    context_issue_nums: Option<&[u64]>,
+) -> IssueContext {
+    assert!(!issue_nums.is_empty(), "issue_nums must not be empty");
+
+    // Build all_issues_section from either the narrowed set or all open issues.
+    let mut all_issues_section = String::new();
+    match context_issue_nums {
+        Some(nums) => {
+            for &num in nums {
+                let (title, body) = github::get_issue_details(repo, num)
+                    .unwrap_or_else(|_| (format!("Issue #{num}"), String::new()));
+                all_issues_section.push_str(&format!("### Issue #{num}: {title}\n\n{body}\n\n"));
+            }
+        }
+        None => {
+            let all_open = github::list_all_open_issues(repo).unwrap_or_default();
+            for (num, title, body) in &all_open {
+                all_issues_section.push_str(&format!("### Issue #{num}: {title}\n\n{body}\n\n"));
+            }
+        }
+    }
+
+    // Fetch details for ready issues (candidates for this cycle).
+    let mut ready_issues_section = String::new();
+    let mut first_title = String::new();
+    for &issue_num in issue_nums {
+        let (title, body) = github::get_issue_details(repo, issue_num)
+            .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
+        if first_title.is_empty() {
+            first_title = title.clone();
+        }
+        ready_issues_section.push_str(&format!("### Issue #{issue_num}: {title}\n\n{body}\n\n"));
+    }
+
+    IssueContext {
+        all_issues_section,
+        ready_issues_section,
+        first_title,
+    }
+}
+
 // ── Public helpers ────────────────────────────────────────────────────────────
 
 /// Check whether a Docker container with the given name is currently running.
@@ -68,6 +130,10 @@ pub fn is_container_running(container_name: &str) -> bool {
 /// and the ready issues as candidates. Claude decides which to address in one
 /// cohesive PR. Issues not addressed (no `Closes #N` in the PR body) stay
 /// `ready` for the next polling cycle.
+///
+/// When `brainstorm_plan` is provided, it's injected into the worker prompt
+/// via the `{{BRAINSTORM_PLAN}}` placeholder.
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_worker(
     repo: &str,
     issue_nums: &[u64],
@@ -76,6 +142,8 @@ pub fn dispatch_worker(
     gh_token: Option<&str>,
     oauth_token: Option<&str>,
     api_key: Option<&str>,
+    issue_ctx: Option<&IssueContext>,
+    brainstorm_plan: Option<&str>,
 ) -> Result<()> {
     assert!(!issue_nums.is_empty(), "issue_nums must not be empty");
 
@@ -120,27 +188,22 @@ pub fn dispatch_worker(
         store.save(&enqueued_state)?;
     }
 
-    // 2. Fetch full project landscape (all open issues) for context.
-    let all_open = github::list_all_open_issues(repo).unwrap_or_default();
-    let mut all_issues_section = String::new();
-    for (num, title, body) in &all_open {
-        all_issues_section.push_str(&format!("### Issue #{num}: {title}\n\n{body}\n\n"));
-    }
-
-    // 3. Fetch details for ready issues (candidates for this cycle).
-    let mut ready_issues_section = String::new();
-    let mut first_title = String::new();
-    for &issue_num in issue_nums {
-        let (title, body) = github::get_issue_details(repo, issue_num)
-            .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
-        if first_title.is_empty() {
-            first_title = title.clone();
+    // 2. Fetch issue context (or reuse pre-fetched context from poll loop).
+    let owned_ctx;
+    let ctx = match issue_ctx {
+        Some(c) => c,
+        None => {
+            owned_ctx = fetch_issue_context(repo, issue_nums, None);
+            &owned_ctx
         }
-        ready_issues_section.push_str(&format!("### Issue #{issue_num}: {title}\n\n{body}\n\n"));
-    }
+    };
 
-    // 4. Build branch name and prompt.
-    let slug: String = slugify(&first_title).chars().take(50).collect();
+    let all_issues_section = &ctx.all_issues_section;
+    let ready_issues_section = &ctx.ready_issues_section;
+    let first_title = &ctx.first_title;
+
+    // 3. Build branch name and prompt.
+    let slug: String = slugify(first_title).chars().take(50).collect();
     let branch = if issue_nums.len() == 1 {
         format!("sipag/issue-{anchor_num}-{slug}")
     } else {
@@ -159,9 +222,14 @@ pub fn dispatch_worker(
         pr_body_closes.join("\n")
     );
 
+    let brainstorm_section = brainstorm_plan
+        .map(super::brainstorm::format_brainstorm_section)
+        .unwrap_or_default();
+
     let prompt = WORKER_PROMPT
-        .replace("{{ALL_ISSUES}}", &all_issues_section)
-        .replace("{{READY_ISSUES}}", &ready_issues_section)
+        .replace("{{ALL_ISSUES}}", all_issues_section)
+        .replace("{{READY_ISSUES}}", ready_issues_section)
+        .replace("{{BRAINSTORM_PLAN}}", &brainstorm_section)
         .replace("{{BRANCH}}", &branch);
 
     let issue_nums_str: Vec<String> = issue_nums.iter().map(|n| n.to_string()).collect();
@@ -997,6 +1065,10 @@ Closes #103
             "Missing {{{{READY_ISSUES}}}} placeholder"
         );
         assert!(
+            WORKER_PROMPT.contains("{{BRAINSTORM_PLAN}}"),
+            "Missing {{{{BRAINSTORM_PLAN}}}} placeholder"
+        );
+        assert!(
             WORKER_PROMPT.contains("{{BRANCH}}"),
             "Missing {{{{BRANCH}}}} placeholder"
         );
@@ -1011,6 +1083,7 @@ Closes #103
         let prompt = WORKER_PROMPT
             .replace("{{ALL_ISSUES}}", all_issues)
             .replace("{{READY_ISSUES}}", ready_issues)
+            .replace("{{BRAINSTORM_PLAN}}", "")
             .replace("{{BRANCH}}", branch);
 
         assert!(prompt.contains("### Issue #1: Fix bug"));
@@ -1018,7 +1091,22 @@ Closes #103
         assert!(prompt.contains("sipag/group-1-fix-bug"));
         assert!(!prompt.contains("{{ALL_ISSUES}}"));
         assert!(!prompt.contains("{{READY_ISSUES}}"));
+        assert!(!prompt.contains("{{BRAINSTORM_PLAN}}"));
         assert!(!prompt.contains("{{BRANCH}}"));
+    }
+
+    #[test]
+    fn worker_prompt_substitution_with_brainstorm_plan() {
+        let plan = "## Pre-analysis\n\nSome plan content.";
+        let prompt = WORKER_PROMPT
+            .replace("{{ALL_ISSUES}}", "issues")
+            .replace("{{READY_ISSUES}}", "ready")
+            .replace("{{BRAINSTORM_PLAN}}", plan)
+            .replace("{{BRANCH}}", "test-branch");
+
+        assert!(prompt.contains("Pre-analysis"));
+        assert!(prompt.contains("Some plan content."));
+        assert!(!prompt.contains("{{BRAINSTORM_PLAN}}"));
     }
 
     #[test]

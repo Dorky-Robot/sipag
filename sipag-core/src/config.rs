@@ -13,6 +13,7 @@
 //! doc_refresh_interval    SIPAG_DOC_REFRESH_INTERVAL   doc_refresh_interval     10
 //! state_max_age_days      SIPAG_STATE_MAX_AGE_DAYS     state_max_age_days       7
 //! max_open_prs            SIPAG_MAX_OPEN_PRS           max_open_prs             5 (0 = disabled)
+//! brainstorm              SIPAG_BRAINSTORM             brainstorm               true
 //! once                    — (CLI --once flag only)     —                        false
 //! sipag_dir               SIPAG_DIR                    —                        ~/.sipag
 //! ```
@@ -33,6 +34,7 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 /// All known keys in the `~/.sipag/config` file.
 const KNOWN_KEYS: &[&str] = &[
     "batch_size", // Ignored but accepted for backward compat
+    "brainstorm",
     "max_open_prs",
     "poll_interval",
     "work_label",
@@ -72,6 +74,12 @@ pub struct WorkerConfig {
     /// worker skips new issue dispatch and logs a message. Dispatch resumes automatically once
     /// the count drops below the threshold. Set to 0 to disable back-pressure entirely.
     pub max_open_prs: usize,
+    /// Run brainstorm phase before dispatch (`SIPAG_BRAINSTORM`; default true).
+    ///
+    /// When enabled, 3 parallel `claude --print` calls analyze ready issues from different
+    /// perspectives (architectural coherence, practical delivery, risk/dependency), then a
+    /// synthesis call produces one focused plan injected into the worker prompt.
+    pub brainstorm: bool,
 }
 
 impl WorkerConfig {
@@ -130,6 +138,7 @@ impl WorkerConfig {
             doc_refresh_interval: 10,
             state_max_age_days: 7,
             max_open_prs: 5,
+            brainstorm: true,
         }
     }
 
@@ -166,6 +175,7 @@ impl WorkerConfig {
             }
             "work_label" => self.work_label = value.to_string(),
             "auto_merge" => self.auto_merge = value == "true",
+            "brainstorm" => self.brainstorm = value != "false",
             "doc_refresh_interval" => {
                 if let Ok(n) = value.parse::<u64>() {
                     self.doc_refresh_interval = n;
@@ -234,6 +244,9 @@ impl WorkerConfig {
             if let Ok(n) = v.parse::<usize>() {
                 self.max_open_prs = n;
             }
+        }
+        if let Some(v) = get_env("SIPAG_BRAINSTORM") {
+            self.brainstorm = v != "false" && v != "0";
         }
 
         warnings
@@ -311,7 +324,7 @@ fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
             }
         }
         "image" | "work_label" => ConfigEntryStatus::Valid,
-        "auto_merge" => {
+        "brainstorm" | "auto_merge" => {
             if value == "true" || value == "false" {
                 ConfigEntryStatus::Valid
             } else {
@@ -476,6 +489,7 @@ mod tests {
         assert_eq!(cfg.doc_refresh_interval, 10);
         assert_eq!(cfg.state_max_age_days, 7);
         assert_eq!(cfg.max_open_prs, 5);
+        assert!(cfg.brainstorm);
     }
 
     #[test]
@@ -711,6 +725,74 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cfg.max_open_prs, 7);
+    }
+
+    // ── brainstorm config tests ─────────────────────────────────────────
+
+    #[test]
+    fn worker_config_brainstorm_default_is_true() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert!(cfg.brainstorm);
+    }
+
+    #[test]
+    fn worker_config_brainstorm_false_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "brainstorm=false\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert!(!cfg.brainstorm);
+    }
+
+    #[test]
+    fn worker_config_brainstorm_true_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "brainstorm=true\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert!(cfg.brainstorm);
+    }
+
+    #[test]
+    fn worker_config_brainstorm_false_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BRAINSTORM" {
+                Some("false".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert!(!cfg.brainstorm);
+    }
+
+    #[test]
+    fn worker_config_brainstorm_zero_from_env_disables() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BRAINSTORM" {
+                Some("0".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert!(!cfg.brainstorm);
+    }
+
+    #[test]
+    fn worker_config_brainstorm_env_overrides_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "brainstorm=true\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BRAINSTORM" {
+                Some("false".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert!(!cfg.brainstorm);
     }
 
     // ── validate_config_file_for_doctor tests ─────────────────────────────

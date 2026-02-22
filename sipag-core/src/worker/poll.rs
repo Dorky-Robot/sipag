@@ -10,15 +10,17 @@ use std::{fs, thread};
 
 use anyhow::Result;
 
+use super::brainstorm::{run_brainstorm, run_issue_funnel};
 use super::decision::decide_issue_action;
 use super::dispatch::{
-    dispatch_conflict_fix, dispatch_pr_iteration, dispatch_worker, is_container_running,
+    dispatch_conflict_fix, dispatch_pr_iteration, dispatch_worker, fetch_issue_context,
+    is_container_running,
 };
 use super::event_log::EventLog;
 use super::github::{
     count_open_issues, count_open_prs, count_open_sipag_prs, find_conflicted_prs,
-    find_prs_needing_iteration, list_labeled_issues, reconcile_closed_prs, reconcile_merged_prs,
-    reconcile_stale_in_progress,
+    find_prs_needing_iteration, list_all_open_issue_titles, list_labeled_issues,
+    reconcile_closed_prs, reconcile_merged_prs, reconcile_stale_in_progress,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -37,6 +39,14 @@ pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
     if cfg.max_open_prs > 0 {
         println!("Max open PRs: {}", cfg.max_open_prs);
     }
+    println!(
+        "Brainstorm: {}",
+        if cfg.brainstorm {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     for repo in repos {
@@ -106,6 +116,14 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         n => println!("Repos ({}): {}", n, repos.join(", ")),
     }
     println!("Label: {}", cfg.work_label);
+    println!(
+        "Brainstorm: {}",
+        if cfg.brainstorm {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("Poll interval: {}s", cfg.poll_interval.as_secs());
     println!("Logs: {}/logs/", sipag_dir.display());
     println!(
@@ -467,6 +485,79 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                         issues_to_dispatch
                     );
 
+                    // Issue selection funnel + brainstorm.
+                    let (issue_ctx, brainstorm_plan) = if cfg.brainstorm {
+                        // Stage 0: Fetch titles only (cheap).
+                        println!("[{}] Running issue selection funnel...", hms());
+                        let all_titles = list_all_open_issue_titles(repo).unwrap_or_default();
+
+                        // Stage 1: Cluster + select.
+                        let narrowed_nums = if all_titles.is_empty() {
+                            println!(
+                                "[{}] Funnel: no titles fetched, falling back to full fetch",
+                                hms()
+                            );
+                            None
+                        } else {
+                            match run_issue_funnel(&all_titles, issues_to_dispatch) {
+                                Some(funnel) => {
+                                    println!(
+                                        "[{}] Funnel selected {} issues: {:?}",
+                                        hms(),
+                                        funnel.selected_issues.len(),
+                                        funnel.selected_issues
+                                    );
+                                    if !funnel.cluster_rationale.is_empty() {
+                                        println!(
+                                            "[{}] Funnel rationale: {}",
+                                            hms(),
+                                            funnel.cluster_rationale
+                                        );
+                                    }
+                                    Some(funnel.selected_issues)
+                                }
+                                None => {
+                                    println!(
+                                        "[{}] Funnel failed, falling back to full fetch",
+                                        hms()
+                                    );
+                                    None
+                                }
+                            }
+                        };
+
+                        // Stage 2: Fetch full details (narrowed or all).
+                        let ctx =
+                            fetch_issue_context(repo, issues_to_dispatch, narrowed_nums.as_deref());
+
+                        // Stage 3: Brainstorm on (possibly narrowed) set.
+                        println!("[{}] Running brainstorm phase...", hms());
+                        let plan = match run_brainstorm(
+                            &ctx.all_issues_section,
+                            &ctx.ready_issues_section,
+                        ) {
+                            Some(result) => {
+                                println!(
+                                    "[{}] Brainstorm complete ({}s)",
+                                    hms(),
+                                    result.duration_secs
+                                );
+                                Some(result.plan)
+                            }
+                            None => {
+                                println!(
+                                    "[{}] Brainstorm skipped/failed — dispatching without plan",
+                                    hms()
+                                );
+                                None
+                            }
+                        };
+
+                        (ctx, plan)
+                    } else {
+                        (fetch_issue_context(repo, issues_to_dispatch, None), None)
+                    };
+
                     let container_name = if grouped {
                         format!("sipag-group-{anchor_num}")
                     } else {
@@ -484,6 +575,8 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                         gh_token.as_deref(),
                         oauth_token.as_deref(),
                         api_key.as_deref(),
+                        Some(&issue_ctx),
+                        brainstorm_plan.as_deref(),
                     );
                     let duration_s = dispatch_start.elapsed().as_secs();
                     let success = result.is_ok();

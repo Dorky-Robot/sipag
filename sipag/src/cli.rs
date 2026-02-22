@@ -53,6 +53,10 @@ pub enum Commands {
         /// Kill any existing sipag work process for the same repo(s) and take over
         #[arg(long)]
         force: bool,
+
+        /// Skip the brainstorm phase (3-perspective analysis before dispatch)
+        #[arg(long)]
+        no_brainstorm: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -230,7 +234,8 @@ pub fn run(cli: Cli) -> Result<()> {
             once,
             dry_run,
             force,
-        }) => cmd_work(repos, once, dry_run, force),
+            no_brainstorm,
+        }) => cmd_work(repos, once, dry_run, force, no_brainstorm),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -309,12 +314,21 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool, force: bool) -> Result<()> {
+fn cmd_work(
+    mut repos: Vec<String>,
+    once: bool,
+    dry_run: bool,
+    force: bool,
+    no_brainstorm: bool,
+) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
     let mut cfg = WorkerConfig::load(&dir)?;
     cfg.once = once;
+    if no_brainstorm {
+        cfg.brainstorm = false;
+    }
 
     // Resolve repos list (needed by both dry-run and normal mode).
     if repos.is_empty() {
@@ -1413,11 +1427,13 @@ mod tests {
                 once,
                 dry_run,
                 force,
+                no_brainstorm,
             }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
                 assert!(!dry_run);
                 assert!(!force);
+                assert!(!no_brainstorm);
             }
             other => panic!("Expected Work, got {other:?}"),
         }
@@ -1462,6 +1478,22 @@ mod tests {
         match cli.command {
             Some(Commands::Work { force, repos, .. }) => {
                 assert!(force);
+                assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
+            }
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_no_brainstorm() {
+        let cli = parse(&["sipag", "work", "--no-brainstorm", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work {
+                no_brainstorm,
+                repos,
+                ..
+            }) => {
+                assert!(no_brainstorm);
                 assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
             }
             other => panic!("Expected Work, got {other:?}"),
