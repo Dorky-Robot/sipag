@@ -1,6 +1,6 @@
 [package]
 name = "sipag"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 description = "Sandbox launcher for Claude Code — single binary with CLI and TUI"
 
