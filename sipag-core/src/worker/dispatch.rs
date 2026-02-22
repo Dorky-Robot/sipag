@@ -702,6 +702,23 @@ fn run_worker_container(
     }
     cmd.arg("--rm").arg("--name").arg(container_name);
 
+    // Docker labels for easier debugging with `docker ps --filter` and `docker inspect`.
+    let dispatched_at = now_utc();
+    cmd.arg("--label")
+        .arg(format!("org.sipag.repo={repo}"))
+        .arg("--label")
+        .arg(format!("org.sipag.branch={branch}"))
+        .arg("--label")
+        .arg(format!("org.sipag.dispatched-at={dispatched_at}"));
+    // Add org.sipag.issues from extra_env if ISSUE_NUM or ISSUE_NUMS is present.
+    if let Some(issues) = extra_env
+        .iter()
+        .find_map(|(k, v)| (*k == "ISSUE_NUM" || *k == "ISSUE_NUMS").then_some(*v))
+    {
+        cmd.arg("--label")
+            .arg(format!("org.sipag.issues={issues}"));
+    }
+
     // Mount workers directory for state self-reporting.
     if let Some((workers_dir, state_filename)) = state_mount {
         cmd.arg("-v")
