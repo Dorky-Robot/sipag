@@ -16,8 +16,8 @@ use super::dispatch::{
     is_container_running,
 };
 use super::github::{
-    count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
-    list_approved_issues, reconcile_merged_prs,
+    count_open_issues, count_open_prs, count_open_sipag_prs, find_conflicted_prs,
+    find_prs_needing_iteration, list_approved_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -143,6 +143,11 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
     let mut completed_this_session: u64 = 0;
     const REMINDER_THRESHOLD: u64 = 10;
 
+    // ── Kick tracker for back-pressure bypass ─────────────────────────────
+    // Set to true when a kick signal is received during sleep; consumed
+    // (reset to false) at the top of the next cycle to force dispatch once.
+    let mut kicked = false;
+
     loop {
         // ── Drain check ──────────────────────────────────────────────────────
         if sipag_dir.join("drain").exists() {
@@ -184,6 +189,11 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                 completed_this_session = 0;
             }
         }
+
+        // ── Force-dispatch flag (kick signal or SIPAG_FORCE_DISPATCH=1) ──────
+        // When active, the back-pressure check is skipped for this cycle.
+        let force_dispatch = kicked || std::env::var("SIPAG_FORCE_DISPATCH").as_deref() == Ok("1");
+        kicked = false; // consumed — next kick will set it again
 
         let mut found_work = false;
 
@@ -333,58 +343,85 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                 }
             }
 
-            // New issue workers.
+            // New issue workers — gated by back-pressure.
             if !new_issues.is_empty() {
-                println!(
-                    "[{}] {} new issue(s): {:?}",
-                    hms(),
-                    new_issues.len(),
-                    new_issues
-                );
-                if cfg.batch_size > 1 && new_issues.len() > 1 {
-                    // Grouped dispatch: send up to batch_size issues to one container.
-                    for batch in new_issues.chunks(cfg.batch_size) {
-                        if batch.len() == 1 {
-                            println!("--- Issue #{} (single) ---", batch[0]);
+                // ── Back-pressure check ──────────────────────────────────────────
+                // When max_open_prs > 0 (and not force-dispatching), count open
+                // sipag/* PRs and pause new-issue dispatch if at or above threshold.
+                // PR iteration and conflict-fix workers (above) are unaffected.
+                let dispatch_paused = if cfg.max_open_prs == 0 || force_dispatch {
+                    false
+                } else {
+                    count_open_sipag_prs(repo)
+                        .map(|open| {
+                            if open >= cfg.max_open_prs {
+                                println!(
+                                    "[{}] [{}] {} open PRs (threshold: {}). Pausing dispatch \u{2014} review and merge PRs first.",
+                                    hms(),
+                                    repo,
+                                    open,
+                                    cfg.max_open_prs
+                                );
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false)
+                };
+
+                if !dispatch_paused {
+                    println!(
+                        "[{}] {} new issue(s): {:?}",
+                        hms(),
+                        new_issues.len(),
+                        new_issues
+                    );
+                    if cfg.batch_size > 1 && new_issues.len() > 1 {
+                        // Grouped dispatch: send up to batch_size issues to one container.
+                        for batch in new_issues.chunks(cfg.batch_size) {
+                            if batch.len() == 1 {
+                                println!("--- Issue #{} (single) ---", batch[0]);
+                                let _ = dispatch_issue_worker(
+                                    repo,
+                                    batch[0],
+                                    &cfg,
+                                    sipag_dir,
+                                    gh_token.as_deref(),
+                                    oauth_token.as_deref(),
+                                    api_key.as_deref(),
+                                );
+                            } else {
+                                println!("--- Grouped issue batch: {:?} ---", batch);
+                                let _ = dispatch_grouped_worker(
+                                    repo,
+                                    batch,
+                                    &cfg,
+                                    sipag_dir,
+                                    gh_token.as_deref(),
+                                    oauth_token.as_deref(),
+                                    api_key.as_deref(),
+                                );
+                            }
+                            println!("--- Batch complete ---");
+                            println!();
+                        }
+                    } else {
+                        // Legacy single-issue dispatch (batch_size=1 or only 1 issue).
+                        for &issue_num in &new_issues {
+                            println!("--- Issue #{issue_num} ---");
                             let _ = dispatch_issue_worker(
                                 repo,
-                                batch[0],
+                                issue_num,
                                 &cfg,
                                 sipag_dir,
                                 gh_token.as_deref(),
                                 oauth_token.as_deref(),
                                 api_key.as_deref(),
                             );
-                        } else {
-                            println!("--- Grouped issue batch: {:?} ---", batch);
-                            let _ = dispatch_grouped_worker(
-                                repo,
-                                batch,
-                                &cfg,
-                                sipag_dir,
-                                gh_token.as_deref(),
-                                oauth_token.as_deref(),
-                                api_key.as_deref(),
-                            );
+                            println!("--- Issue #{issue_num} complete ---");
+                            println!();
                         }
-                        println!("--- Batch complete ---");
-                        println!();
-                    }
-                } else {
-                    // Legacy single-issue dispatch (batch_size=1 or only 1 issue).
-                    for &issue_num in &new_issues {
-                        println!("--- Issue #{issue_num} ---");
-                        let _ = dispatch_issue_worker(
-                            repo,
-                            issue_num,
-                            &cfg,
-                            sipag_dir,
-                            gh_token.as_deref(),
-                            oauth_token.as_deref(),
-                            api_key.as_deref(),
-                        );
-                        println!("--- Issue #{issue_num} complete ---");
-                        println!();
                     }
                 }
             }
@@ -412,6 +449,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             if sipag_dir.join("kick").exists() {
                 println!("[{}] Kick received — polling now.", hms());
                 let _ = fs::remove_file(sipag_dir.join("kick"));
+                kicked = true; // force dispatch on the next cycle, bypassing back-pressure
                 break;
             }
             thread::sleep(chunk);

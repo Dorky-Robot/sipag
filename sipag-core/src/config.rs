@@ -13,6 +13,7 @@
 //! auto_merge              —                            auto_merge               false
 //! doc_refresh_interval    SIPAG_DOC_REFRESH_INTERVAL   doc_refresh_interval     10
 //! state_max_age_days      SIPAG_STATE_MAX_AGE_DAYS     state_max_age_days       7
+//! max_open_prs            SIPAG_MAX_OPEN_PRS           max_open_prs             5 (0 = disabled)
 //! once                    — (CLI --once flag only)     —                        false
 //! sipag_dir               SIPAG_DIR                    —                        ~/.sipag
 //! ```
@@ -35,6 +36,7 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 /// All known keys in the `~/.sipag/config` file.
 const KNOWN_KEYS: &[&str] = &[
     "batch_size",
+    "max_open_prs",
     "poll_interval",
     "work_label",
     "image",
@@ -72,6 +74,12 @@ pub struct WorkerConfig {
     pub doc_refresh_interval: u64,
     /// Age in days after which terminal state files are pruned on startup (`SIPAG_STATE_MAX_AGE_DAYS`; default 7).
     pub state_max_age_days: u64,
+    /// Maximum open sipag PRs before new-issue dispatch is paused (`SIPAG_MAX_OPEN_PRS`; default 5; 0 = disabled).
+    ///
+    /// When the repo has >= `max_open_prs` open sipag PRs (branches matching `sipag/*`), the
+    /// worker skips new issue dispatch and logs a message. Dispatch resumes automatically once
+    /// the count drops below the threshold. Set to 0 to disable back-pressure entirely.
+    pub max_open_prs: usize,
 }
 
 impl WorkerConfig {
@@ -130,6 +138,7 @@ impl WorkerConfig {
             auto_merge: false,
             doc_refresh_interval: 10,
             state_max_age_days: 7,
+            max_open_prs: 5,
         }
     }
 
@@ -181,6 +190,11 @@ impl WorkerConfig {
             "state_max_age_days" => {
                 if let Ok(n) = value.parse::<u64>() {
                     self.state_max_age_days = n;
+                }
+            }
+            "max_open_prs" => {
+                if let Ok(n) = value.parse::<usize>() {
+                    self.max_open_prs = n;
                 }
             }
             _ => {}
@@ -241,6 +255,11 @@ impl WorkerConfig {
         if let Some(v) = get_env("SIPAG_STATE_MAX_AGE_DAYS") {
             if let Ok(n) = v.parse::<u64>() {
                 self.state_max_age_days = n;
+            }
+        }
+        if let Some(v) = get_env("SIPAG_MAX_OPEN_PRS") {
+            if let Ok(n) = v.parse::<usize>() {
+                self.max_open_prs = n;
             }
         }
 
@@ -321,12 +340,14 @@ fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
                 clamped_to: "120 (default)".to_string(),
             },
         },
-        "doc_refresh_interval" | "state_max_age_days" => match value.parse::<u64>() {
-            Ok(_) => ConfigEntryStatus::Valid,
-            Err(_) => ConfigEntryStatus::InvalidValue {
-                clamped_to: "default".to_string(),
-            },
-        },
+        "doc_refresh_interval" | "state_max_age_days" | "max_open_prs" => {
+            match value.parse::<u64>() {
+                Ok(_) => ConfigEntryStatus::Valid,
+                Err(_) => ConfigEntryStatus::InvalidValue {
+                    clamped_to: "default".to_string(),
+                },
+            }
+        }
         "image" | "work_label" => ConfigEntryStatus::Valid,
         "auto_merge" => {
             if value == "true" || value == "false" {
@@ -493,6 +514,7 @@ mod tests {
         assert!(!cfg.auto_merge);
         assert_eq!(cfg.doc_refresh_interval, 10);
         assert_eq!(cfg.state_max_age_days, 7);
+        assert_eq!(cfg.max_open_prs, 5);
     }
 
     #[test]
@@ -721,6 +743,58 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.sipag_dir, dir.path());
+    }
+
+    #[test]
+    fn worker_config_max_open_prs_default_is_five() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.max_open_prs, 5);
+    }
+
+    #[test]
+    fn worker_config_max_open_prs_from_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "max_open_prs=10\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.max_open_prs, 10);
+    }
+
+    #[test]
+    fn worker_config_max_open_prs_zero_disables_back_pressure() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "max_open_prs=0\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.max_open_prs, 0);
+    }
+
+    #[test]
+    fn worker_config_max_open_prs_from_env() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_MAX_OPEN_PRS" {
+                Some("8".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.max_open_prs, 8);
+    }
+
+    #[test]
+    fn worker_config_max_open_prs_env_overrides_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "max_open_prs=3\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_MAX_OPEN_PRS" {
+                Some("7".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.max_open_prs, 7);
     }
 
     // ── validate_config_file_for_doctor tests ─────────────────────────────
