@@ -1079,6 +1079,53 @@ Closes #103
         );
     }
 
+    // ── sipag-state contract tests ───────────────────────────────────────────
+    //
+    // These tests document and enforce the contract between container scripts
+    // and the sipag-state helper binary. sipag-state must be present in the
+    // Docker image (installed via Dockerfile COPY) and invoked by the scripts
+    // for heartbeat, phase, PR, and finish reporting.
+    //
+    // If these tests fail, it means a container script was modified to stop
+    // reporting its state, which would break the TUI, `sipag ps`, and
+    // stale-heartbeat detection in the poll loop.
+
+    #[test]
+    fn issue_container_script_reports_heartbeat_via_sipag_state() {
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("sipag-state heartbeat"),
+            "Container script must call 'sipag-state heartbeat' so the poll loop \
+             can detect stale workers"
+        );
+    }
+
+    #[test]
+    fn issue_container_script_reports_phase_via_sipag_state() {
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("sipag-state phase"),
+            "Container script must call 'sipag-state phase' so the TUI and \
+             'sipag ps' can show current worker progress"
+        );
+    }
+
+    #[test]
+    fn issue_container_script_records_pr_via_sipag_state() {
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("sipag-state pr "),
+            "Container script must call 'sipag-state pr' to record PR number/URL \
+             in the state file while the container is still running"
+        );
+    }
+
+    #[test]
+    fn issue_container_script_finalizes_via_sipag_state_finish() {
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("sipag-state finish"),
+            "Container script must call 'sipag-state finish' to write terminal \
+             status (done/failed) and duration to the state file"
+        );
+    }
+
     // ── extract_failure_reason ───────────────────────────────────────────────
 
     fn write_log(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
