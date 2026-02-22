@@ -185,23 +185,33 @@ if [[ "$CLAUDE_EXIT" -eq 0 ]]; then
         fi
     fi
 
-    # Determine which issues were addressed by parsing the PR body for "Closes #N".
-    pr_body_text=$(gh pr view "$BRANCH" --repo "${REPO}" --json body -q '.body' 2>/dev/null || true)
-    addressed_issues=""
-    if [[ -n "$pr_body_text" ]]; then
-        # Extract all issue numbers from "Closes #N", "Fixes #N", "Resolves #N" (case-insensitive).
-        addressed_issues=$(echo "$pr_body_text" | grep -ioE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true)
-    fi
+    # Only transition to needs-review if a PR actually exists.
+    # Re-check for an open PR (may have been created in the retry above).
+    final_pr=$(gh pr list --repo "${REPO}" --head "$BRANCH" \
+        --state open --json number -q ".[0].number" 2>/dev/null || true)
 
-    for issue in $ALL_ISSUES; do
-        if echo "$addressed_issues" | grep -qw "$issue" 2>/dev/null; then
-            # Addressed: transition in-progress → needs-review.
-            transition_label_one "$issue" "in-progress" "needs-review"
-        else
-            # Not addressed: restore to ready for next cycle.
-            transition_label_one "$issue" "in-progress" "${WORK_LABEL:-ready}"
+    if [[ -n "$final_pr" ]]; then
+        # Determine which issues were addressed by parsing the PR body for "Closes #N".
+        pr_body_text=$(gh pr view "$BRANCH" --repo "${REPO}" --json body -q '.body' 2>/dev/null || true)
+        addressed_issues=""
+        if [[ -n "$pr_body_text" ]]; then
+            # Extract all issue numbers from "Closes #N", "Fixes #N", "Resolves #N" (case-insensitive).
+            addressed_issues=$(echo "$pr_body_text" | grep -ioE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true)
         fi
-    done
+
+        for issue in $ALL_ISSUES; do
+            if echo "$addressed_issues" | grep -qw "$issue" 2>/dev/null; then
+                # Addressed: transition in-progress → needs-review.
+                transition_label_one "$issue" "in-progress" "needs-review"
+            else
+                # Not addressed: restore to ready for next cycle.
+                transition_label_one "$issue" "in-progress" "${WORK_LABEL:-ready}"
+            fi
+        done
+    else
+        echo "[sipag] No open PR found — restoring all issues to ${WORK_LABEL:-ready}"
+        transition_label "in-progress" "${WORK_LABEL:-ready}"
+    fi
 else
     # Failure: remove in-progress, restore work label for retry on all issues.
     transition_label "in-progress" "${WORK_LABEL:-ready}"
