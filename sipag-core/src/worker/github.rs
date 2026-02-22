@@ -44,7 +44,7 @@ impl GitHubGateway for GhGateway {
 /// List open issues with the given label, sorted by number ascending.
 ///
 /// If `label` is empty, returns all open issues.
-pub fn list_approved_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
+pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
     let mut args = vec![
         "issue", "list", "--repo", repo, "--state", "open", "--json", "number", "--limit", "100",
     ];
@@ -131,6 +131,48 @@ pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
             branch,
             "--state",
             "all",
+            "--json",
+            "number,url",
+            "--limit",
+            "1",
+        ])
+        .output()
+        .context("Failed to run gh pr list")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    if let Some(first) = parsed.as_array().and_then(|a| a.first()) {
+        let number = first["number"].as_u64().unwrap_or(0);
+        let url = first["url"].as_str().unwrap_or("").to_string();
+        if number > 0 {
+            return Ok(Some(PrInfo { number, url }));
+        }
+    }
+    Ok(None)
+}
+
+/// Find an open PR that references the given issue number in its body.
+///
+/// Searches for open PRs containing "closes/fixes/resolves #N" in their body.
+/// This covers both `sipag/issue-*` and `sipag/group-*` branches, catching
+/// grouped workers that don't embed the issue number in the branch name.
+pub fn find_open_pr_for_issue(repo: &str, issue_num: u64) -> Result<Option<PrInfo>> {
+    let search = format!("closes #{issue_num}");
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--search",
+            &search,
             "--json",
             "number,url",
             "--limit",

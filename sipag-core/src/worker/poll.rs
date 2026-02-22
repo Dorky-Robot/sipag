@@ -16,8 +16,8 @@ use super::dispatch::{
     is_container_running,
 };
 use super::github::{
-    count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
-    list_approved_issues, reconcile_merged_prs,
+    count_open_issues, count_open_prs, find_conflicted_prs, find_open_pr_for_issue,
+    find_prs_needing_iteration, list_labeled_issues, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -169,7 +169,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             }
 
             // ── Approved issues ──────────────────────────────────────────────
-            let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+            let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
 
             let mut new_issues: Vec<u64> = Vec::new();
             for issue_num in &all_issues {
@@ -180,35 +180,53 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     .flatten()
                     .map(|w| w.status);
 
-                let has_existing_pr = gh_gateway
+                // Check for existing open PRs:
+                // 1. Branch-pattern match for single-issue workers (sipag/issue-N-*).
+                let branch_pr = gh_gateway
                     .find_pr_for_branch(repo, &format!("sipag/issue-{issue_num}-*"))
                     .ok()
-                    .flatten()
-                    .is_some();
+                    .flatten();
+                // 2. Body-reference search catches grouped workers (sipag/group-*)
+                //    whose branch names don't embed individual issue numbers.
+                let existing_pr = branch_pr.or_else(|| {
+                    find_open_pr_for_issue(repo, *issue_num).ok().flatten()
+                });
+                let has_existing_pr = existing_pr.is_some();
 
                 match decide_issue_action(worker_status, has_existing_pr) {
                     super::decision::IssueAction::Skip(reason) => {
                         use super::decision::SkipReason;
-                        if reason == SkipReason::ExistingPr {
-                            // Record as done so we skip next cycle.
-                            let state = super::state::WorkerState {
-                                repo: repo.clone(),
-                                issue_num: *issue_num,
-                                issue_title: String::new(),
-                                branch: String::new(),
-                                container_name: String::new(),
-                                pr_num: None,
-                                pr_url: None,
-                                status: WorkerStatus::Done,
-                                started_at: None,
-                                ended_at: Some(now_utc()),
-                                duration_s: None,
-                                exit_code: None,
-                                log_path: None,
-                                last_heartbeat: None,
-                                phase: None,
-                            };
-                            let _ = store.save(&state);
+                        match reason {
+                            SkipReason::ExistingPr => {
+                                let pr_display = existing_pr
+                                    .as_ref()
+                                    .map(|p| format!(" #{}", p.number))
+                                    .unwrap_or_default();
+                                println!(
+                                    "[#{}] Skipping — already has PR{}",
+                                    issue_num, pr_display
+                                );
+                                // Record as done so we skip next cycle.
+                                let state = super::state::WorkerState {
+                                    repo: repo.clone(),
+                                    issue_num: *issue_num,
+                                    issue_title: String::new(),
+                                    branch: String::new(),
+                                    container_name: String::new(),
+                                    pr_num: None,
+                                    pr_url: None,
+                                    status: WorkerStatus::Done,
+                                    started_at: None,
+                                    ended_at: Some(now_utc()),
+                                    duration_s: None,
+                                    exit_code: None,
+                                    log_path: None,
+                                    last_heartbeat: None,
+                                    phase: None,
+                                };
+                                let _ = store.save(&state);
+                            }
+                            _ => {}
                         }
                     }
                     super::decision::IssueAction::Dispatch => {
