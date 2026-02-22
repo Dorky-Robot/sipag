@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = env!("CARGO_GIT_SHA");
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +49,10 @@ pub enum Commands {
         /// Preview which issues would be dispatched without starting any containers
         #[arg(long)]
         dry_run: bool,
+
+        /// Kill any existing sipag work process for the same repo(s) and take over
+        #[arg(long)]
+        force: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -224,7 +229,8 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             once,
             dry_run,
-        }) => cmd_work(repos, once, dry_run),
+            force,
+        }) => cmd_work(repos, once, dry_run, force),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -257,7 +263,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }) => triage::run_triage(&repo, dry_run, apply),
         Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
-            println!("sipag {VERSION}");
+            println!("sipag {VERSION} ({GIT_HASH})");
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
@@ -303,7 +309,7 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
+fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool, force: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
@@ -320,6 +326,13 @@ fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
         preflight_gh_auth()?;
         return run_dry_run(&repos, &cfg);
     }
+
+    // Acquire per-repo locks to prevent duplicate instances.
+    // Held for the lifetime of this function; released via RAII Drop on exit.
+    let _locks: Vec<RepoLock> = repos
+        .iter()
+        .map(|repo| RepoLock::acquire(&dir, repo, force))
+        .collect::<Result<Vec<_>>>()?;
 
     // Normal mode: full preflight checks.
     sipag_core::auth::preflight_auth(&dir)?;
@@ -355,6 +368,95 @@ fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
     }
 
     run_worker_loop(&repos, &dir, cfg)
+}
+
+// ── Per-repo lock ─────────────────────────────────────────────────────────────
+
+/// PID-file-based lock that prevents two `sipag work` instances from running
+/// against the same repo simultaneously.
+///
+/// Lock files live at `~/.sipag/locks/<owner>--<repo>.lock` and contain the
+/// PID of the holding process. Stale locks (from crashed processes) are
+/// detected by checking whether the PID is still alive.
+struct RepoLock {
+    path: PathBuf,
+}
+
+impl RepoLock {
+    /// Try to acquire the per-repo lock.
+    ///
+    /// - Returns `Ok(lock)` if the lock was acquired.
+    /// - Returns `Err` if another live process holds the lock (unless `force`).
+    /// - With `force=true`, kills the existing process and takes over.
+    /// - Stale locks from dead processes are silently overwritten.
+    fn acquire(sipag_dir: &Path, repo: &str, force: bool) -> Result<Self> {
+        let locks_dir = sipag_dir.join("locks");
+        fs::create_dir_all(&locks_dir)
+            .with_context(|| format!("Failed to create locks dir: {}", locks_dir.display()))?;
+
+        let slug = repo.replace('/', "--");
+        let path = locks_dir.join(format!("{slug}.lock"));
+
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    if is_process_alive(pid) {
+                        if force {
+                            eprintln!("sipag work: killing existing process (PID {pid}) for {repo}");
+                            kill_process(pid);
+                            // Brief pause to let the killed process clean up.
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        } else {
+                            bail!(
+                                "Another sipag work process (PID {pid}) is already running for {repo}.\n\
+                                 Use --force to kill it and take over."
+                            );
+                        }
+                    }
+                    // PID is dead (stale lock) — fall through and overwrite.
+                }
+            }
+        }
+
+        let my_pid = std::process::id();
+        fs::write(&path, my_pid.to_string())
+            .with_context(|| format!("Failed to write lock file: {}", path.display()))?;
+
+        Ok(RepoLock { path })
+    }
+}
+
+impl Drop for RepoLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Check whether a process with the given PID is currently alive.
+fn is_process_alive(pid: u32) -> bool {
+    // Send signal 0: succeeds if process exists and we have permission to signal it.
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Terminate a process gracefully (SIGTERM), then forcefully (SIGKILL) if needed.
+fn kill_process(pid: u32) {
+    // SIGTERM
+    let _ = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    // SIGKILL if still alive
+    if is_process_alive(pid) {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
 }
 
 fn cmd_drain() -> Result<()> {
@@ -1308,10 +1410,12 @@ mod tests {
                 repos,
                 once,
                 dry_run,
+                force,
             }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
                 assert!(!dry_run);
+                assert!(!force);
             }
             other => panic!("Expected Work, got {other:?}"),
         }
@@ -1345,6 +1449,18 @@ mod tests {
             Some(Commands::Work { dry_run, repos, .. }) => {
                 assert!(dry_run);
                 assert!(repos.is_empty());
+            }
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_force() {
+        let cli = parse(&["sipag", "work", "--force", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { force, repos, .. }) => {
+                assert!(force);
+                assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
             }
             other => panic!("Expected Work, got {other:?}"),
         }

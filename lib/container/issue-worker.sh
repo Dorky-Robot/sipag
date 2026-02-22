@@ -9,15 +9,62 @@ ALL_ISSUES="${ISSUE_NUMS:-${ISSUE_NUM:-}}"
 # The container owns label transitions so they happen atomically with the work.
 # WORK_LABEL is passed via env var from the host.
 
-# Transition a label on a single issue.
+# Transition a label on a single issue — idempotent and lifecycle-aware.
+#
+# Checks current labels before modifying:
+#   - Only removes a label if it is currently present (no-op otherwise).
+#   - Only adds a label if it is not already present.
+#   - Lifecycle ordering (approved < in-progress < needs-review): adding a label
+#     that would regress the issue (e.g. in-progress when needs-review is present)
+#     is silently skipped, even after accounting for the removal.
 transition_label_one() {
     local issue="${1:-}" remove="${2:-}" add="${3:-}"
     if [[ -z "$issue" ]]; then return 0; fi
+
+    # Fetch current labels for idempotency checks (one API call).
+    local current_labels
+    current_labels=$(gh issue view "$issue" --repo "${REPO}" --json labels \
+        -q '.labels[].name' 2>/dev/null || true)
+
     if [[ -n "$remove" ]]; then
-        gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+        # Only remove if the label is actually present.
+        if echo "$current_labels" | grep -qx "$remove" 2>/dev/null; then
+            gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+        fi
     fi
+
     if [[ -n "$add" ]]; then
-        gh issue edit "$issue" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+        # Skip if already present (idempotent).
+        if echo "$current_labels" | grep -qx "$add" 2>/dev/null; then
+            return 0
+        fi
+
+        # Compute effective labels after the remove, then check lifecycle regression.
+        # Lifecycle: approved (0) < in-progress (1) < needs-review (2).
+        local effective_labels="$current_labels"
+        if [[ -n "$remove" ]]; then
+            effective_labels=$(echo "$current_labels" | grep -vx "$remove" 2>/dev/null || true)
+        fi
+
+        local should_add=true
+        if [[ "$add" == "in-progress" ]]; then
+            # Don't regress from needs-review → in-progress.
+            if echo "$effective_labels" | grep -qx "needs-review" 2>/dev/null; then
+                echo "[sipag] Skipping: cannot add 'in-progress' to #$issue (already at 'needs-review')" >&2
+                should_add=false
+            fi
+        elif [[ "$add" == "approved" || "$add" == "${WORK_LABEL:-ready}" ]]; then
+            # Don't regress from in-progress or needs-review → work label.
+            if echo "$effective_labels" | grep -qx "needs-review" 2>/dev/null || \
+               echo "$effective_labels" | grep -qx "in-progress" 2>/dev/null; then
+                echo "[sipag] Skipping: cannot add '$add' to #$issue (already at later lifecycle stage)" >&2
+                should_add=false
+            fi
+        fi
+
+        if [[ "$should_add" == "true" ]]; then
+            gh issue edit "$issue" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+        fi
     fi
 }
 
