@@ -540,6 +540,49 @@ fn cmd_doctor() -> Result<()> {
         }
     }
 
+    // --- Config file ---
+    println!();
+    println!("Config:");
+
+    let config_path = dir.join("config");
+    if !config_path.exists() {
+        info("No config file (~/.sipag/config) — using defaults");
+    } else {
+        info("~/.sipag/config");
+        match sipag_core::config::validate_config_file(&config_path) {
+            Err(e) => {
+                err(&format!("Failed to read config file: {e}"));
+            }
+            Ok(entries) if entries.is_empty() => {
+                info("Config file is empty");
+            }
+            Ok(entries) => {
+                for entry in &entries {
+                    let kv = format!("{}={}", entry.key, entry.value);
+                    match &entry.status {
+                        sipag_core::config::ConfigEntryStatus::Ok => {
+                            ok(&kv);
+                        }
+                        sipag_core::config::ConfigEntryStatus::OutOfRange { note } => {
+                            warn(&format!("{kv} — {note}"));
+                        }
+                        sipag_core::config::ConfigEntryStatus::InvalidValue { note } => {
+                            warn(&format!("{kv} — {note}"));
+                        }
+                        sipag_core::config::ConfigEntryStatus::UnknownKey {
+                            suggestion: Some(s),
+                        } => {
+                            warn(&format!("unknown key \"{kv}\" — did you mean \"{s}\"?"));
+                        }
+                        sipag_core::config::ConfigEntryStatus::UnknownKey { suggestion: None } => {
+                            warn(&format!("unknown key \"{kv}\""));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // --- Summary ---
     println!();
     if errors == 0 && warnings == 0 {

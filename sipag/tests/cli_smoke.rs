@@ -359,6 +359,58 @@ fn doctor_shows_ok_for_queue_dirs() {
         .stdout(predicate::str::contains("OK  Queue directories exist"));
 }
 
+#[test]
+fn doctor_shows_config_section() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("Config:"));
+}
+
+#[test]
+fn doctor_reports_unknown_config_key_with_suggestion() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+    fs::write(dir.path().join("config"), "bathc_size=4\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("did you mean \"batch_size\""));
+}
+
+#[test]
+fn doctor_reports_invalid_config_value() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+    fs::write(dir.path().join("config"), "timeout=abc\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("timeout=abc"));
+}
+
+#[test]
+fn doctor_shows_ok_for_valid_config_entries() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
+    fs::write(dir.path().join("config"), "batch_size=2\ntimeout=1800\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .stdout(predicate::str::contains("OK  batch_size=2"))
+        .stdout(predicate::str::contains("OK  timeout=1800"));
+}
+
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
 #[test]

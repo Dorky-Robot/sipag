@@ -261,6 +261,153 @@ fn parse_config_file(path: &Path, mut f: impl FnMut(&str, &str)) -> Result<()> {
     Ok(())
 }
 
+/// The set of recognized config file keys.
+pub const KNOWN_KEYS: &[&str] = &[
+    "batch_size",
+    "image",
+    "timeout",
+    "poll_interval",
+    "work_label",
+    "auto_merge",
+    "doc_refresh_interval",
+    "state_max_age_days",
+];
+
+/// Validation status for a single config file entry.
+#[derive(Debug, PartialEq)]
+pub enum ConfigEntryStatus {
+    /// Key and value are valid.
+    Ok,
+    /// Key is recognized but the value cannot be parsed as the expected type.
+    InvalidValue {
+        /// Human-readable description of what was expected.
+        note: String,
+    },
+    /// Key is recognized and value parses, but is out of the allowed range.
+    /// The setting will be clamped automatically.
+    OutOfRange {
+        /// Human-readable description of the clamping applied.
+        note: String,
+    },
+    /// Key is not recognized. May include a suggestion for the closest known key.
+    UnknownKey {
+        /// Closest known key, if one is within edit-distance 3.
+        suggestion: Option<String>,
+    },
+}
+
+/// A single parsed and validated entry from the config file.
+#[derive(Debug)]
+pub struct ConfigEntry {
+    pub key: String,
+    pub value: String,
+    pub status: ConfigEntryStatus,
+}
+
+/// Parse and validate all entries in the config file at `path`.
+///
+/// Comment lines, blank lines, and lines without `=` are skipped.
+/// Returns one [`ConfigEntry`] per data line with its validation status.
+pub fn validate_config_file(path: &Path) -> Result<Vec<ConfigEntry>> {
+    let content = fs::read_to_string(path)?;
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().to_string();
+        let value = v.trim().to_string();
+        let status = validate_config_entry(&key, &value);
+        entries.push(ConfigEntry { key, value, status });
+    }
+    Ok(entries)
+}
+
+fn validate_config_entry(key: &str, value: &str) -> ConfigEntryStatus {
+    match key {
+        "batch_size" => match value.parse::<usize>() {
+            Ok(n) if n > BATCH_SIZE_MAX => ConfigEntryStatus::OutOfRange {
+                note: format!("will be clamped to {BATCH_SIZE_MAX}"),
+            },
+            Ok(_) => ConfigEntryStatus::Ok,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                note: "expected a positive integer".to_string(),
+            },
+        },
+        "timeout" | "poll_interval" => {
+            if value.parse::<u64>().is_ok() {
+                ConfigEntryStatus::Ok
+            } else {
+                ConfigEntryStatus::InvalidValue {
+                    note: "expected a positive integer (seconds)".to_string(),
+                }
+            }
+        }
+        "doc_refresh_interval" | "state_max_age_days" => {
+            if value.parse::<u64>().is_ok() {
+                ConfigEntryStatus::Ok
+            } else {
+                ConfigEntryStatus::InvalidValue {
+                    note: "expected a positive integer".to_string(),
+                }
+            }
+        }
+        "image" | "work_label" => ConfigEntryStatus::Ok,
+        "auto_merge" => {
+            if value == "true" || value == "false" {
+                ConfigEntryStatus::Ok
+            } else {
+                ConfigEntryStatus::InvalidValue {
+                    note: "expected \"true\" or \"false\"".to_string(),
+                }
+            }
+        }
+        _ => ConfigEntryStatus::UnknownKey {
+            suggestion: closest_known_key(key),
+        },
+    }
+}
+
+/// Return the closest known config key to `input` by Levenshtein distance,
+/// or `None` if no key is within edit-distance 3.
+fn closest_known_key(input: &str) -> Option<String> {
+    const MAX_DISTANCE: usize = 3;
+    KNOWN_KEYS
+        .iter()
+        .map(|k| (*k, levenshtein(input, k)))
+        .filter(|(_, d)| *d <= MAX_DISTANCE)
+        .min_by_key(|(_, d)| *d)
+        .map(|(k, _)| k.to_string())
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = b.len();
+
+    // Two-row DP: prev[j] = distance(a[0..i-1], b[0..j])
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for (i, ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            curr[j + 1] = if ca == cb {
+                prev[j]
+            } else {
+                1 + prev[j].min(prev[j + 1]).min(curr[j])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +595,112 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.sipag_dir, dir.path());
+    }
+
+    // ── Config validation tests ───────────────────────────────────────────
+
+    #[test]
+    fn validate_config_valid_entries() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config"),
+            "batch_size=3\ntimeout=900\npoll_interval=60\nwork_label=approved\nauto_merge=true\ndoc_refresh_interval=5\nstate_max_age_days=3\nimage=my-image:latest\n",
+        )
+        .unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert!(entries.iter().all(|e| e.status == ConfigEntryStatus::Ok));
+    }
+
+    #[test]
+    fn validate_config_unknown_key_with_suggestion() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "bathc_size=4\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "bathc_size");
+        assert!(
+            matches!(
+                &entries[0].status,
+                ConfigEntryStatus::UnknownKey {
+                    suggestion: Some(s)
+                } if s == "batch_size"
+            ),
+            "should suggest batch_size for bathc_size"
+        );
+    }
+
+    #[test]
+    fn validate_config_unknown_key_no_suggestion() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "completely_unknown_key=value\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].status,
+            ConfigEntryStatus::UnknownKey { suggestion: None }
+        ));
+    }
+
+    #[test]
+    fn validate_config_invalid_numeric_value() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=abc\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].status,
+            ConfigEntryStatus::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_config_batch_size_out_of_range() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=10\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].status,
+            ConfigEntryStatus::OutOfRange { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_config_auto_merge_invalid() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "auto_merge=yes\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            &entries[0].status,
+            ConfigEntryStatus::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn validate_config_skips_comments_and_blanks() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "# a comment\n\nbatch_size=2\n").unwrap();
+
+        let entries = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "batch_size");
+        assert_eq!(entries[0].status, ConfigEntryStatus::Ok);
+    }
+
+    #[test]
+    fn levenshtein_basic() {
+        assert_eq!(levenshtein("batch_size", "batch_size"), 0);
+        assert_eq!(levenshtein("bathc_size", "batch_size"), 2);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("kitten", "sitting"), 3);
     }
 
     // ── Credentials tests ─────────────────────────────────────────────────
