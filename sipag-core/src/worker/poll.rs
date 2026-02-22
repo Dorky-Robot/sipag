@@ -56,32 +56,31 @@ pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
             issue_strs.join(" ")
         );
 
-        if cfg.batch_size > 1 {
-            println!("With batch_size={}, would dispatch:", cfg.batch_size);
-            for (i, batch) in all_issues.chunks(cfg.batch_size).enumerate() {
-                let anchor = batch[0];
-                let issues: Vec<String> = batch.iter().map(|n| format!("#{n}")).collect();
-                if batch.len() == 1 {
-                    println!(
-                        "  Batch {}: {} → sipag/issue-{}-<slug>",
-                        i + 1,
-                        issues.join(" "),
-                        anchor
-                    );
-                } else {
-                    println!(
-                        "  Batch {}: {} → sipag/group-{}-<slug>",
-                        i + 1,
-                        issues.join(" "),
-                        anchor
-                    );
-                }
-            }
+        let cap = if cfg.batch_size > 0 {
+            all_issues.len().min(cfg.batch_size)
         } else {
-            println!("Would dispatch {} container(s):", all_issues.len());
-            for issue_num in &all_issues {
-                println!("  Issue #{issue_num} → sipag/issue-{issue_num}-<slug>");
-            }
+            all_issues.len()
+        };
+        let to_dispatch = &all_issues[..cap];
+        let anchor = to_dispatch[0];
+        let issue_strs_dispatch: Vec<String> =
+            to_dispatch.iter().map(|n| format!("#{n}")).collect();
+
+        if to_dispatch.len() == 1 {
+            println!("Would dispatch 1 worker: #{anchor} → sipag/issue-{anchor}-<slug>");
+        } else {
+            println!(
+                "Would dispatch 1 worker ({} issues): {} → sipag/group-{}-<slug>",
+                to_dispatch.len(),
+                issue_strs_dispatch.join(" "),
+                anchor
+            );
+        }
+        if all_issues.len() > cap {
+            println!(
+                "  ({} issue(s) deferred to next cycle)",
+                all_issues.len() - cap
+            );
         }
         println!();
     }
@@ -400,58 +399,48 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                 }
 
                 if !dispatch_paused {
+                    // Cap visible issues to batch_size (Claude sees all, picks the
+                    // highest-impact cohesive PR). One container, one PR per cycle.
+                    let cap = if cfg.batch_size > 0 {
+                        new_issues.len().min(cfg.batch_size)
+                    } else {
+                        new_issues.len()
+                    };
+                    let issues_to_dispatch = &new_issues[..cap];
+
                     println!(
-                        "[{}] {} new issue(s): {:?}",
+                        "[{}] {} ready issue(s), dispatching {} to one worker: {:?}",
                         hms(),
                         new_issues.len(),
-                        new_issues
+                        issues_to_dispatch.len(),
+                        issues_to_dispatch
                     );
-                    if cfg.batch_size > 1 && new_issues.len() > 1 {
-                        // Grouped dispatch: send up to batch_size issues to one container.
-                        for batch in new_issues.chunks(cfg.batch_size) {
-                            if batch.len() == 1 {
-                                println!("--- Issue #{} (single) ---", batch[0]);
-                                let _ = dispatch_issue_worker(
-                                    repo,
-                                    batch[0],
-                                    &cfg,
-                                    sipag_dir,
-                                    gh_token.as_deref(),
-                                    oauth_token.as_deref(),
-                                    api_key.as_deref(),
-                                );
-                            } else {
-                                println!("--- Grouped issue batch: {:?} ---", batch);
-                                let _ = dispatch_grouped_worker(
-                                    repo,
-                                    batch,
-                                    &cfg,
-                                    sipag_dir,
-                                    gh_token.as_deref(),
-                                    oauth_token.as_deref(),
-                                    api_key.as_deref(),
-                                );
-                            }
-                            println!("--- Batch complete ---");
-                            println!();
-                        }
+
+                    if issues_to_dispatch.len() == 1 {
+                        println!("--- Issue #{} ---", issues_to_dispatch[0]);
+                        let _ = dispatch_issue_worker(
+                            repo,
+                            issues_to_dispatch[0],
+                            &cfg,
+                            sipag_dir,
+                            gh_token.as_deref(),
+                            oauth_token.as_deref(),
+                            api_key.as_deref(),
+                        );
                     } else {
-                        // Legacy single-issue dispatch (batch_size=1 or only 1 issue).
-                        for &issue_num in &new_issues {
-                            println!("--- Issue #{issue_num} ---");
-                            let _ = dispatch_issue_worker(
-                                repo,
-                                issue_num,
-                                &cfg,
-                                sipag_dir,
-                                gh_token.as_deref(),
-                                oauth_token.as_deref(),
-                                api_key.as_deref(),
-                            );
-                            println!("--- Issue #{issue_num} complete ---");
-                            println!();
-                        }
+                        println!("--- Grouped: {:?} ---", issues_to_dispatch);
+                        let _ = dispatch_grouped_worker(
+                            repo,
+                            issues_to_dispatch,
+                            &cfg,
+                            sipag_dir,
+                            gh_token.as_deref(),
+                            oauth_token.as_deref(),
+                            api_key.as_deref(),
+                        );
                     }
+                    println!("--- Worker complete ---");
+                    println!();
                 }
             }
 
