@@ -26,7 +26,7 @@ pub(crate) mod status;
 pub(crate) mod store;
 
 // Re-export public API — only what external crates actually use.
-pub use poll::run_worker_loop;
+pub use poll::{run_dry_run, run_worker_loop};
 pub use state::{branch_display, format_duration as format_worker_duration, WorkerState};
 pub use status::WorkerStatus;
 pub use store::{

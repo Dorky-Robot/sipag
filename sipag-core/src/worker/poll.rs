@@ -26,6 +26,67 @@ use super::store::FileStateStore;
 use crate::auth;
 use crate::config::WorkerConfig;
 
+/// Preview which issues would be dispatched without starting any containers.
+///
+/// Called by `sipag work --dry-run`. Lists approved issues per repo and shows
+/// how they would be grouped given the current `batch_size` setting.
+pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
+    println!("sipag work --dry-run");
+    println!("Label:      {}", cfg.work_label);
+    println!("Batch size: {}", cfg.batch_size);
+    println!();
+
+    for repo in repos {
+        let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+
+        if all_issues.is_empty() {
+            println!("[{}] No ready issues.", repo);
+            println!();
+            continue;
+        }
+
+        let issue_strs: Vec<String> = all_issues.iter().map(|n| format!("#{n}")).collect();
+        println!(
+            "[{}] Found {} ready issue(s): {}",
+            repo,
+            all_issues.len(),
+            issue_strs.join(" ")
+        );
+
+        if cfg.batch_size > 1 {
+            println!("With batch_size={}, would dispatch:", cfg.batch_size);
+            for (i, batch) in all_issues.chunks(cfg.batch_size).enumerate() {
+                let anchor = batch[0];
+                let issues: Vec<String> = batch.iter().map(|n| format!("#{n}")).collect();
+                if batch.len() == 1 {
+                    println!(
+                        "  Batch {}: {} → sipag/issue-{}-<slug>",
+                        i + 1,
+                        issues.join(" "),
+                        anchor
+                    );
+                } else {
+                    println!(
+                        "  Batch {}: {} → sipag/group-{}-<slug>",
+                        i + 1,
+                        issues.join(" "),
+                        anchor
+                    );
+                }
+            }
+        } else {
+            println!("Would dispatch {} container(s):", all_issues.len());
+            for issue_num in &all_issues {
+                println!("  Issue #{issue_num} → sipag/issue-{issue_num}-<slug>");
+            }
+        }
+        println!();
+    }
+
+    println!("No containers started (dry-run mode).");
+    Ok(())
+}
+
 /// Entry point for `sipag work`.
 ///
 /// Runs the polling loop until a drain signal is detected or `cfg.once` is
