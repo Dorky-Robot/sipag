@@ -8,7 +8,9 @@ use sipag_core::{
     repo,
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
-    worker::{preflight_gh_auth, run_worker_loop},
+    worker::{
+        format_worker_duration, list_workers, preflight_gh_auth, run_worker_loop, WorkerStatus,
+    },
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -844,9 +846,35 @@ fn cmd_ps() -> Result<()> {
     let dir = sipag_dir();
     let now = chrono::Utc::now();
 
-    println!("{:<44}  {:<8}  {:<10}  REPO", "ID", "STATUS", "DURATION");
+    println!("{:<44}  {:<10}  {:<10}  REPO", "ID", "STATUS", "DURATION");
 
     let mut found = false;
+
+    // Show workers from the JSON store (used by `sipag work`).
+    for worker in list_workers(&dir).unwrap_or_default() {
+        let id = format!("#{} {}", worker.issue_num, worker.issue_title);
+        let id_display: String = id.chars().take(44).collect();
+        let status = worker.status.as_str();
+        let duration = format_worker_duration(worker.duration_s);
+        let repo_short = worker.repo.split('/').next_back().unwrap_or(&worker.repo);
+
+        println!(
+            "{:<44}  {:<10}  {:<10}  {}",
+            id_display, status, duration, repo_short
+        );
+
+        // For failed workers, show the failure reason extracted from the log.
+        if worker.status == WorkerStatus::Failed {
+            if let Some(ref reason) = worker.phase {
+                if !reason.is_empty() {
+                    println!("  {reason}");
+                }
+            }
+        }
+        found = true;
+    }
+
+    // Legacy .md task files (from `sipag run` / queue-based workflow).
     for status_dir in &["running", "done", "failed"] {
         let d = dir.join(status_dir);
         if !d.exists() {
@@ -874,7 +902,7 @@ fn cmd_ps() -> Result<()> {
                 .unwrap_or("unknown");
 
             println!(
-                "{:<44}  {:<8}  {:<10}  {}",
+                "{:<44}  {:<10}  {:<10}  {}",
                 &task.name[..task.name.len().min(44)],
                 status_dir,
                 duration,
