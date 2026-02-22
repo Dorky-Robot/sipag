@@ -1,9 +1,26 @@
 use anyhow::Result;
+use std::io::Write as IoWriteExt;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use super::ports::StateStore;
 use super::state::{parse_worker_json, WorkerState};
+
+/// Write `content` to `path` atomically using a temp file + rename.
+///
+/// On POSIX, `rename(2)` within the same directory is atomic — readers always
+/// see either the old complete file or the new complete file, never a partial
+/// write.  This is critical because the worker state file is a shared
+/// coordination layer between the sipag host process and Docker containers.
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    // Place the temp file in the same directory so rename stays on one fs.
+    let tmp = path.with_extension("json.tmp");
+    let mut f = fs::File::create(&tmp)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all()?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 /// Filesystem-backed state store reading from `<sipag_dir>/workers/*.json`.
 pub struct FileStateStore {
@@ -57,7 +74,7 @@ impl StateStore for FileStateStore {
         });
 
         let content = serde_json::to_string_pretty(&json)?;
-        fs::write(&path, content)?;
+        atomic_write(&path, &content)?;
         Ok(())
     }
 
@@ -137,9 +154,11 @@ pub fn mark_worker_failed_by_container(sipag_dir: &Path, container_name: &str) -
         if v["container_name"].as_str() == Some(container_name) {
             v["status"] = serde_json::Value::String("failed".to_string());
             if let Ok(updated) = serde_json::to_string_pretty(&v) {
-                let _ = fs::write(&path, updated);
+                let _ = atomic_write(&path, &updated);
             }
-            return Ok(());
+            // Do NOT return — continue to mark all grouped workers sharing
+            // the same container_name (e.g. sipag-group-10 covers issues
+            // 10, 11, 12 each with their own state file).
         }
     }
     Ok(())
@@ -446,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_grouped_worker_failed_updates_first_match_only() {
+    fn mark_grouped_worker_failed_updates_all_matches() {
         let dir = TempDir::new().unwrap();
         let workers_dir = dir.path().join("workers");
         fs::create_dir(&workers_dir).unwrap();
@@ -462,18 +481,17 @@ mod tests {
         )
         .unwrap();
 
-        // mark_worker_failed_by_container finds the first file matching the container name.
+        // All files sharing the same container_name must be marked failed.
         mark_worker_failed_by_container(dir.path(), "sipag-group-10").unwrap();
 
         let all = list_all_workers(dir.path()).unwrap();
-        // At least one should be failed (the first match).
         let failed_count = all
             .iter()
             .filter(|w| w.status == WorkerStatus::Failed)
             .count();
-        assert!(
-            failed_count >= 1,
-            "At least one grouped worker should be marked failed"
+        assert_eq!(
+            failed_count, 2,
+            "All grouped workers sharing the container name must be marked failed"
         );
     }
 

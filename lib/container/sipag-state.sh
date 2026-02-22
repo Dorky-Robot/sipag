@@ -34,15 +34,15 @@ now_utc() {
 update_state() {
     local filter="$1"
     shift
-    if [[ ! -f "$STATE_FILE" ]]; then
-        return 0
+    [[ -f "$STATE_FILE" ]] || return 0
+    # mktemp in the same directory ensures rename stays on the same filesystem.
+    local tmp
+    tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+    if jq "$@" "$filter" "$STATE_FILE" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$STATE_FILE"
+    else
+        rm -f "$tmp"
     fi
-    local tmp="${STATE_FILE}.tmp.$$"
-    # Clean up temp file on function return (success or error).
-    # SC2064: intentional — expand $tmp now so the trap path is baked in.
-    # shellcheck disable=SC2064
-    trap "rm -f '${tmp}'" RETURN
-    jq "$@" "$filter" "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
 }
 
 case "${1:-}" in

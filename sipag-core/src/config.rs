@@ -416,6 +416,7 @@ impl Credentials {
         }
         let token_file = sipag_dir.join("token");
         if token_file.exists() {
+            crate::auth::warn_if_token_world_readable(&token_file);
             if let Ok(contents) = fs::read_to_string(&token_file) {
                 let trimmed = contents.trim().to_string();
                 if !trimmed.is_empty() {
