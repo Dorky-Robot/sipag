@@ -1,22 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Label management helper ──────────────────────────────────────────────────
+# ── Resolve issue list ───────────────────────────────────────────────────────
+# ISSUE_NUMS (space-separated) is set for grouped workers; fall back to ISSUE_NUM.
+ALL_ISSUES="${ISSUE_NUMS:-${ISSUE_NUM:-}}"
+
+# ── Label management helpers ─────────────────────────────────────────────────
 # The container owns label transitions so they happen atomically with the work.
-# ISSUE_NUM and WORK_LABEL are passed via env vars from the host.
-transition_label() {
-    local remove="${1:-}" add="${2:-}"
-    if [[ -z "${ISSUE_NUM:-}" ]]; then return 0; fi
+# WORK_LABEL is passed via env var from the host.
+
+# Transition a label on a single issue.
+transition_label_one() {
+    local issue="${1:-}" remove="${2:-}" add="${3:-}"
+    if [[ -z "$issue" ]]; then return 0; fi
     if [[ -n "$remove" ]]; then
-        gh issue edit "$ISSUE_NUM" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
+        gh issue edit "$issue" --repo "${REPO}" --remove-label "$remove" 2>/dev/null || true
     fi
     if [[ -n "$add" ]]; then
-        gh issue edit "$ISSUE_NUM" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
+        gh issue edit "$issue" --repo "${REPO}" --add-label "$add" 2>/dev/null || true
     fi
 }
 
-# ── Start: transition approved → in-progress ─────────────────────────────────
-transition_label "${WORK_LABEL:-approved}" "in-progress"
+# Transition a label on all issues in ALL_ISSUES.
+transition_label() {
+    local remove="${1:-}" add="${2:-}"
+    for issue in $ALL_ISSUES; do
+        transition_label_one "$issue" "$remove" "$add"
+    done
+}
+
+# ── Start: transition ready → in-progress ─────────────────────────────────────
+transition_label "${WORK_LABEL:-ready}" "in-progress"
 
 sipag-state phase "cloning repo" || true
 
@@ -102,12 +116,26 @@ if [[ "$CLAUDE_EXIT" -eq 0 ]]; then
         fi
     fi
 
-    # Success: transition in-progress → needs-review.
-    # Issue will be closed when PR merges via "Closes #N".
-    transition_label "in-progress" "needs-review"
+    # Determine which issues were addressed by parsing the PR body for "Closes #N".
+    pr_body_text=$(gh pr view "$BRANCH" --repo "${REPO}" --json body -q '.body' 2>/dev/null || true)
+    addressed_issues=""
+    if [[ -n "$pr_body_text" ]]; then
+        # Extract all issue numbers from "Closes #N", "Fixes #N", "Resolves #N" (case-insensitive).
+        addressed_issues=$(echo "$pr_body_text" | grep -ioE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true)
+    fi
+
+    for issue in $ALL_ISSUES; do
+        if echo "$addressed_issues" | grep -qw "$issue" 2>/dev/null; then
+            # Addressed: transition in-progress → needs-review.
+            transition_label_one "$issue" "in-progress" "needs-review"
+        else
+            # Not addressed: restore to ready for next cycle.
+            transition_label_one "$issue" "in-progress" "${WORK_LABEL:-ready}"
+        fi
+    done
 else
-    # Failure: remove in-progress, restore work label for retry.
-    transition_label "in-progress" "${WORK_LABEL:-approved}"
+    # Failure: remove in-progress, restore work label for retry on all issues.
+    transition_label "in-progress" "${WORK_LABEL:-ready}"
 fi
 
 sipag-state finish "$CLAUDE_EXIT" || true

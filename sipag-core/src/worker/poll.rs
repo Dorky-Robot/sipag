@@ -5,13 +5,15 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::thread;
+use std::time::Duration;
+use std::{fs, thread};
 
 use anyhow::Result;
 
 use super::decision::decide_issue_action;
 use super::dispatch::{
-    dispatch_conflict_fix, dispatch_issue_worker, dispatch_pr_iteration, is_container_running,
+    dispatch_conflict_fix, dispatch_grouped_worker, dispatch_issue_worker, dispatch_pr_iteration,
+    is_container_running,
 };
 use super::github::{
     count_open_issues, count_open_prs, find_conflicted_prs, find_prs_needing_iteration,
@@ -278,9 +280,39 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                     new_issues.len(),
                     new_issues
                 );
-                for batch in new_issues.chunks(cfg.batch_size) {
-                    println!("--- Issue batch: {:?} ---", batch);
-                    for &issue_num in batch {
+                if cfg.batch_size > 1 && new_issues.len() > 1 {
+                    // Grouped dispatch: send up to batch_size issues to one container.
+                    for batch in new_issues.chunks(cfg.batch_size) {
+                        if batch.len() == 1 {
+                            println!("--- Issue #{} (single) ---", batch[0]);
+                            let _ = dispatch_issue_worker(
+                                repo,
+                                batch[0],
+                                &cfg,
+                                sipag_dir,
+                                gh_token.as_deref(),
+                                oauth_token.as_deref(),
+                                api_key.as_deref(),
+                            );
+                        } else {
+                            println!("--- Grouped issue batch: {:?} ---", batch);
+                            let _ = dispatch_grouped_worker(
+                                repo,
+                                batch,
+                                &cfg,
+                                sipag_dir,
+                                gh_token.as_deref(),
+                                oauth_token.as_deref(),
+                                api_key.as_deref(),
+                            );
+                        }
+                        println!("--- Batch complete ---");
+                        println!();
+                    }
+                } else {
+                    // Legacy single-issue dispatch (batch_size=1 or only 1 issue).
+                    for &issue_num in &new_issues {
+                        println!("--- Issue #{issue_num} ---");
                         let _ = dispatch_issue_worker(
                             repo,
                             issue_num,
@@ -290,9 +322,9 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                             oauth_token.as_deref(),
                             api_key.as_deref(),
                         );
+                        println!("--- Issue #{issue_num} complete ---");
+                        println!();
                     }
-                    println!("--- Batch complete ---");
-                    println!();
                 }
             }
 
@@ -313,7 +345,17 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             hms(),
             cfg.poll_interval.as_secs()
         );
-        thread::sleep(cfg.poll_interval);
+        let chunk = Duration::from_secs(2);
+        let mut slept = Duration::ZERO;
+        while slept < cfg.poll_interval {
+            if sipag_dir.join("kick").exists() {
+                println!("[{}] Kick received — polling now.", hms());
+                let _ = fs::remove_file(sipag_dir.join("kick"));
+                break;
+            }
+            thread::sleep(chunk);
+            slept += chunk;
+        }
     }
 
     Ok(())

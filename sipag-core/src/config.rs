@@ -7,7 +7,7 @@
 //! ─────────────────────── ──────────────────────────── ──────────────────────── ────────
 //! batch_size              SIPAG_BATCH_SIZE             batch_size               1 (max 5)
 //! poll_interval           SIPAG_POLL_INTERVAL          poll_interval            120s
-//! work_label              SIPAG_WORK_LABEL             work_label               "approved"
+//! work_label              SIPAG_WORK_LABEL             work_label               "ready"
 //! image                   SIPAG_IMAGE                  image                    ghcr.io/dorky-robot/sipag-worker:latest
 //! timeout                 SIPAG_TIMEOUT                timeout                  1800s
 //! auto_merge              —                            auto_merge               false
@@ -36,11 +36,14 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 pub struct WorkerConfig {
     /// Base directory for sipag state (`~/.sipag` by default).
     pub sipag_dir: PathBuf,
-    /// Maximum issues to process per polling cycle (`SIPAG_BATCH_SIZE`, capped at 5; default 1).
+    /// Maximum issues to group into a single worker container (`SIPAG_BATCH_SIZE`, capped at 5; default 1).
+    /// When 1 (default), each issue gets its own container (legacy behavior).
+    /// When > 1, multiple ready issues are dispatched to one container and Claude
+    /// decides which to address together in a cohesive PR.
     pub batch_size: usize,
     /// Sleep duration between polling cycles (`SIPAG_POLL_INTERVAL` seconds; default 120).
     pub poll_interval: Duration,
-    /// GitHub issue label that marks a task ready for dispatch (`SIPAG_WORK_LABEL`; default "approved").
+    /// GitHub issue label that marks a task ready for dispatch (`SIPAG_WORK_LABEL`; default "ready").
     pub work_label: String,
     /// Docker image for worker containers (`SIPAG_IMAGE`).
     pub image: String,
@@ -86,7 +89,7 @@ impl WorkerConfig {
             sipag_dir: sipag_dir.to_path_buf(),
             batch_size: 1,
             poll_interval: Duration::from_secs(120),
-            work_label: "approved".to_string(),
+            work_label: "ready".to_string(),
             image: DEFAULT_IMAGE.to_string(),
             timeout: Duration::from_secs(1800),
             once: false,
@@ -275,7 +278,7 @@ mod tests {
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.batch_size, 1);
         assert_eq!(cfg.poll_interval, Duration::from_secs(120));
-        assert_eq!(cfg.work_label, "approved");
+        assert_eq!(cfg.work_label, "ready");
         assert_eq!(cfg.image, DEFAULT_IMAGE);
         assert_eq!(cfg.timeout, Duration::from_secs(1800));
         assert!(!cfg.once);

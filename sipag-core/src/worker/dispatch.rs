@@ -20,6 +20,7 @@ use crate::task::slugify;
 // ── Prompt templates (embedded at compile time) ───────────────────────────────
 
 const WORKER_ISSUE_PROMPT: &str = include_str!("../../../lib/prompts/worker-issue.md");
+const WORKER_GROUPED_PROMPT: &str = include_str!("../../../lib/prompts/worker-grouped.md");
 const WORKER_ITERATION_PROMPT: &str = include_str!("../../../lib/prompts/worker-iteration.md");
 const WORKER_CONFLICT_FIX_PROMPT: &str =
     include_str!("../../../lib/prompts/worker-conflict-fix.md");
@@ -151,7 +152,7 @@ pub fn dispatch_issue_worker(
     store.save(&running_state)?;
 
     // 6. Run Docker container (blocking).
-    //    The container handles label transitions (approved → in-progress → done/restored).
+    //    The container handles label transitions (ready → in-progress → needs-review/restored).
     let start = Instant::now();
     let workers_dir = sipag_dir.join("workers");
     let state_filename = format!("{repo_slug}--{issue_num}.json");
@@ -207,6 +208,238 @@ pub fn dispatch_issue_worker(
             "[#{issue_num}] FAILED: {title} — returned to {}",
             cfg.work_label
         );
+    }
+
+    Ok(())
+}
+
+// ── Grouped issue worker ─────────────────────────────────────────────────────
+
+/// Launch a single Docker container to address multiple GitHub issues together.
+///
+/// Claude receives all issue details and decides which to address in one
+/// cohesive PR. Issues not addressed (no `Closes #N` in the PR body) stay
+/// `ready` for the next polling cycle.
+pub fn dispatch_grouped_worker(
+    repo: &str,
+    issue_nums: &[u64],
+    cfg: &WorkerConfig,
+    sipag_dir: &Path,
+    gh_token: Option<&str>,
+    oauth_token: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<()> {
+    assert!(!issue_nums.is_empty(), "issue_nums must not be empty");
+
+    let repo_slug = repo.replace('/', "--");
+    let log_dir = sipag_dir.join("logs");
+    fs::create_dir_all(&log_dir)?;
+
+    let anchor_num = issue_nums[0];
+    let container_name = format!("sipag-group-{anchor_num}");
+    let log_path = log_dir.join(format!("{repo_slug}--group-{anchor_num}.log"));
+
+    let store = FileStateStore::new(sipag_dir);
+
+    // 1. Write enqueued state for each issue (crash-safe).
+    let started_at = now_utc();
+    for &issue_num in issue_nums {
+        let enqueued_state = WorkerState {
+            repo: repo.to_string(),
+            issue_num,
+            issue_title: String::new(),
+            branch: String::new(),
+            container_name: container_name.clone(),
+            pr_num: None,
+            pr_url: None,
+            status: WorkerStatus::Enqueued,
+            started_at: Some(started_at.clone()),
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            log_path: Some(log_path.clone()),
+            last_heartbeat: None,
+            phase: None,
+        };
+        store.save(&enqueued_state)?;
+    }
+
+    // 2. Fetch issue details for all issues.
+    let mut issues_section = String::new();
+    let mut first_title = String::new();
+    for &issue_num in issue_nums {
+        let (title, body) = github::get_issue_details(repo, issue_num)
+            .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
+        if first_title.is_empty() {
+            first_title = title.clone();
+        }
+        issues_section.push_str(&format!("### Issue #{issue_num}: {title}\n\n{body}\n\n"));
+    }
+
+    // 3. Build branch name and prompt.
+    let slug: String = slugify(&first_title).chars().take(50).collect();
+    let branch = format!("sipag/group-{anchor_num}-{slug}");
+
+    let issue_refs: Vec<String> = issue_nums.iter().map(|n| format!("#{n}")).collect();
+    let pr_title = format!("sipag: address issues {}", issue_refs.join(", "));
+    let pr_body_closes: Vec<String> = issue_nums.iter().map(|n| format!("Closes #{n}")).collect();
+    let pr_body = format!(
+        "{}\n\n---\n*This PR was opened by a sipag worker. Claude will update `Closes` references based on which issues are actually addressed.*",
+        pr_body_closes.join("\n")
+    );
+
+    let prompt = WORKER_GROUPED_PROMPT
+        .replace("{{ISSUES}}", &issues_section)
+        .replace("{{BRANCH}}", &branch);
+
+    let issue_nums_str: Vec<String> = issue_nums.iter().map(|n| n.to_string()).collect();
+    let issue_nums_env = issue_nums_str.join(" ");
+
+    println!(
+        "[group] Starting worker for issues {}: anchor #{anchor_num}",
+        issue_refs.join(", ")
+    );
+
+    // 4. Write running state for each issue.
+    for &issue_num in issue_nums {
+        let (title, _) = github::get_issue_details(repo, issue_num)
+            .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
+        let running_state = WorkerState {
+            repo: repo.to_string(),
+            issue_num,
+            issue_title: title,
+            branch: branch.clone(),
+            container_name: container_name.clone(),
+            pr_num: None,
+            pr_url: None,
+            status: WorkerStatus::Running,
+            started_at: Some(started_at.clone()),
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            log_path: Some(log_path.clone()),
+            last_heartbeat: Some(started_at.clone()),
+            phase: Some("starting container".to_string()),
+        };
+        store.save(&running_state)?;
+    }
+
+    // 5. Run Docker container (blocking).
+    let start = Instant::now();
+    let workers_dir = sipag_dir.join("workers");
+    // Use anchor issue's state file for container self-reporting.
+    let state_filename = format!("{repo_slug}--{anchor_num}.json");
+    let success = run_worker_container(
+        &container_name,
+        repo,
+        &branch,
+        &pr_title,
+        &pr_body,
+        &prompt,
+        &cfg.image,
+        cfg.timeout.as_secs(),
+        gh_token,
+        oauth_token,
+        api_key,
+        ISSUE_CONTAINER_SCRIPT,
+        &log_path,
+        Some((&workers_dir, &state_filename)),
+        &[
+            ("ISSUE_NUMS", &issue_nums_env),
+            ("WORK_LABEL", &cfg.work_label),
+        ],
+    );
+    let duration_s = start.elapsed().as_secs() as i64;
+    let ended_at = now_utc();
+
+    // 6. Update state files. Label transitions are handled by the container.
+    if success {
+        let pr = github::find_pr_for_branch(repo, &branch).unwrap_or(None);
+
+        // Parse the PR body to determine which issues were addressed.
+        let addressed = if let Some(ref p) = pr {
+            extract_all_issue_nums_from_pr(repo, p.number)
+        } else {
+            vec![]
+        };
+
+        for &issue_num in issue_nums {
+            let (title, _) = github::get_issue_details(repo, issue_num)
+                .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
+
+            if addressed.contains(&issue_num) {
+                let mut done_state = WorkerState {
+                    repo: repo.to_string(),
+                    issue_num,
+                    issue_title: title.clone(),
+                    branch: branch.clone(),
+                    container_name: container_name.clone(),
+                    pr_num: None,
+                    pr_url: None,
+                    status: WorkerStatus::Done,
+                    started_at: Some(started_at.clone()),
+                    ended_at: Some(ended_at.clone()),
+                    duration_s: Some(duration_s),
+                    exit_code: Some(0),
+                    log_path: Some(log_path.clone()),
+                    last_heartbeat: None,
+                    phase: None,
+                };
+                if let Some(ref p) = pr {
+                    done_state.pr_num = Some(p.number);
+                    done_state.pr_url = Some(p.url.clone());
+                }
+                store.save(&done_state)?;
+                println!("[#{issue_num}] DONE: {title}");
+            } else {
+                let fail_state = WorkerState {
+                    repo: repo.to_string(),
+                    issue_num,
+                    issue_title: title.clone(),
+                    branch: branch.clone(),
+                    container_name: container_name.clone(),
+                    pr_num: None,
+                    pr_url: None,
+                    status: WorkerStatus::Failed,
+                    started_at: Some(started_at.clone()),
+                    ended_at: Some(ended_at.clone()),
+                    duration_s: Some(duration_s),
+                    exit_code: Some(0),
+                    log_path: Some(log_path.clone()),
+                    last_heartbeat: None,
+                    phase: Some("not addressed in grouped PR".to_string()),
+                };
+                store.save(&fail_state)?;
+                println!("[#{issue_num}] Not addressed — will retry next cycle");
+            }
+        }
+    } else {
+        for &issue_num in issue_nums {
+            let (title, _) = github::get_issue_details(repo, issue_num)
+                .unwrap_or_else(|_| (format!("Issue #{issue_num}"), String::new()));
+            let fail_state = WorkerState {
+                repo: repo.to_string(),
+                issue_num,
+                issue_title: title.clone(),
+                branch: branch.clone(),
+                container_name: container_name.clone(),
+                pr_num: None,
+                pr_url: None,
+                status: WorkerStatus::Failed,
+                started_at: Some(started_at.clone()),
+                ended_at: Some(ended_at.clone()),
+                duration_s: Some(duration_s),
+                exit_code: Some(1),
+                log_path: Some(log_path.clone()),
+                last_heartbeat: None,
+                phase: None,
+            };
+            store.save(&fail_state)?;
+            println!(
+                "[#{issue_num}] FAILED: {title} — returned to {}",
+                cfg.work_label
+            );
+        }
     }
 
     Ok(())
@@ -525,20 +758,55 @@ fn run_worker_container(
 
 /// Extract the first "Closes/Fixes/Resolves #N" issue number from text.
 fn extract_issue_num_from_body(body: &str) -> Option<u64> {
-    // Simple regex-free approach: scan for "closes #", "fixes #", "resolves #"
+    extract_all_issue_nums_from_body(body).into_iter().next()
+}
+
+/// Extract all "Closes/Fixes/Resolves #N" issue numbers from text.
+fn extract_all_issue_nums_from_body(body: &str) -> Vec<u64> {
+    let mut nums = Vec::new();
     for line in body.lines() {
         let lower = line.to_lowercase();
         for keyword in &["closes #", "fixes #", "resolves #"] {
-            if let Some(pos) = lower.find(keyword) {
-                let rest = &line[pos + keyword.len()..];
-                let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(n) = num.parse::<u64>() {
-                    return Some(n);
+            let mut search_from = 0;
+            while let Some(pos) = lower[search_from..].find(keyword) {
+                let abs_pos = search_from + pos + keyword.len();
+                let rest = &line[abs_pos..];
+                let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = num_str.parse::<u64>() {
+                    if !nums.contains(&n) {
+                        nums.push(n);
+                    }
                 }
+                search_from = abs_pos;
             }
         }
     }
-    None
+    nums
+}
+
+/// Fetch the PR body from GitHub and extract all addressed issue numbers.
+fn extract_all_issue_nums_from_pr(repo: &str, pr_num: u64) -> Vec<u64> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "body",
+            "--jq",
+            ".body",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout);
+            extract_all_issue_nums_from_body(&body)
+        }
+        _ => vec![],
+    }
 }
 
 fn collect_review_feedback(repo: &str, pr_num: u64) -> String {
@@ -613,4 +881,235 @@ fn get_pr_diff(repo: &str, pr_num: u64) -> String {
             }
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── extract_issue_num_from_body (single) ─────────────────────────────────
+
+    #[test]
+    fn extract_single_closes() {
+        assert_eq!(extract_issue_num_from_body("Closes #42"), Some(42));
+    }
+
+    #[test]
+    fn extract_single_fixes() {
+        assert_eq!(extract_issue_num_from_body("Fixes #99"), Some(99));
+    }
+
+    #[test]
+    fn extract_single_resolves() {
+        assert_eq!(extract_issue_num_from_body("Resolves #7"), Some(7));
+    }
+
+    #[test]
+    fn extract_case_insensitive() {
+        assert_eq!(extract_issue_num_from_body("CLOSES #10"), Some(10));
+        assert_eq!(extract_issue_num_from_body("closes #10"), Some(10));
+        assert_eq!(extract_issue_num_from_body("ClOsEs #10"), Some(10));
+    }
+
+    #[test]
+    fn extract_returns_first_when_multiple() {
+        assert_eq!(
+            extract_issue_num_from_body("Closes #1\nCloses #2\nCloses #3"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn extract_none_when_no_match() {
+        assert_eq!(
+            extract_issue_num_from_body("No issue references here"),
+            None
+        );
+        assert_eq!(extract_issue_num_from_body(""), None);
+        assert_eq!(extract_issue_num_from_body("Just a #42 reference"), None);
+    }
+
+    #[test]
+    fn extract_ignores_invalid_number() {
+        assert_eq!(extract_issue_num_from_body("Closes #abc"), None);
+        assert_eq!(extract_issue_num_from_body("Closes #"), None);
+    }
+
+    // ── extract_all_issue_nums_from_body ─────────────────────────────────────
+
+    #[test]
+    fn extract_all_single_issue() {
+        assert_eq!(extract_all_issue_nums_from_body("Closes #42"), vec![42]);
+    }
+
+    #[test]
+    fn extract_all_multiple_issues_same_keyword() {
+        assert_eq!(
+            extract_all_issue_nums_from_body("Closes #1\nCloses #2\nCloses #3"),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn extract_all_mixed_keywords() {
+        assert_eq!(
+            extract_all_issue_nums_from_body("Closes #10\nFixes #20\nResolves #30"),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn extract_all_deduplicates() {
+        assert_eq!(
+            extract_all_issue_nums_from_body("Closes #5\nFixes #5\nResolves #5"),
+            vec![5]
+        );
+    }
+
+    #[test]
+    fn extract_all_preserves_order() {
+        assert_eq!(
+            extract_all_issue_nums_from_body("Closes #30\nCloses #10\nCloses #20"),
+            vec![30, 10, 20]
+        );
+    }
+
+    #[test]
+    fn extract_all_empty_body() {
+        assert!(extract_all_issue_nums_from_body("").is_empty());
+    }
+
+    #[test]
+    fn extract_all_no_matches() {
+        assert!(extract_all_issue_nums_from_body("No issue refs\nJust text").is_empty());
+    }
+
+    #[test]
+    fn extract_all_mixed_with_prose() {
+        let body = "## Summary\n\nThis PR addresses several issues.\n\nCloses #42\n\nAlso fixes #99 and the related problem.\n\nResolves #7\n\nSee also #100 (not addressed).";
+        assert_eq!(extract_all_issue_nums_from_body(body), vec![42, 99, 7]);
+    }
+
+    #[test]
+    fn extract_all_multiple_on_same_line() {
+        // "Closes #1, Closes #2" on the same line
+        assert_eq!(
+            extract_all_issue_nums_from_body("Closes #1, Closes #2"),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn extract_all_case_insensitive() {
+        assert_eq!(
+            extract_all_issue_nums_from_body("CLOSES #1\nfixes #2\nResolves #3"),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn extract_all_ignores_plain_hash_refs() {
+        // "#42" without a keyword should not be extracted.
+        assert!(extract_all_issue_nums_from_body("See #42 and #99").is_empty());
+    }
+
+    #[test]
+    fn extract_all_realistic_pr_body() {
+        let body = "\
+Closes #101
+Closes #103
+
+## Summary
+- Refactored the config module to support grouped dispatch
+- Updated worker prompt for multi-issue context
+
+## Test plan
+- [x] `make dev` passes
+- [x] Manual test with batch_size=3
+
+---
+*This PR was opened by a sipag worker.*";
+        assert_eq!(extract_all_issue_nums_from_body(body), vec![101, 103]);
+    }
+
+    // ── Grouped prompt template ──────────────────────────────────────────────
+
+    #[test]
+    fn grouped_prompt_has_expected_placeholders() {
+        assert!(
+            WORKER_GROUPED_PROMPT.contains("{{ISSUES}}"),
+            "Missing {{{{ISSUES}}}} placeholder"
+        );
+        assert!(
+            WORKER_GROUPED_PROMPT.contains("{{BRANCH}}"),
+            "Missing {{{{BRANCH}}}} placeholder"
+        );
+    }
+
+    #[test]
+    fn grouped_prompt_substitution_produces_valid_output() {
+        let issues = "### Issue #1: Fix bug\n\nBug description\n\n### Issue #2: Add feature\n\nFeature description\n\n";
+        let branch = "sipag/group-1-fix-bug";
+
+        let prompt = WORKER_GROUPED_PROMPT
+            .replace("{{ISSUES}}", issues)
+            .replace("{{BRANCH}}", branch);
+
+        assert!(prompt.contains("### Issue #1: Fix bug"));
+        assert!(prompt.contains("### Issue #2: Add feature"));
+        assert!(prompt.contains("sipag/group-1-fix-bug"));
+        assert!(!prompt.contains("{{ISSUES}}"));
+        assert!(!prompt.contains("{{BRANCH}}"));
+    }
+
+    #[test]
+    fn grouped_prompt_mentions_closes_instruction() {
+        // The prompt should instruct Claude about Closes #N usage.
+        let lower = WORKER_GROUPED_PROMPT.to_lowercase();
+        assert!(
+            lower.contains("closes #n") || lower.contains("closes"),
+            "Grouped prompt should mention 'Closes #N' for addressed issues"
+        );
+    }
+
+    // ── Issue prompt template ────────────────────────────────────────────────
+
+    #[test]
+    fn issue_prompt_has_expected_placeholders() {
+        assert!(WORKER_ISSUE_PROMPT.contains("{{TITLE}}"));
+        assert!(WORKER_ISSUE_PROMPT.contains("{{BODY}}"));
+        assert!(WORKER_ISSUE_PROMPT.contains("{{BRANCH}}"));
+        assert!(WORKER_ISSUE_PROMPT.contains("{{ISSUE_NUM}}"));
+    }
+
+    // ── Container script embeds ──────────────────────────────────────────────
+
+    #[test]
+    fn issue_container_script_handles_issue_nums_env() {
+        // The container script should reference ISSUE_NUMS for grouped workers.
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("ISSUE_NUMS"),
+            "Container script should handle ISSUE_NUMS env var for grouped dispatch"
+        );
+    }
+
+    #[test]
+    fn issue_container_script_falls_back_to_issue_num() {
+        // Backward compat: should still work with single ISSUE_NUM.
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("ISSUE_NUM"),
+            "Container script should fall back to ISSUE_NUM for single-issue dispatch"
+        );
+    }
+
+    #[test]
+    fn issue_container_script_parses_addressed_issues_on_success() {
+        // On success, the script should parse PR body for "Closes/Fixes/Resolves #N".
+        assert!(
+            ISSUE_CONTAINER_SCRIPT.contains("addressed_issues")
+                || ISSUE_CONTAINER_SCRIPT.contains("closes\\|fixes\\|resolves")
+                || ISSUE_CONTAINER_SCRIPT.contains("closes|fixes|resolves"),
+            "Container script should parse PR body for addressed issues on success"
+        );
+    }
 }

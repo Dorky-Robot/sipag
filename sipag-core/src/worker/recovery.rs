@@ -307,7 +307,7 @@ mod tests {
         };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
@@ -322,7 +322,7 @@ mod tests {
         };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -338,7 +338,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new().with_pr("sipag/issue-42-test", 100);
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -357,7 +357,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -379,7 +379,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert!(outcomes.is_empty());
     }
@@ -396,7 +396,7 @@ mod tests {
         };
         let github = MockGitHub::new().with_pr("sipag/issue-43-test", 100);
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 3);
         assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
@@ -422,7 +422,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new().with_pr("sipag/issue-42-test", 100);
 
-        recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         let calls = github.label_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -443,7 +443,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         let calls = github.label_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -453,7 +453,7 @@ mod tests {
                 repo: "test/repo".to_string(),
                 issue: 42,
                 remove: Some("in-progress".to_string()),
-                add: Some("approved".to_string()),
+                add: Some("ready".to_string()),
             }
         );
     }
@@ -464,7 +464,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new().with_pr("sipag/issue-42-test", 100);
 
-        recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(store.get_pr_num(42), Some(100));
         assert_eq!(
@@ -479,7 +479,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(
             outcomes[0],
@@ -498,7 +498,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -513,13 +513,13 @@ mod tests {
 
     #[test]
     fn enqueued_worker_restores_work_label() {
-        // Recovery of an enqueued worker should restore the approved label
+        // Recovery of an enqueued worker should restore the ready label
         // (removing in-progress if it was set before the crash).
         let store = MockStore::new(vec![make_worker(42, WorkerStatus::Enqueued)]);
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         let calls = github.label_calls.borrow();
         assert_eq!(calls.len(), 1);
@@ -529,7 +529,7 @@ mod tests {
                 repo: "test/repo".to_string(),
                 issue: 42,
                 remove: Some("in-progress".to_string()),
-                add: Some("approved".to_string()),
+                add: Some("ready".to_string()),
             }
         );
     }
@@ -540,7 +540,7 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert!(outcomes.is_empty());
     }
@@ -551,10 +551,10 @@ mod tests {
         let containers = MockContainers { running: vec![] };
         let github = MockGitHub::new();
 
-        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+        recover_and_finalize(&containers, &github, &store, "custom-label").unwrap();
 
         let calls = github.label_calls.borrow();
-        assert_eq!(calls[0].add, Some("ready".to_string()));
+        assert_eq!(calls[0].add, Some("custom-label".to_string()));
     }
 
     #[test]
@@ -567,7 +567,7 @@ mod tests {
         };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
@@ -585,7 +585,7 @@ mod tests {
         };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(
@@ -605,9 +605,209 @@ mod tests {
         };
         let github = MockGitHub::new();
 
-        let outcomes = recover_and_finalize(&containers, &github, &store, "approved").unwrap();
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
 
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0], RecoveryOutcome::StillRunning { issue_num: 42 });
+    }
+
+    // ── Grouped worker recovery tests ───────────────────────────────────────
+
+    fn make_grouped_worker(issue_num: u64, status: WorkerStatus) -> WorkerState {
+        WorkerState {
+            repo: "test/repo".to_string(),
+            issue_num,
+            issue_title: format!("Issue {}", issue_num),
+            // All grouped workers share the same branch and container.
+            branch: "sipag/group-10-fix-things".to_string(),
+            container_name: "sipag-group-10".to_string(),
+            pr_num: None,
+            pr_url: None,
+            status,
+            started_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            log_path: None,
+            last_heartbeat: None,
+            phase: None,
+        }
+    }
+
+    #[test]
+    fn grouped_workers_all_stay_running_when_container_alive() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+            make_grouped_worker(12, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers {
+            running: vec!["sipag-group-10".to_string()],
+        };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        assert_eq!(outcomes.len(), 3);
+        for outcome in &outcomes {
+            match outcome {
+                RecoveryOutcome::StillRunning { .. } => {}
+                other => panic!("Expected StillRunning, got {:?}", other),
+            }
+        }
+        // All should still be Running.
+        assert_eq!(store.get_status(10), Some(WorkerStatus::Running));
+        assert_eq!(store.get_status(11), Some(WorkerStatus::Running));
+        assert_eq!(store.get_status(12), Some(WorkerStatus::Running));
+    }
+
+    #[test]
+    fn grouped_workers_all_done_when_container_gone_with_pr() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+            make_grouped_worker(12, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new().with_pr("sipag/group-10-fix-things", 200);
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        assert_eq!(outcomes.len(), 3);
+        for outcome in &outcomes {
+            match outcome {
+                RecoveryOutcome::Finalized {
+                    status: WorkerStatus::Done,
+                    ..
+                } => {}
+                other => panic!("Expected Finalized(Done), got {:?}", other),
+            }
+        }
+        assert_eq!(store.get_status(10), Some(WorkerStatus::Done));
+        assert_eq!(store.get_status(11), Some(WorkerStatus::Done));
+        assert_eq!(store.get_status(12), Some(WorkerStatus::Done));
+    }
+
+    #[test]
+    fn grouped_workers_all_failed_when_container_gone_no_pr() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+            make_grouped_worker(12, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        assert_eq!(outcomes.len(), 3);
+        for outcome in &outcomes {
+            match outcome {
+                RecoveryOutcome::Finalized {
+                    status: WorkerStatus::Failed,
+                    ..
+                } => {}
+                other => panic!("Expected Finalized(Failed), got {:?}", other),
+            }
+        }
+        assert_eq!(store.get_status(10), Some(WorkerStatus::Failed));
+        assert_eq!(store.get_status(11), Some(WorkerStatus::Failed));
+        assert_eq!(store.get_status(12), Some(WorkerStatus::Failed));
+    }
+
+    #[test]
+    fn grouped_workers_each_get_label_transition_on_done() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new().with_pr("sipag/group-10-fix-things", 200);
+
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        let calls = github.label_calls.borrow();
+        assert_eq!(
+            calls.len(),
+            2,
+            "Each issue should get its own label transition"
+        );
+
+        // Both should transition in-progress → needs-review.
+        let issue_nums: Vec<u64> = calls.iter().map(|c| c.issue).collect();
+        assert!(issue_nums.contains(&10));
+        assert!(issue_nums.contains(&11));
+        for call in calls.iter() {
+            assert_eq!(call.remove, Some("in-progress".to_string()));
+            assert_eq!(call.add, Some("needs-review".to_string()));
+        }
+    }
+
+    #[test]
+    fn grouped_workers_each_get_label_transition_on_failure() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new();
+
+        recover_and_finalize(&containers, &github, &store, "triaged").unwrap();
+
+        let calls = github.label_calls.borrow();
+        assert_eq!(calls.len(), 2);
+        for call in calls.iter() {
+            assert_eq!(call.remove, Some("in-progress".to_string()));
+            assert_eq!(call.add, Some("triaged".to_string()));
+        }
+    }
+
+    #[test]
+    fn grouped_workers_pr_info_stored_for_all_on_done() {
+        let store = MockStore::new(vec![
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+        ]);
+        let containers = MockContainers { running: vec![] };
+        let github = MockGitHub::new().with_pr("sipag/group-10-fix-things", 200);
+
+        recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        // Both should have PR info.
+        assert_eq!(store.get_pr_num(10), Some(200));
+        assert_eq!(store.get_pr_num(11), Some(200));
+        assert_eq!(
+            store.get_pr_url(10),
+            Some("https://github.com/test/repo/pull/200".to_string())
+        );
+        assert_eq!(
+            store.get_pr_url(11),
+            Some("https://github.com/test/repo/pull/200".to_string())
+        );
+    }
+
+    #[test]
+    fn grouped_and_single_workers_mixed_in_recovery() {
+        let store = MockStore::new(vec![
+            // Grouped: issues 10,11 share container "sipag-group-10"
+            make_grouped_worker(10, WorkerStatus::Running),
+            make_grouped_worker(11, WorkerStatus::Running),
+            // Single: issue 42 has its own container
+            make_worker(42, WorkerStatus::Running),
+        ]);
+        // Group container is gone (no PR), single container still alive.
+        let containers = MockContainers {
+            running: vec!["sipag-issue-42".to_string()],
+        };
+        let github = MockGitHub::new();
+
+        let outcomes = recover_and_finalize(&containers, &github, &store, "ready").unwrap();
+
+        assert_eq!(outcomes.len(), 3);
+        // Grouped workers (10, 11) should be failed (container gone, no PR).
+        assert_eq!(store.get_status(10), Some(WorkerStatus::Failed));
+        assert_eq!(store.get_status(11), Some(WorkerStatus::Failed));
+        // Single worker (42) should still be running.
+        assert_eq!(store.get_status(42), Some(WorkerStatus::Running));
     }
 }

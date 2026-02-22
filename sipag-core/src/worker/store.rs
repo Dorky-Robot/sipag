@@ -350,4 +350,176 @@ mod tests {
         let dir = TempDir::new().unwrap();
         mark_worker_failed_by_container(dir.path(), "nonexistent").unwrap();
     }
+
+    // ── Grouped worker state tests ──────────────────────────────────────────
+
+    fn grouped_sample_json(issue_num: u64, status: &str) -> String {
+        format!(
+            r#"{{
+                "repo": "test/repo",
+                "issue_num": {issue_num},
+                "issue_title": "Issue {issue_num}",
+                "branch": "sipag/group-10-fix-things",
+                "container_name": "sipag-group-10",
+                "pr_num": null,
+                "pr_url": null,
+                "status": "{status}",
+                "started_at": "2024-01-01T00:00:00Z",
+                "ended_at": null,
+                "duration_s": null,
+                "exit_code": null,
+                "log_path": null
+            }}"#
+        )
+    }
+
+    #[test]
+    fn grouped_workers_share_container_name() {
+        let dir = TempDir::new().unwrap();
+        let workers_dir = dir.path().join("workers");
+        fs::create_dir(&workers_dir).unwrap();
+
+        // Multiple state files sharing the same container_name.
+        fs::write(
+            workers_dir.join("test--repo--10.json"),
+            grouped_sample_json(10, "running"),
+        )
+        .unwrap();
+        fs::write(
+            workers_dir.join("test--repo--11.json"),
+            grouped_sample_json(11, "running"),
+        )
+        .unwrap();
+        fs::write(
+            workers_dir.join("test--repo--12.json"),
+            grouped_sample_json(12, "running"),
+        )
+        .unwrap();
+
+        let store = FileStateStore::new(dir.path());
+
+        // All should load independently.
+        let w10 = store.load("test--repo", 10).unwrap().unwrap();
+        let w11 = store.load("test--repo", 11).unwrap().unwrap();
+        let w12 = store.load("test--repo", 12).unwrap().unwrap();
+
+        assert_eq!(w10.container_name, "sipag-group-10");
+        assert_eq!(w11.container_name, "sipag-group-10");
+        assert_eq!(w12.container_name, "sipag-group-10");
+
+        // All share the same branch.
+        assert_eq!(w10.branch, "sipag/group-10-fix-things");
+        assert_eq!(w11.branch, "sipag/group-10-fix-things");
+        assert_eq!(w12.branch, "sipag/group-10-fix-things");
+    }
+
+    #[test]
+    fn grouped_workers_all_listed_as_active() {
+        let dir = TempDir::new().unwrap();
+        let workers_dir = dir.path().join("workers");
+        fs::create_dir(&workers_dir).unwrap();
+
+        fs::write(
+            workers_dir.join("test--repo--10.json"),
+            grouped_sample_json(10, "running"),
+        )
+        .unwrap();
+        fs::write(
+            workers_dir.join("test--repo--11.json"),
+            grouped_sample_json(11, "running"),
+        )
+        .unwrap();
+        fs::write(
+            workers_dir.join("test--repo--12.json"),
+            grouped_sample_json(12, "done"),
+        )
+        .unwrap();
+
+        let store = FileStateStore::new(dir.path());
+        let active = store.list_active().unwrap();
+
+        // Only 10 and 11 are active (running); 12 is done.
+        assert_eq!(active.len(), 2);
+        let nums: Vec<u64> = active.iter().map(|w| w.issue_num).collect();
+        assert!(nums.contains(&10));
+        assert!(nums.contains(&11));
+    }
+
+    #[test]
+    fn mark_grouped_worker_failed_updates_first_match_only() {
+        let dir = TempDir::new().unwrap();
+        let workers_dir = dir.path().join("workers");
+        fs::create_dir(&workers_dir).unwrap();
+
+        fs::write(
+            workers_dir.join("test--repo--10.json"),
+            grouped_sample_json(10, "running"),
+        )
+        .unwrap();
+        fs::write(
+            workers_dir.join("test--repo--11.json"),
+            grouped_sample_json(11, "running"),
+        )
+        .unwrap();
+
+        // mark_worker_failed_by_container finds the first file matching the container name.
+        mark_worker_failed_by_container(dir.path(), "sipag-group-10").unwrap();
+
+        let all = list_all_workers(dir.path()).unwrap();
+        // At least one should be failed (the first match).
+        let failed_count = all
+            .iter()
+            .filter(|w| w.status == WorkerStatus::Failed)
+            .count();
+        assert!(
+            failed_count >= 1,
+            "At least one grouped worker should be marked failed"
+        );
+    }
+
+    #[test]
+    fn save_overwrites_grouped_worker_independently() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStateStore::new(dir.path());
+
+        // Save two grouped workers.
+        let mut w10 = WorkerState {
+            repo: "test/repo".to_string(),
+            issue_num: 10,
+            issue_title: "Issue 10".to_string(),
+            branch: "sipag/group-10-test".to_string(),
+            container_name: "sipag-group-10".to_string(),
+            pr_num: None,
+            pr_url: None,
+            status: WorkerStatus::Running,
+            started_at: Some("2024-01-01T00:00:00Z".to_string()),
+            ended_at: None,
+            duration_s: None,
+            exit_code: None,
+            log_path: None,
+            last_heartbeat: None,
+            phase: None,
+        };
+        let w11 = WorkerState {
+            issue_num: 11,
+            issue_title: "Issue 11".to_string(),
+            ..w10.clone()
+        };
+
+        store.save(&w10).unwrap();
+        store.save(&w11).unwrap();
+
+        // Mark only issue 10 as done.
+        w10.status = WorkerStatus::Done;
+        w10.pr_num = Some(200);
+        store.save(&w10).unwrap();
+
+        // Issue 11 should still be running.
+        let loaded10 = store.load("test--repo", 10).unwrap().unwrap();
+        let loaded11 = store.load("test--repo", 11).unwrap().unwrap();
+        assert_eq!(loaded10.status, WorkerStatus::Done);
+        assert_eq!(loaded10.pr_num, Some(200));
+        assert_eq!(loaded11.status, WorkerStatus::Running);
+        assert_eq!(loaded11.pr_num, None);
+    }
 }
