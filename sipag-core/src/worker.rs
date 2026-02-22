@@ -40,3 +40,10 @@ pub use store::{
 pub fn preflight_gh_auth() -> anyhow::Result<()> {
     github::preflight_gh_auth()
 }
+
+/// List open issues with the given label for a repo.
+///
+/// Thin wrapper for use by `sipag work --dry-run`.
+pub fn list_ready_issues(repo: &str, label: &str) -> anyhow::Result<Vec<u64>> {
+    github::list_approved_issues(repo, label)
+}

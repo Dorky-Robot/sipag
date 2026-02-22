@@ -25,6 +25,174 @@ use std::time::Duration;
 use std::{env, fs};
 
 const BATCH_SIZE_MAX: usize = 5;
+const BATCH_SIZE_MIN: usize = 1;
+const TIMEOUT_MIN_SECS: u64 = 1;
+const POLL_INTERVAL_MIN_SECS: u64 = 1;
+
+/// Known config file keys (used for typo suggestions in doctor).
+pub const KNOWN_CONFIG_KEYS: &[&str] = &[
+    "batch_size",
+    "image",
+    "timeout",
+    "poll_interval",
+    "work_label",
+    "auto_merge",
+    "doc_refresh_interval",
+    "state_max_age_days",
+];
+
+/// A diagnostic finding from config file validation.
+#[derive(Debug, Clone)]
+pub enum ConfigWarning {
+    /// A key in the config file is not recognized.
+    UnknownKey {
+        key: String,
+        /// Closest known key if one exists (Levenshtein distance ≤ 2).
+        suggestion: Option<String>,
+    },
+    /// A numeric value could not be parsed or is out of range.
+    InvalidValue {
+        key: String,
+        value: String,
+        reason: String,
+    },
+}
+
+impl ConfigWarning {
+    /// Human-readable description.
+    pub fn message(&self) -> String {
+        match self {
+            ConfigWarning::UnknownKey { key, suggestion } => match suggestion {
+                Some(s) => format!("unknown key \"{key}\" — did you mean \"{s}\"?"),
+                None => format!("unknown key \"{key}\""),
+            },
+            ConfigWarning::InvalidValue { key, value, reason } => {
+                format!("{key}={value} — {reason}")
+            }
+        }
+    }
+}
+
+/// Validate `~/.sipag/config` and return a list of warnings.
+///
+/// Does not modify any config state — pure diagnostic function for `sipag doctor`.
+pub fn validate_config_file(config_file: &Path) -> Result<Vec<ConfigWarning>> {
+    let mut warnings = Vec::new();
+    if !config_file.exists() {
+        return Ok(warnings);
+    }
+    parse_config_file(config_file, |key, value| {
+        if KNOWN_CONFIG_KEYS.contains(&key) {
+            // Validate value for known numeric keys.
+            match key {
+                "batch_size" => match value.parse::<i64>() {
+                    Ok(n) if n < BATCH_SIZE_MIN as i64 => {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: format!(
+                                "must be at least {BATCH_SIZE_MIN} (got {n}); will be clamped"
+                            ),
+                        });
+                    }
+                    Ok(n) if n > BATCH_SIZE_MAX as i64 => {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: format!(
+                                "exceeds maximum {BATCH_SIZE_MAX} (got {n}); will be clamped"
+                            ),
+                        });
+                    }
+                    Err(_) => {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: "expected a positive integer".to_string(),
+                        });
+                    }
+                    _ => {}
+                },
+                "timeout" | "poll_interval" => match value.parse::<i64>() {
+                    Ok(n) if n < 1 => {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: format!("must be at least 1 second (got {n}); will be clamped"),
+                        });
+                    }
+                    Err(_) => {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: "expected a positive integer (seconds)".to_string(),
+                        });
+                    }
+                    _ => {}
+                },
+                "doc_refresh_interval" | "state_max_age_days" => {
+                    if value.parse::<u64>().is_err() {
+                        warnings.push(ConfigWarning::InvalidValue {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            reason: "expected a non-negative integer".to_string(),
+                        });
+                    }
+                }
+                _ => {} // image, work_label, auto_merge accept any string
+            }
+        } else {
+            let suggestion = closest_key(key);
+            warnings.push(ConfigWarning::UnknownKey {
+                key: key.to_string(),
+                suggestion,
+            });
+        }
+    })?;
+    Ok(warnings)
+}
+
+/// Find the closest known config key using a simple edit-distance check.
+/// Returns `Some(key)` if a match within distance 2 is found.
+fn closest_key(input: &str) -> Option<String> {
+    KNOWN_CONFIG_KEYS
+        .iter()
+        .filter_map(|k| {
+            let d = edit_distance(input, k);
+            if d <= 2 {
+                Some((*k, d))
+            } else {
+                None
+            }
+        })
+        .min_by_key(|(_, d)| *d)
+        .map(|(k, _)| k.to_string())
+}
+
+/// Compute Levenshtein edit distance between two strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let m = a.len();
+    let n = b.len();
+    let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in dp[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=m {
+        for j in 1..=n {
+            dp[i][j] = if a[i - 1] == b[j - 1] {
+                dp[i - 1][j - 1]
+            } else {
+                1 + dp[i - 1][j].min(dp[i][j - 1]).min(dp[i - 1][j - 1])
+            };
+        }
+    }
+    dp[m][n]
+}
 
 /// Default Docker image for worker containers.
 pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
@@ -103,18 +271,18 @@ impl WorkerConfig {
         match key {
             "batch_size" => {
                 if let Ok(n) = value.parse::<usize>() {
-                    self.batch_size = n.min(BATCH_SIZE_MAX);
+                    self.batch_size = n.clamp(BATCH_SIZE_MIN, BATCH_SIZE_MAX);
                 }
             }
             "image" => self.image = value.to_string(),
             "timeout" => {
                 if let Ok(n) = value.parse::<u64>() {
-                    self.timeout = Duration::from_secs(n);
+                    self.timeout = Duration::from_secs(n.max(TIMEOUT_MIN_SECS));
                 }
             }
             "poll_interval" => {
                 if let Ok(n) = value.parse::<u64>() {
-                    self.poll_interval = Duration::from_secs(n);
+                    self.poll_interval = Duration::from_secs(n.max(POLL_INTERVAL_MIN_SECS));
                 }
             }
             "work_label" => self.work_label = value.to_string(),
@@ -136,7 +304,7 @@ impl WorkerConfig {
     fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) {
         if let Some(v) = get_env("SIPAG_BATCH_SIZE") {
             if let Ok(n) = v.parse::<usize>() {
-                self.batch_size = n.min(BATCH_SIZE_MAX);
+                self.batch_size = n.clamp(BATCH_SIZE_MIN, BATCH_SIZE_MAX);
             }
         }
         if let Some(v) = get_env("SIPAG_IMAGE") {
@@ -144,12 +312,12 @@ impl WorkerConfig {
         }
         if let Some(v) = get_env("SIPAG_TIMEOUT") {
             if let Ok(n) = v.parse::<u64>() {
-                self.timeout = Duration::from_secs(n);
+                self.timeout = Duration::from_secs(n.max(TIMEOUT_MIN_SECS));
             }
         }
         if let Some(v) = get_env("SIPAG_POLL_INTERVAL") {
             if let Ok(n) = v.parse::<u64>() {
-                self.poll_interval = Duration::from_secs(n);
+                self.poll_interval = Duration::from_secs(n.max(POLL_INTERVAL_MIN_SECS));
             }
         }
         if let Some(v) = get_env("SIPAG_WORK_LABEL") {
@@ -448,6 +616,117 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.sipag_dir, dir.path());
+    }
+
+    // ── batch_size minimum clamping tests ────────────────────────────────
+
+    #[test]
+    fn worker_config_batch_size_zero_clamped_to_min() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_timeout_zero_clamped_to_min() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=0\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(TIMEOUT_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_poll_interval_zero_clamped_to_min() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "poll_interval=0\n").unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(
+            cfg.poll_interval,
+            Duration::from_secs(POLL_INTERVAL_MIN_SECS)
+        );
+    }
+
+    // ── validate_config_file tests ────────────────────────────────────────
+
+    #[test]
+    fn validate_config_file_no_warnings_for_valid_config() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config"),
+            "batch_size=3\ntimeout=900\npoll_interval=60\nwork_label=approved\n",
+        )
+        .unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "Expected no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_config_file_warns_unknown_key() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "bathc_size=4\n").unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(warnings.len(), 1);
+        match &warnings[0] {
+            ConfigWarning::UnknownKey { key, suggestion } => {
+                assert_eq!(key, "bathc_size");
+                assert_eq!(suggestion.as_deref(), Some("batch_size"));
+            }
+            other => panic!("Expected UnknownKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_config_file_warns_batch_size_zero() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            matches!(&warnings[0], ConfigWarning::InvalidValue { key, .. } if key == "batch_size")
+        );
+    }
+
+    #[test]
+    fn validate_config_file_warns_timeout_zero() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=0\n").unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            matches!(&warnings[0], ConfigWarning::InvalidValue { key, .. } if key == "timeout")
+        );
+    }
+
+    #[test]
+    fn validate_config_file_warns_non_numeric_batch_size() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=abc\n").unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            matches!(&warnings[0], ConfigWarning::InvalidValue { key, .. } if key == "batch_size")
+        );
+    }
+
+    #[test]
+    fn validate_config_file_no_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let warnings = validate_config_file(&dir.path().join("config")).unwrap();
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn edit_distance_exact() {
+        assert_eq!(edit_distance("batch_size", "batch_size"), 0);
+    }
+
+    #[test]
+    fn edit_distance_one_typo() {
+        assert_eq!(edit_distance("bathc_size", "batch_size"), 2);
     }
 
     // ── Credentials tests ─────────────────────────────────────────────────

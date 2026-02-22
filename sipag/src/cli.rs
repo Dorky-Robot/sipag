@@ -1,19 +1,20 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
-    config::WorkerConfig,
+    config::{validate_config_file, WorkerConfig},
     executor::{self, RunConfig},
     init,
     prompt::{format_duration, generate_task_id},
     repo,
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
-    worker::{preflight_gh_auth, run_worker_loop},
+    worker::{list_ready_issues, preflight_gh_auth, run_worker_loop},
 };
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = env!("SIPAG_GIT_HASH");
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +42,10 @@ pub enum Commands {
         /// Process one polling cycle and exit
         #[arg(long)]
         once: bool,
+
+        /// Preview what would be dispatched without starting containers
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -213,7 +218,17 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Work { repos, once }) => cmd_work(repos, once),
+        Some(Commands::Work {
+            repos,
+            once,
+            dry_run,
+        }) => {
+            if dry_run {
+                cmd_work_dry_run(repos)
+            } else {
+                cmd_work(repos, once)
+            }
+        }
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -246,7 +261,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }) => triage::run_triage(&repo, dry_run, apply),
         Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
-            println!("sipag {VERSION}");
+            println!("sipag {VERSION} ({GIT_HASH})");
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
@@ -338,6 +353,73 @@ fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
     }
 
     run_worker_loop(&repos, &dir, cfg)
+}
+
+fn cmd_work_dry_run(mut repos: Vec<String>) -> Result<()> {
+    let dir = sipag_dir();
+    init::init_dirs(&dir).ok();
+    let cfg = WorkerConfig::load(&dir)?;
+
+    if repos.is_empty() {
+        repos = resolve_repos(&dir)?;
+    }
+
+    println!("sipag work --dry-run");
+    println!("Label: {}", cfg.work_label);
+    println!("Batch size: {}", cfg.batch_size);
+    println!();
+
+    let mut total_ready = 0usize;
+    for repo in &repos {
+        let ready = list_ready_issues(repo, &cfg.work_label).unwrap_or_default();
+        total_ready += ready.len();
+
+        if ready.is_empty() {
+            println!("[{repo}] No ready issues.");
+            continue;
+        }
+
+        let nums: Vec<String> = ready.iter().map(|n| format!("#{n}")).collect();
+        println!(
+            "[{repo}] Found {} ready issue(s): {}",
+            ready.len(),
+            nums.join(" ")
+        );
+
+        if cfg.batch_size > 1 && ready.len() > 1 {
+            println!("With batch_size={}, would dispatch:", cfg.batch_size);
+            for (i, batch) in ready.chunks(cfg.batch_size).enumerate() {
+                let batch_nums: Vec<String> = batch.iter().map(|n| format!("#{n}")).collect();
+                let anchor = batch[0];
+                if batch.len() == 1 {
+                    println!(
+                        "  Batch {}: {} → sipag-issue-{anchor}",
+                        i + 1,
+                        batch_nums.join(" ")
+                    );
+                } else {
+                    println!(
+                        "  Batch {}: {} → sipag-group-{anchor}",
+                        i + 1,
+                        batch_nums.join(" ")
+                    );
+                }
+            }
+        } else {
+            println!("Would dispatch:");
+            for &issue_num in &ready {
+                println!("  #{issue_num} → sipag-issue-{issue_num}");
+            }
+        }
+        println!();
+    }
+
+    if total_ready == 0 {
+        println!("No containers would be started (dry-run mode).");
+    } else {
+        println!("No containers started (dry-run mode). Run without --dry-run to dispatch.");
+    }
+    Ok(())
 }
 
 fn cmd_drain() -> Result<()> {
@@ -537,6 +619,50 @@ fn cmd_doctor() -> Result<()> {
                 println!("        {p}");
             }
             println!("      To fix, run:  sipag setup\n");
+        }
+    }
+
+    // --- Config file ---
+    println!();
+    println!("Config file ({}):", dir.join("config").display());
+
+    let config_file = dir.join("config");
+    if !config_file.exists() {
+        info("~/.sipag/config not found (using defaults)");
+    } else {
+        // Show current effective values
+        match WorkerConfig::load(&dir) {
+            Ok(cfg) => {
+                info(&format!("batch_size={}", cfg.batch_size));
+                info(&format!("timeout={}s", cfg.timeout.as_secs()));
+                info(&format!("poll_interval={}s", cfg.poll_interval.as_secs()));
+                info(&format!("work_label={}", cfg.work_label));
+                info(&format!("image={}", cfg.image));
+                info(&format!("auto_merge={}", cfg.auto_merge));
+                info(&format!(
+                    "doc_refresh_interval={}",
+                    cfg.doc_refresh_interval
+                ));
+                info(&format!("state_max_age_days={}", cfg.state_max_age_days));
+            }
+            Err(e) => {
+                err(&format!("Failed to load config: {e}"));
+            }
+        }
+        // Validate for warnings
+        match validate_config_file(&config_file) {
+            Ok(config_warnings) => {
+                if config_warnings.is_empty() {
+                    ok("Config file is valid");
+                } else {
+                    for cw in &config_warnings {
+                        warn(&cw.message());
+                    }
+                }
+            }
+            Err(e) => {
+                err(&format!("Failed to validate config: {e}"));
+            }
         }
     }
 
@@ -1225,9 +1351,14 @@ mod tests {
     fn parse_work_with_repos() {
         let cli = parse(&["sipag", "work", "Dorky-Robot/sipag", "other/repo"]);
         match cli.command {
-            Some(Commands::Work { repos, once }) => {
+            Some(Commands::Work {
+                repos,
+                once,
+                dry_run,
+            }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
+                assert!(!dry_run);
             }
             other => panic!("Expected Work, got {other:?}"),
         }
@@ -1238,6 +1369,18 @@ mod tests {
         let cli = parse(&["sipag", "work", "--once", "Dorky-Robot/sipag"]);
         match cli.command {
             Some(Commands::Work { once, .. }) => assert!(once),
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_dry_run() {
+        let cli = parse(&["sipag", "work", "--dry-run", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { dry_run, repos, .. }) => {
+                assert!(dry_run);
+                assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
+            }
             other => panic!("Expected Work, got {other:?}"),
         }
     }
