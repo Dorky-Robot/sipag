@@ -371,3 +371,31 @@ pub fn count_open_prs(repo: &str) -> Option<usize> {
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim().parse::<usize>().ok()
 }
+
+/// Count open PRs created by sipag (branches matching `sipag/*`).
+///
+/// Used for back-pressure: when the count reaches the configured `max_open_prs`
+/// threshold, new issue dispatch is paused until PRs are merged or closed.
+pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "headRefName",
+            "--jq",
+            r#"[.[] | select(.headRefName | startswith("sipag/"))] | length"#,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.trim().parse::<usize>().ok()
+}
