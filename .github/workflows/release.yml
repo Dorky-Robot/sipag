@@ -109,14 +109,19 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Compute SHA-256 for GitHub archive
-        id: archive
+      - name: Compute SHA-256 for release binaries
+        id: binaries
         run: |
           VERSION=${{ github.ref_name }}
-          ARCHIVE_URL="https://github.com/Dorky-Robot/sipag/archive/refs/tags/${VERSION}.tar.gz"
-          SHA256=$(curl -fsSL "$ARCHIVE_URL" | shasum -a 256 | cut -d' ' -f1)
-          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
-          echo "url=${ARCHIVE_URL}" >> "$GITHUB_OUTPUT"
+          BASE="https://github.com/Dorky-Robot/sipag/releases/download/${VERSION}"
+          ARM_URL="${BASE}/sipag-${VERSION}-aarch64-apple-darwin.tar.gz"
+          X86_URL="${BASE}/sipag-${VERSION}-x86_64-apple-darwin.tar.gz"
+          ARM_SHA=$(curl -fsSL "$ARM_URL" | shasum -a 256 | cut -d' ' -f1)
+          X86_SHA=$(curl -fsSL "$X86_URL" | shasum -a 256 | cut -d' ' -f1)
+          echo "arm_url=${ARM_URL}" >> "$GITHUB_OUTPUT"
+          echo "arm_sha=${ARM_SHA}" >> "$GITHUB_OUTPUT"
+          echo "x86_url=${X86_URL}" >> "$GITHUB_OUTPUT"
+          echo "x86_sha=${X86_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew tap
         uses: actions/checkout@v4
@@ -128,8 +133,10 @@ jobs:
       - name: Update formula with new version and hash
         env:
           VERSION: ${{ github.ref_name }}
-          ARCHIVE_SHA256: ${{ steps.archive.outputs.sha256 }}
-          ARCHIVE_URL: ${{ steps.archive.outputs.url }}
+          ARM_URL: ${{ steps.binaries.outputs.arm_url }}
+          ARM_SHA: ${{ steps.binaries.outputs.arm_sha }}
+          X86_URL: ${{ steps.binaries.outputs.x86_url }}
+          X86_SHA: ${{ steps.binaries.outputs.x86_sha }}
         run: |
           VERSION_CLEAN="${VERSION#v}"
           mkdir -p homebrew-tap/Formula
@@ -137,17 +144,25 @@ jobs:
             echo 'class Sipag < Formula'
             echo '  desc "Autonomous dev agent powered by Claude Code"'
             echo '  homepage "https://github.com/Dorky-Robot/sipag"'
-            echo "  url \"${ARCHIVE_URL}\""
-            echo "  sha256 \"${ARCHIVE_SHA256}\""
             echo "  version \"${VERSION_CLEAN}\""
             echo '  license "MIT"'
             echo ''
             echo '  depends_on "jq"'
             echo '  depends_on "gh"'
             echo ''
+            echo '  on_macos do'
+            echo '    if Hardware::CPU.arm?'
+            echo "      url \"${ARM_URL}\""
+            echo "      sha256 \"${ARM_SHA}\""
+            echo '    else'
+            echo "      url \"${X86_URL}\""
+            echo "      sha256 \"${X86_SHA}\""
+            echo '    end'
+            echo '  end'
+            echo ''
             echo '  def install'
-            echo '    prefix.install "bin", "lib"'
-            echo '    bin.install_symlink prefix/"bin/sipag"'
+            echo '    bin.install "sipag"'
+            echo '    lib.install Dir["lib/*"]'
             echo '  end'
             echo ''
             echo '  test do'
