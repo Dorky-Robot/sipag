@@ -68,6 +68,8 @@ pub struct WorkerConfig {
     pub timeout: Duration,
     /// Stop after one polling cycle (set via `--once` flag; not loaded from env or file).
     pub once: bool,
+    /// Override an existing per-repo lock (set via `--force` flag; not loaded from env or file).
+    pub force: bool,
     /// Automatically merge clean PRs (config file `auto_merge=true`; default false).
     pub auto_merge: bool,
     /// Polling cycles between documentation refresh runs (`SIPAG_DOC_REFRESH_INTERVAL`; default 10).
@@ -135,6 +137,7 @@ impl WorkerConfig {
             image: DEFAULT_IMAGE.to_string(),
             timeout: Duration::from_secs(1800),
             once: false,
+            force: false,
             auto_merge: false,
             doc_refresh_interval: 10,
             state_max_age_days: 7,

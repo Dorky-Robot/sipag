@@ -21,6 +21,7 @@ use super::github::{
     find_prs_needing_iteration, list_labeled_issues, reconcile_closed_prs, reconcile_merged_prs,
     reconcile_stale_in_progress,
 };
+use super::lock::WorkerLock;
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
 use super::status::WorkerStatus;
@@ -131,6 +132,18 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
     println!();
+
+    // ── Per-repo process locks ────────────────────────────────────────────────
+    // Prevent two `sipag work` instances from racing on the same repo.
+    // Locks are released automatically when the guards are dropped at function exit.
+    let mut locks: Vec<WorkerLock> = Vec::new();
+    for repo in repos {
+        match WorkerLock::acquire(sipag_dir, repo, cfg.force) {
+            Ok(lock) => locks.push(lock),
+            Err(e) => return Err(e),
+        }
+    }
+    // `locks` is kept alive until function exit; Drop releases each lock file.
 
     // ── Structured event log ─────────────────────────────────────────────────
     // Writes JSONL to ~/.sipag/logs/worker.log so a parent session can

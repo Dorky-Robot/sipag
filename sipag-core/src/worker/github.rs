@@ -156,19 +156,79 @@ pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
     Ok(None)
 }
 
-/// Transition labels on a GitHub issue.
+/// Label lifecycle order for idempotency checks.
+///
+/// Returns a numeric rank so callers can compare whether a label is "later"
+/// in the workflow than another.  Labels outside this set return `None`.
+///
+/// Order: `ready`/`approved` (0) → `in-progress` (1) → `needs-review` (2)
+fn label_lifecycle_rank(label: &str) -> Option<u8> {
+    match label {
+        "ready" | "approved" => Some(0),
+        "in-progress" => Some(1),
+        "needs-review" => Some(2),
+        _ => None,
+    }
+}
+
+/// Fetch the current label names for an issue.
+///
+/// Returns an empty vec on any error (e.g. issue closed, network error).
+fn get_current_labels(repo: &str, issue_num: u64) -> Vec<String> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "labels",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+            parsed["labels"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => vec![],
+    }
+}
+
+/// Transition labels on a GitHub issue — idempotent.
 ///
 /// Removes `remove` (if non-empty) then adds `add` (if non-empty).
-/// Ignores errors (e.g. label already absent or issue closed).
+/// Before each operation, checks the issue's current labels:
+///
+/// - If the label to remove is already absent, the remove is skipped.
+/// - If the label to add is already present, the add is skipped.
+/// - If the label to add is earlier in the workflow lifecycle than a label
+///   the issue already has (e.g. adding `in-progress` when `needs-review`
+///   is already set), the add is skipped to avoid regression.
+///
+/// Ignores errors (e.g. issue closed, network transients).
 pub fn transition_label(
     repo: &str,
     issue_num: u64,
     remove: Option<&str>,
     add: Option<&str>,
 ) -> Result<()> {
+    // Fetch current labels once for both checks.
+    let current = get_current_labels(repo, issue_num);
+
     let n = issue_num.to_string();
     if let Some(label) = remove {
-        if !label.is_empty() {
+        if !label.is_empty() && current.iter().any(|l| l == label) {
             let _ = Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--remove-label", label])
                 .stdout(Stdio::null())
@@ -177,12 +237,22 @@ pub fn transition_label(
         }
     }
     if let Some(label) = add {
-        if !label.is_empty() {
-            let _ = Command::new("gh")
-                .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        if !label.is_empty() && !current.iter().any(|l| l == label) {
+            // Skip if a later-lifecycle label is already present (prevent regression).
+            let add_rank = label_lifecycle_rank(label);
+            let has_later = add_rank.is_some_and(|rank| {
+                current
+                    .iter()
+                    .filter_map(|l| label_lifecycle_rank(l))
+                    .any(|existing_rank| existing_rank > rank)
+            });
+            if !has_later {
+                let _ = Command::new("gh")
+                    .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
     }
     Ok(())

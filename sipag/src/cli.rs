@@ -17,6 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: &str = env!("SIPAG_GIT_SHA");
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +49,10 @@ pub enum Commands {
         /// Preview which issues would be dispatched without starting any containers
         #[arg(long)]
         dry_run: bool,
+
+        /// Kill an existing sipag work process for the same repo and take over
+        #[arg(long)]
+        force: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -224,7 +229,8 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             once,
             dry_run,
-        }) => cmd_work(repos, once, dry_run),
+            force,
+        }) => cmd_work(repos, once, dry_run, force),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -257,7 +263,7 @@ pub fn run(cli: Cli) -> Result<()> {
         }) => triage::run_triage(&repo, dry_run, apply),
         Some(Commands::Completions { shell }) => cmd_completions(&shell),
         Some(Commands::Version) => {
-            println!("sipag {VERSION}");
+            println!("sipag {VERSION} ({GIT_SHA})");
             Ok(())
         }
         Some(Commands::Init) => cmd_init(),
@@ -303,12 +309,13 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
+fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool, force: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
     let mut cfg = WorkerConfig::load(&dir)?;
     cfg.once = once;
+    cfg.force = force;
 
     // Resolve repos list (needed by both dry-run and normal mode).
     if repos.is_empty() {
@@ -1308,6 +1315,7 @@ mod tests {
                 repos,
                 once,
                 dry_run,
+                ..
             }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);

@@ -19,6 +19,7 @@ pub(crate) mod decision;
 pub(crate) mod dispatch;
 pub(crate) mod event_log;
 pub(crate) mod github;
+pub(crate) mod lock;
 pub mod poll;
 pub(crate) mod ports;
 pub(crate) mod recovery;
