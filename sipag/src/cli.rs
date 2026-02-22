@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
-    config::WorkerConfig,
+    config::{validate_config_file_for_doctor, ConfigEntryStatus, WorkerConfig},
     executor::{self, RunConfig},
     init,
     prompt::{format_duration, generate_task_id},
@@ -9,7 +9,8 @@ use sipag_core::{
     task::{self, default_sipag_dir, FileTaskRepository, TaskId, TaskRepository, TaskStatus},
     triage,
     worker::{
-        format_worker_duration, list_workers, preflight_gh_auth, run_worker_loop, WorkerStatus,
+        format_worker_duration, list_workers, preflight_gh_auth, run_dry_run, run_worker_loop,
+        WorkerStatus,
     },
 };
 use std::fs;
@@ -43,6 +44,10 @@ pub enum Commands {
         /// Process one polling cycle and exit
         #[arg(long)]
         once: bool,
+
+        /// Preview which issues would be dispatched without starting any containers
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Signal workers to finish current batch and exit
@@ -215,7 +220,11 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Work { repos, once }) => cmd_work(repos, once),
+        Some(Commands::Work {
+            repos,
+            once,
+            dry_run,
+        }) => cmd_work(repos, once, dry_run),
         Some(Commands::Drain) => cmd_drain(),
         Some(Commands::Resume) => cmd_resume(),
         Some(Commands::Setup) => cmd_shell_script("setup", &[]),
@@ -294,14 +303,25 @@ fn sipag_dir() -> PathBuf {
 
 // ── New commands (previously bash-only) ──────────────────────────────────────
 
-fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
+fn cmd_work(mut repos: Vec<String>, once: bool, dry_run: bool) -> Result<()> {
     let dir = sipag_dir();
     init::init_dirs(&dir).ok();
 
     let mut cfg = WorkerConfig::load(&dir)?;
     cfg.once = once;
 
-    // Preflight checks.
+    // Resolve repos list (needed by both dry-run and normal mode).
+    if repos.is_empty() {
+        repos = resolve_repos(&dir)?;
+    }
+
+    // Dry-run: preview dispatch plan without starting containers.
+    if dry_run {
+        preflight_gh_auth()?;
+        return run_dry_run(&repos, &cfg);
+    }
+
+    // Normal mode: full preflight checks.
     sipag_core::auth::preflight_auth(&dir)?;
     sipag_core::docker::preflight_docker_running()?;
 
@@ -332,11 +352,6 @@ fn cmd_work(mut repos: Vec<String>, once: bool) -> Result<()> {
         println!("Warning: stale drain signal found. Clearing it and starting normally.");
         println!("Use 'sipag drain' to signal a graceful shutdown.");
         fs::remove_file(&drain_file).ok();
-    }
-
-    // Resolve repos list.
-    if repos.is_empty() {
-        repos = resolve_repos(&dir)?;
     }
 
     run_worker_loop(&repos, &dir, cfg)
@@ -539,6 +554,42 @@ fn cmd_doctor() -> Result<()> {
                 println!("        {p}");
             }
             println!("      To fix, run:  sipag setup\n");
+        }
+    }
+
+    // --- Config file ---
+    println!();
+    println!("Config ({}):", dir.join("config").display());
+
+    match validate_config_file_for_doctor(&dir) {
+        None => {
+            info("No config file found (using all defaults)");
+        }
+        Some(entries) if entries.is_empty() => {
+            info("Config file is empty (using all defaults)");
+        }
+        Some(entries) => {
+            for entry in &entries {
+                let display = format!("{}={}", entry.key, entry.value);
+                match &entry.status {
+                    ConfigEntryStatus::Valid => {
+                        ok(&display);
+                    }
+                    ConfigEntryStatus::InvalidValue { clamped_to } => {
+                        warn(&format!("{display}  — invalid value, using {clamped_to}"));
+                    }
+                    ConfigEntryStatus::Unknown {
+                        suggestion: Some(s),
+                    } => {
+                        warn(&format!(
+                            "unknown key \"{display}\" — did you mean \"{s}\"?"
+                        ));
+                    }
+                    ConfigEntryStatus::Unknown { suggestion: None } => {
+                        warn(&format!("unknown key \"{display}\""));
+                    }
+                }
+            }
         }
     }
 
@@ -1253,9 +1304,14 @@ mod tests {
     fn parse_work_with_repos() {
         let cli = parse(&["sipag", "work", "Dorky-Robot/sipag", "other/repo"]);
         match cli.command {
-            Some(Commands::Work { repos, once }) => {
+            Some(Commands::Work {
+                repos,
+                once,
+                dry_run,
+            }) => {
                 assert_eq!(repos, vec!["Dorky-Robot/sipag", "other/repo"]);
                 assert!(!once);
+                assert!(!dry_run);
             }
             other => panic!("Expected Work, got {other:?}"),
         }
@@ -1266,6 +1322,30 @@ mod tests {
         let cli = parse(&["sipag", "work", "--once", "Dorky-Robot/sipag"]);
         match cli.command {
             Some(Commands::Work { once, .. }) => assert!(once),
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_dry_run() {
+        let cli = parse(&["sipag", "work", "--dry-run", "Dorky-Robot/sipag"]);
+        match cli.command {
+            Some(Commands::Work { dry_run, repos, .. }) => {
+                assert!(dry_run);
+                assert_eq!(repos, vec!["Dorky-Robot/sipag"]);
+            }
+            other => panic!("Expected Work, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_work_dry_run_no_repo() {
+        let cli = parse(&["sipag", "work", "--dry-run"]);
+        match cli.command {
+            Some(Commands::Work { dry_run, repos, .. }) => {
+                assert!(dry_run);
+                assert!(repos.is_empty());
+            }
             other => panic!("Expected Work, got {other:?}"),
         }
     }

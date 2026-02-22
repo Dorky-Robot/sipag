@@ -790,8 +790,7 @@ fn run_worker_container(
         .iter()
         .find_map(|(k, v)| (*k == "ISSUE_NUM" || *k == "ISSUE_NUMS").then_some(*v))
     {
-        cmd.arg("--label")
-            .arg(format!("org.sipag.issues={issues}"));
+        cmd.arg("--label").arg(format!("org.sipag.issues={issues}"));
     }
 
     // Mount workers directory for state self-reporting.

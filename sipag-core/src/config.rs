@@ -24,10 +24,25 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::{env, fs};
 
+const BATCH_SIZE_MIN: usize = 1;
 const BATCH_SIZE_MAX: usize = 5;
+const TIMEOUT_MIN_SECS: u64 = 1;
+const POLL_INTERVAL_MIN_SECS: u64 = 1;
 
 /// Default Docker image for worker containers.
 pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
+
+/// All known keys in the `~/.sipag/config` file.
+const KNOWN_KEYS: &[&str] = &[
+    "batch_size",
+    "poll_interval",
+    "work_label",
+    "image",
+    "timeout",
+    "auto_merge",
+    "doc_refresh_interval",
+    "state_max_age_days",
+];
 
 /// Runtime configuration for the sipag worker.
 ///
@@ -36,7 +51,7 @@ pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 pub struct WorkerConfig {
     /// Base directory for sipag state (`~/.sipag` by default).
     pub sipag_dir: PathBuf,
-    /// Maximum issues to group into a single worker container (`SIPAG_BATCH_SIZE`, capped at 5; default 1).
+    /// Maximum issues to group into a single worker container (`SIPAG_BATCH_SIZE`, clamped to [1, 5]; default 1).
     /// When 1 (default), each issue gets its own container (legacy behavior).
     /// When > 1, multiple ready issues are dispatched to one container and Claude
     /// decides which to address together in a cohesive PR.
@@ -63,25 +78,44 @@ impl WorkerConfig {
     /// Load config from env vars, `~/.sipag/config` file, and hardcoded defaults.
     ///
     /// Resolution order: env var > config file > default.
+    ///
+    /// Prints warnings to stderr if any config values are invalid (e.g., `batch_size=0`).
     pub fn load(sipag_dir: &Path) -> Result<Self> {
-        Self::load_with_env(sipag_dir, |k| env::var(k).ok())
+        let (cfg, warnings) = Self::load_with_env_inner(sipag_dir, |k| env::var(k).ok())?;
+        for w in &warnings {
+            eprintln!("sipag warning: {w}");
+        }
+        Ok(cfg)
     }
 
+    #[cfg(test)]
     fn load_with_env(sipag_dir: &Path, get_env: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let (cfg, _warnings) = Self::load_with_env_inner(sipag_dir, get_env)?;
+        Ok(cfg)
+    }
+
+    fn load_with_env_inner(
+        sipag_dir: &Path,
+        get_env: impl Fn(&str) -> Option<String>,
+    ) -> Result<(Self, Vec<String>)> {
         let mut cfg = Self::defaults(sipag_dir);
+        let mut warnings: Vec<String> = Vec::new();
 
         // 1. Apply config file overrides
         let config_file = sipag_dir.join("config");
         if config_file.exists() {
             parse_config_file(&config_file, |key, value| {
-                cfg.apply_file_entry(key, value);
+                if let Some(w) = cfg.apply_file_entry(key, value) {
+                    warnings.push(w);
+                }
             })?;
         }
 
         // 2. Apply env var overrides (env wins over file)
-        cfg.apply_env_overrides(get_env);
+        let env_warnings = cfg.apply_env_overrides(get_env);
+        warnings.extend(env_warnings);
 
-        Ok(cfg)
+        Ok((cfg, warnings))
     }
 
     fn defaults(sipag_dir: &Path) -> Self {
@@ -99,21 +133,41 @@ impl WorkerConfig {
         }
     }
 
-    fn apply_file_entry(&mut self, key: &str, value: &str) {
+    /// Apply a single key=value entry from the config file, returning a warning string if the
+    /// value was invalid and was clamped to the minimum.
+    fn apply_file_entry(&mut self, key: &str, value: &str) -> Option<String> {
         match key {
             "batch_size" => {
                 if let Ok(n) = value.parse::<usize>() {
+                    if n < BATCH_SIZE_MIN {
+                        self.batch_size = BATCH_SIZE_MIN;
+                        return Some(format!(
+                            "config: batch_size={n} is invalid (minimum {BATCH_SIZE_MIN}); using {BATCH_SIZE_MIN}"
+                        ));
+                    }
                     self.batch_size = n.min(BATCH_SIZE_MAX);
                 }
             }
             "image" => self.image = value.to_string(),
             "timeout" => {
                 if let Ok(n) = value.parse::<u64>() {
+                    if n < TIMEOUT_MIN_SECS {
+                        self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
+                        return Some(format!(
+                            "config: timeout={n} is invalid (minimum {TIMEOUT_MIN_SECS}s); using {TIMEOUT_MIN_SECS}s"
+                        ));
+                    }
                     self.timeout = Duration::from_secs(n);
                 }
             }
             "poll_interval" => {
                 if let Ok(n) = value.parse::<u64>() {
+                    if n < POLL_INTERVAL_MIN_SECS {
+                        self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
+                        return Some(format!(
+                            "config: poll_interval={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}s); using {POLL_INTERVAL_MIN_SECS}s"
+                        ));
+                    }
                     self.poll_interval = Duration::from_secs(n);
                 }
             }
@@ -131,12 +185,22 @@ impl WorkerConfig {
             }
             _ => {}
         }
+        None
     }
 
-    fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) {
+    fn apply_env_overrides(&mut self, get_env: impl Fn(&str) -> Option<String>) -> Vec<String> {
+        let mut warnings = Vec::new();
+
         if let Some(v) = get_env("SIPAG_BATCH_SIZE") {
             if let Ok(n) = v.parse::<usize>() {
-                self.batch_size = n.min(BATCH_SIZE_MAX);
+                if n < BATCH_SIZE_MIN {
+                    self.batch_size = BATCH_SIZE_MIN;
+                    warnings.push(format!(
+                        "SIPAG_BATCH_SIZE={n} is invalid (minimum {BATCH_SIZE_MIN}); using {BATCH_SIZE_MIN}"
+                    ));
+                } else {
+                    self.batch_size = n.min(BATCH_SIZE_MAX);
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_IMAGE") {
@@ -144,12 +208,26 @@ impl WorkerConfig {
         }
         if let Some(v) = get_env("SIPAG_TIMEOUT") {
             if let Ok(n) = v.parse::<u64>() {
-                self.timeout = Duration::from_secs(n);
+                if n < TIMEOUT_MIN_SECS {
+                    self.timeout = Duration::from_secs(TIMEOUT_MIN_SECS);
+                    warnings.push(format!(
+                        "SIPAG_TIMEOUT={n} is invalid (minimum {TIMEOUT_MIN_SECS}s); using {TIMEOUT_MIN_SECS}s"
+                    ));
+                } else {
+                    self.timeout = Duration::from_secs(n);
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_POLL_INTERVAL") {
             if let Ok(n) = v.parse::<u64>() {
-                self.poll_interval = Duration::from_secs(n);
+                if n < POLL_INTERVAL_MIN_SECS {
+                    self.poll_interval = Duration::from_secs(POLL_INTERVAL_MIN_SECS);
+                    warnings.push(format!(
+                        "SIPAG_POLL_INTERVAL={n} is invalid (minimum {POLL_INTERVAL_MIN_SECS}s); using {POLL_INTERVAL_MIN_SECS}s"
+                    ));
+                } else {
+                    self.poll_interval = Duration::from_secs(n);
+                }
             }
         }
         if let Some(v) = get_env("SIPAG_WORK_LABEL") {
@@ -165,7 +243,137 @@ impl WorkerConfig {
                 self.state_max_age_days = n;
             }
         }
+
+        warnings
     }
+}
+
+// ── Config file validation for `sipag doctor` ─────────────────────────────────
+
+/// Validation status of a single config file entry.
+#[derive(Debug, PartialEq)]
+pub enum ConfigEntryStatus {
+    /// Key is known and value is valid.
+    Valid,
+    /// Key is known but value is out of range or unparseable; shows effective value.
+    InvalidValue { clamped_to: String },
+    /// Key is not recognized; may include a suggestion for a nearby known key.
+    Unknown { suggestion: Option<String> },
+}
+
+/// A single validated config file entry, for display by `sipag doctor`.
+#[derive(Debug)]
+pub struct ConfigFileEntry {
+    pub key: String,
+    pub value: String,
+    pub status: ConfigEntryStatus,
+}
+
+/// Parse and validate `~/.sipag/config`, returning entries for `sipag doctor` display.
+///
+/// Returns `None` if the config file does not exist.
+pub fn validate_config_file_for_doctor(sipag_dir: &Path) -> Option<Vec<ConfigFileEntry>> {
+    let path = sipag_dir.join("config");
+    if !path.exists() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    let _ = parse_config_file(&path, |key, value| {
+        let status = validate_entry_status(key, value);
+        entries.push(ConfigFileEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+            status,
+        });
+    });
+    Some(entries)
+}
+
+fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
+    match key {
+        "batch_size" => match value.parse::<usize>() {
+            Ok(n) if n < BATCH_SIZE_MIN => ConfigEntryStatus::InvalidValue {
+                clamped_to: BATCH_SIZE_MIN.to_string(),
+            },
+            Ok(n) if n > BATCH_SIZE_MAX => ConfigEntryStatus::InvalidValue {
+                clamped_to: BATCH_SIZE_MAX.to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: BATCH_SIZE_MIN.to_string(),
+            },
+        },
+        "timeout" => match value.parse::<u64>() {
+            Ok(n) if n < TIMEOUT_MIN_SECS => ConfigEntryStatus::InvalidValue {
+                clamped_to: TIMEOUT_MIN_SECS.to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "1800 (default)".to_string(),
+            },
+        },
+        "poll_interval" => match value.parse::<u64>() {
+            Ok(n) if n < POLL_INTERVAL_MIN_SECS => ConfigEntryStatus::InvalidValue {
+                clamped_to: POLL_INTERVAL_MIN_SECS.to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "120 (default)".to_string(),
+            },
+        },
+        "doc_refresh_interval" | "state_max_age_days" => match value.parse::<u64>() {
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "default".to_string(),
+            },
+        },
+        "image" | "work_label" => ConfigEntryStatus::Valid,
+        "auto_merge" => {
+            if value == "true" || value == "false" {
+                ConfigEntryStatus::Valid
+            } else {
+                ConfigEntryStatus::InvalidValue {
+                    clamped_to: "false (default)".to_string(),
+                }
+            }
+        }
+        _ => ConfigEntryStatus::Unknown {
+            suggestion: closest_known_key(key),
+        },
+    }
+}
+
+/// Return the closest known config key to `unknown`, if within edit distance 3.
+fn closest_known_key(unknown: &str) -> Option<String> {
+    KNOWN_KEYS
+        .iter()
+        .map(|k| (*k, levenshtein(unknown, k)))
+        .filter(|(_, d)| *d <= 3)
+        .min_by_key(|(_, d)| *d)
+        .map(|(k, _)| k.to_string())
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = b.len();
+    // 1-D rolling row: row[j] = edit distance for a[0..i] vs b[0..j].
+    let mut row: Vec<usize> = (0..=n).collect();
+    for (i, &ca) in a.iter().enumerate() {
+        let mut prev = i; // row[0] before this iteration = i
+        row[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let temp = row[j + 1];
+            row[j + 1] = if ca == cb {
+                prev
+            } else {
+                1 + prev.min(temp).min(row[j])
+            };
+            prev = temp;
+        }
+    }
+    row[n]
 }
 
 /// Credentials required by worker containers.
@@ -327,6 +535,24 @@ mod tests {
     }
 
     #[test]
+    fn worker_config_env_timeout_overrides_file_timeout() {
+        // Regression test for issue #329: SIPAG_TIMEOUT env must beat config file timeout.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=1800\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_TIMEOUT" {
+                Some("3600".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        // Env var (3600) must win over config file (1800).
+        assert_eq!(cfg.timeout, Duration::from_secs(3600));
+    }
+
+    #[test]
     fn worker_config_env_only() {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), |k| match k {
@@ -366,6 +592,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(cfg.batch_size, BATCH_SIZE_MAX);
+    }
+
+    #[test]
+    fn worker_config_batch_size_zero_clamped_to_min() {
+        // Issue #330: batch_size=0 must be clamped to 1, not silently break dispatch.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_batch_size_zero_env_clamped_to_min() {
+        let dir = TempDir::new().unwrap();
+        let cfg = WorkerConfig::load_with_env(dir.path(), |k| {
+            if k == "SIPAG_BATCH_SIZE" {
+                Some("0".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(cfg.batch_size, BATCH_SIZE_MIN);
+    }
+
+    #[test]
+    fn worker_config_timeout_zero_clamped_to_min() {
+        // Issue #330: timeout=0 must be clamped to 1s, not cause immediate container termination.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "timeout=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(TIMEOUT_MIN_SECS));
+    }
+
+    #[test]
+    fn worker_config_poll_interval_zero_clamped_to_min() {
+        // Issue #330: poll_interval=0 must be clamped to 1s to avoid a tight busy-loop.
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "poll_interval=0\n").unwrap();
+
+        let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
+        assert_eq!(
+            cfg.poll_interval,
+            Duration::from_secs(POLL_INTERVAL_MIN_SECS)
+        );
     }
 
     #[test]
@@ -448,6 +721,96 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = WorkerConfig::load_with_env(dir.path(), no_env).unwrap();
         assert_eq!(cfg.sipag_dir, dir.path());
+    }
+
+    // ── validate_config_file_for_doctor tests ─────────────────────────────
+
+    #[test]
+    fn doctor_no_config_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(validate_config_file_for_doctor(dir.path()).is_none());
+    }
+
+    #[test]
+    fn doctor_valid_config_entries() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config"),
+            "batch_size=3\ntimeout=900\nwork_label=approved\n",
+        )
+        .unwrap();
+
+        let entries = validate_config_file_for_doctor(dir.path()).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].key, "batch_size");
+        assert_eq!(entries[0].status, ConfigEntryStatus::Valid);
+        assert_eq!(entries[1].key, "timeout");
+        assert_eq!(entries[1].status, ConfigEntryStatus::Valid);
+        assert_eq!(entries[2].key, "work_label");
+        assert_eq!(entries[2].status, ConfigEntryStatus::Valid);
+    }
+
+    #[test]
+    fn doctor_invalid_batch_size_zero() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "batch_size=0\n").unwrap();
+
+        let entries = validate_config_file_for_doctor(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(
+            entries[0].status,
+            ConfigEntryStatus::InvalidValue { .. }
+        ));
+    }
+
+    #[test]
+    fn doctor_unknown_key_with_suggestion() {
+        let dir = TempDir::new().unwrap();
+        // "bathc_size" is a typo of "batch_size"
+        fs::write(dir.path().join("config"), "bathc_size=4\n").unwrap();
+
+        let entries = validate_config_file_for_doctor(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0].status {
+            ConfigEntryStatus::Unknown { suggestion } => {
+                assert_eq!(suggestion.as_deref(), Some("batch_size"));
+            }
+            other => panic!("Expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_unknown_key_no_suggestion_for_gibberish() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config"), "zzzzzzzzz=1\n").unwrap();
+
+        let entries = validate_config_file_for_doctor(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        match &entries[0].status {
+            ConfigEntryStatus::Unknown { suggestion } => {
+                assert!(suggestion.is_none());
+            }
+            other => panic!("Expected Unknown, got {other:?}"),
+        }
+    }
+
+    // ── levenshtein tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn levenshtein_same_string_is_zero() {
+        assert_eq!(levenshtein("batch_size", "batch_size"), 0);
+    }
+
+    #[test]
+    fn levenshtein_one_typo() {
+        assert_eq!(levenshtein("bathc_size", "batch_size"), 2);
+    }
+
+    #[test]
+    fn levenshtein_empty_strings() {
+        assert_eq!(levenshtein("", ""), 0);
+        assert_eq!(levenshtein("abc", ""), 3);
+        assert_eq!(levenshtein("", "abc"), 3);
     }
 
     // ── Credentials tests ─────────────────────────────────────────────────
