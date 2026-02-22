@@ -156,10 +156,15 @@ pub fn find_pr_for_branch(repo: &str, branch: &str) -> Result<Option<PrInfo>> {
     Ok(None)
 }
 
-/// Transition labels on a GitHub issue.
+/// Transition labels on a GitHub issue — idempotent and lifecycle-aware.
 ///
-/// Removes `remove` (if non-empty) then adds `add` (if non-empty).
-/// Ignores errors (e.g. label already absent or issue closed).
+/// Removes `remove` (if present on the issue) then adds `add` (if not already
+/// present and not a lifecycle regression).
+///
+/// Lifecycle ordering: `approved` < `in-progress` < `needs-review`.
+/// Adding a label at a lower lifecycle level than one already present on the
+/// issue (after accounting for the remove) is a no-op, preventing races where
+/// a stale worker adds `in-progress` to an issue already at `needs-review`.
 pub fn transition_label(
     repo: &str,
     issue_num: u64,
@@ -167,8 +172,12 @@ pub fn transition_label(
     add: Option<&str>,
 ) -> Result<()> {
     let n = issue_num.to_string();
+
+    // Fetch current labels once for idempotency checks.
+    let current_labels = get_current_labels(repo, issue_num);
+
     if let Some(label) = remove {
-        if !label.is_empty() {
+        if !label.is_empty() && current_labels.iter().any(|l| l == label) {
             let _ = Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--remove-label", label])
                 .stdout(Stdio::null())
@@ -176,16 +185,86 @@ pub fn transition_label(
                 .status();
         }
     }
+
     if let Some(label) = add {
-        if !label.is_empty() {
-            let _ = Command::new("gh")
-                .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+        if !label.is_empty() && !current_labels.iter().any(|l| l == label) {
+            // Compute effective labels after the remove, then check lifecycle ordering.
+            let effective: Vec<&str> = current_labels
+                .iter()
+                .filter(|l| remove.map_or(true, |r| l.as_str() != r))
+                .map(|l| l.as_str())
+                .collect();
+
+            if !is_lifecycle_regression(label, &effective) {
+                let _ = Command::new("gh")
+                    .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
     }
+
     Ok(())
+}
+
+/// Fetch the current label names for a GitHub issue.
+///
+/// Returns an empty vec on failure (network error, issue not found, etc.).
+fn get_current_labels(repo: &str, issue_num: u64) -> Vec<String> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "view",
+            &issue_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "labels",
+        ])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+            parsed["labels"]
+                .as_array()
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(|l| l["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => vec![],
+    }
+}
+
+/// Return true if adding `label` would be a lifecycle regression given the
+/// `effective_labels` already on the issue.
+///
+/// Lifecycle order: `approved` (0) < `in-progress` (1) < `needs-review` (2).
+/// Adding a label at level N when a label at level > N is already present is
+/// a regression and should be skipped.
+fn is_lifecycle_regression(label: &str, effective_labels: &[&str]) -> bool {
+    const LIFECYCLE: &[&str] = &["approved", "in-progress", "needs-review"];
+
+    let add_level = match LIFECYCLE.iter().position(|&l| l == label) {
+        Some(pos) => pos,
+        None => return false, // Not a lifecycle label — never a regression.
+    };
+
+    let current_max = LIFECYCLE
+        .iter()
+        .enumerate()
+        .filter(|(_, &l)| effective_labels.contains(&l))
+        .map(|(i, _)| i)
+        .max();
+
+    matches!(current_max, Some(max) if add_level < max)
 }
 
 /// Find open PRs that need another worker pass.
@@ -640,4 +719,80 @@ pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim().parse::<usize>().ok()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── is_lifecycle_regression ───────────────────────────────────────────────
+
+    #[test]
+    fn regression_in_progress_when_needs_review_present() {
+        // The bug scenario: new worker tries to add in-progress, but issue
+        // already has needs-review from a prior completed worker.
+        assert!(is_lifecycle_regression(
+            "in-progress",
+            &["needs-review"]
+        ));
+    }
+
+    #[test]
+    fn regression_approved_when_in_progress_present() {
+        assert!(is_lifecycle_regression("approved", &["in-progress"]));
+    }
+
+    #[test]
+    fn regression_approved_when_needs_review_present() {
+        assert!(is_lifecycle_regression("approved", &["needs-review"]));
+    }
+
+    #[test]
+    fn no_regression_needs_review_when_in_progress_present() {
+        // Advancing forward is never a regression.
+        assert!(!is_lifecycle_regression(
+            "needs-review",
+            &["in-progress"]
+        ));
+    }
+
+    #[test]
+    fn no_regression_in_progress_when_only_approved_present() {
+        assert!(!is_lifecycle_regression("in-progress", &["approved"]));
+    }
+
+    #[test]
+    fn no_regression_when_no_lifecycle_labels_present() {
+        // Empty effective labels: no regression possible.
+        assert!(!is_lifecycle_regression("in-progress", &[]));
+        assert!(!is_lifecycle_regression("approved", &[]));
+        assert!(!is_lifecycle_regression("needs-review", &[]));
+    }
+
+    #[test]
+    fn no_regression_for_non_lifecycle_label() {
+        // Custom labels are never considered lifecycle labels.
+        assert!(!is_lifecycle_regression("custom-label", &["needs-review"]));
+        assert!(!is_lifecycle_regression("triaged", &["needs-review"]));
+    }
+
+    #[test]
+    fn no_regression_when_same_level_already_present() {
+        // The idempotency check (already present) is handled before lifecycle check,
+        // but if it weren't, same-level should not be a regression.
+        assert!(!is_lifecycle_regression(
+            "in-progress",
+            &["in-progress"]
+        ));
+    }
+
+    #[test]
+    fn regression_considers_effective_labels_after_remove() {
+        // After removing needs-review, adding approved is not a regression.
+        // (Simulates reconcile_closed_prs: remove needs-review, add work_label)
+        // effective_labels = [] (needs-review removed)
+        assert!(!is_lifecycle_regression("approved", &[]));
+    }
 }
