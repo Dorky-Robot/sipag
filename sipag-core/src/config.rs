@@ -274,7 +274,7 @@ impl WorkerConfig {
 pub enum ConfigEntryStatus {
     /// Key is known and value is valid.
     Valid,
-    /// Key is known but value is out of range or unparseable; shows effective value.
+    /// Key is known but value is out of range or unparsable; shows effective value.
     InvalidValue { clamped_to: String },
     /// Key is not recognized; may include a suggestion for a nearby known key.
     Unknown { suggestion: Option<String> },

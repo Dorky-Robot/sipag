@@ -44,7 +44,7 @@ impl GitHubGateway for GhGateway {
 /// List open issues with the given label, sorted by number ascending.
 ///
 /// If `label` is empty, returns all open issues.
-pub fn list_approved_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
+pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
     let mut args = vec![
         "issue", "list", "--repo", repo, "--state", "open", "--json", "number", "--limit", "100",
     ];
@@ -300,12 +300,111 @@ pub fn reconcile_merged_prs(repo: &str) -> Result<()> {
     Ok(())
 }
 
+/// Revert labels on issues whose worker PRs were closed without merging.
+///
+/// Examines issues labeled `needs-review` and checks whether their associated
+/// PR (searched by "closes #N" in body) is closed (not merged) with no open
+/// replacement. If so, reverts the label to `work_label` so the issue can be
+/// re-dispatched.
+pub fn reconcile_closed_prs(repo: &str, work_label: &str) -> Result<()> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--label",
+            "needs-review",
+            "--json",
+            "number",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .context("Failed to list needs-review issues")?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let issue_num = match item["number"].as_u64() {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Check for an open PR that closes this issue — if one exists, leave it alone.
+            let search = format!("closes #{issue_num}");
+            let open_out = Command::new("gh")
+                .args([
+                    "pr", "list", "--repo", repo, "--state", "open", "--search", &search, "--json",
+                    "number", "--limit", "1",
+                ])
+                .output();
+
+            if let Ok(o) = &open_out {
+                let pr_text = String::from_utf8_lossy(&o.stdout);
+                let pr_parsed: serde_json::Value =
+                    serde_json::from_str(&pr_text).unwrap_or(serde_json::json!([]));
+                if pr_parsed.as_array().is_some_and(|a| !a.is_empty()) {
+                    continue; // Open PR exists — needs-review is correct.
+                }
+            }
+
+            // Check for a closed (not merged) PR.
+            let closed_out = Command::new("gh")
+                .args([
+                    "pr",
+                    "list",
+                    "--repo",
+                    repo,
+                    "--state",
+                    "closed",
+                    "--search",
+                    &search,
+                    "--json",
+                    "number,mergedAt",
+                    "--limit",
+                    "1",
+                ])
+                .output();
+
+            if let Ok(o) = closed_out {
+                let pr_text = String::from_utf8_lossy(&o.stdout);
+                let pr_parsed: serde_json::Value =
+                    serde_json::from_str(&pr_text).unwrap_or(serde_json::json!([]));
+                if let Some(first) = pr_parsed.as_array().and_then(|a| a.first()) {
+                    // Only revert if the PR was closed WITHOUT merging.
+                    let was_merged = first["mergedAt"].as_str().is_some_and(|s| !s.is_empty());
+                    if !was_merged {
+                        let _ = transition_label(
+                            repo,
+                            issue_num,
+                            Some("needs-review"),
+                            Some(work_label),
+                        );
+                        println!("[reconcile] #{issue_num}: reverted to {work_label} (PR closed without merge)");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Find open PRs with merge conflicts (mergeableState == "CONFLICTING").
 ///
 /// Mirrors `lib/worker/github.sh::worker_find_conflicted_prs`.
 pub fn find_conflicted_prs(repo: &str) -> Vec<u64> {
     let jq_filter = r#".[] | select(
-        (.headRefName | startswith("sipag/issue-")) and
+        ((.headRefName | startswith("sipag/issue-")) or (.headRefName | startswith("sipag/group-"))) and
         .mergeable == "CONFLICTING" and
         .isDraft == false
     ) | .number"#;

@@ -17,7 +17,7 @@ use super::dispatch::{
 };
 use super::github::{
     count_open_issues, count_open_prs, count_open_sipag_prs, find_conflicted_prs,
-    find_prs_needing_iteration, list_approved_issues, reconcile_merged_prs,
+    find_prs_needing_iteration, list_labeled_issues, reconcile_closed_prs, reconcile_merged_prs,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -34,10 +34,13 @@ pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
     println!("sipag work --dry-run");
     println!("Label:      {}", cfg.work_label);
     println!("Batch size: {}", cfg.batch_size);
+    if cfg.max_open_prs > 0 {
+        println!("Max open PRs: {}", cfg.max_open_prs);
+    }
     println!();
 
     for repo in repos {
-        let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+        let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
 
         if all_issues.is_empty() {
             println!("[{}] No ready issues.", repo);
@@ -78,6 +81,26 @@ pub fn run_dry_run(repos: &[String], cfg: &WorkerConfig) -> Result<()> {
             println!("Would dispatch {} container(s):", all_issues.len());
             for issue_num in &all_issues {
                 println!("  Issue #{issue_num} → sipag/issue-{issue_num}-<slug>");
+            }
+        }
+        println!();
+    }
+
+    // Show back-pressure status across all repos.
+    if cfg.max_open_prs > 0 {
+        for repo in repos {
+            if let Some(open) = count_open_sipag_prs(repo) {
+                if open >= cfg.max_open_prs {
+                    println!(
+                        "Back-pressure: {}/{} open sipag PRs in {} \u{2014} dispatch would be PAUSED.",
+                        open, cfg.max_open_prs, repo
+                    );
+                } else {
+                    println!(
+                        "Back-pressure: {}/{} open sipag PRs in {} \u{2014} dispatch OK.",
+                        open, cfg.max_open_prs, repo
+                    );
+                }
             }
         }
         println!();
@@ -196,10 +219,12 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
         kicked = false; // consumed — next kick will set it again
 
         let mut found_work = false;
+        let mut dispatch_paused_any = false;
 
         for repo in repos {
             // ── Per-repo: reconcile + dispatch ──────────────────────────────
             let _ = reconcile_merged_prs(repo);
+            let _ = reconcile_closed_prs(repo, &cfg.work_label);
 
             // ── Conflict fixes ───────────────────────────────────────────────
             let conflicted = find_conflicted_prs(repo);
@@ -240,7 +265,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             }
 
             // ── Approved issues ──────────────────────────────────────────────
-            let all_issues = list_approved_issues(repo, &cfg.work_label).unwrap_or_default();
+            let all_issues = list_labeled_issues(repo, &cfg.work_label).unwrap_or_default();
 
             let mut new_issues: Vec<u64> = Vec::new();
             for issue_num in &all_issues {
@@ -370,6 +395,10 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                         .unwrap_or(false)
                 };
 
+                if dispatch_paused {
+                    dispatch_paused_any = true;
+                }
+
                 if !dispatch_paused {
                     println!(
                         "[{}] {} new issue(s): {:?}",
@@ -431,7 +460,12 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
 
         if cfg.once {
             if !found_work {
-                println!("[{}] --once: no work found — exiting.", hms());
+                println!("[{}] --once: no work found \u{2014} exiting.", hms());
+            } else if dispatch_paused_any {
+                println!(
+                    "[{}] --once: issues found but dispatch paused (back-pressure). Review and merge open PRs, then re-run.",
+                    hms()
+                );
             } else {
                 println!("[{}] --once: cycle complete, exiting.", hms());
             }
