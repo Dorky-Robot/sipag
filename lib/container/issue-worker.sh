@@ -21,7 +21,7 @@ ALL_ISSUES="${ISSUE_NUMS:-${ISSUE_NUM:-}}"
 # Checks current labels before modifying:
 #   - Only removes a label if it is currently present (no-op otherwise).
 #   - Only adds a label if it is not already present.
-#   - Lifecycle ordering (approved < in-progress < needs-review): adding a label
+#   - Lifecycle ordering (ready < in-progress < needs-review): adding a label
 #     that would regress the issue (e.g. in-progress when needs-review is present)
 #     is silently skipped, even after accounting for the removal.
 transition_label_one() {
@@ -47,7 +47,7 @@ transition_label_one() {
         fi
 
         # Compute effective labels after the remove, then check lifecycle regression.
-        # Lifecycle: approved (0) < in-progress (1) < needs-review (2).
+        # Lifecycle: ready (0) < in-progress (1) < needs-review (2).
         local effective_labels="$current_labels"
         if [[ -n "$remove" ]]; then
             effective_labels=$(echo "$current_labels" | grep -vx "$remove" 2>/dev/null || true)
@@ -60,7 +60,7 @@ transition_label_one() {
                 echo "[sipag] Skipping: cannot add 'in-progress' to #$issue (already at 'needs-review')" >&2
                 should_add=false
             fi
-        elif [[ "$add" == "approved" || "$add" == "${WORK_LABEL:-ready}" ]]; then
+        elif [[ "$add" == "${WORK_LABEL:-ready}" ]]; then
             # Don't regress from in-progress or needs-review → work label.
             if echo "$effective_labels" | grep -qx "needs-review" 2>/dev/null || \
                echo "$effective_labels" | grep -qx "in-progress" 2>/dev/null; then

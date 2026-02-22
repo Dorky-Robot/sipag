@@ -7,4 +7,8 @@
 patterns = [
     "sipag (work|start|merge|setup|doctor|ps|logs|status|version|help)",
     "^tail ",
+    "^chmod [+][rwx]+ ",
+    "^(./)?scripts/release.sh",
+    "^make (install-hooks|fmt-check)",
+    "^cargo (check|deny|machete)",
 ]

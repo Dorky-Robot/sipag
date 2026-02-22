@@ -8,6 +8,7 @@
 //! This is best-effort — if all agents fail or `claude` is unavailable,
 //! dispatch proceeds without a plan (current behavior).
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
@@ -204,21 +205,51 @@ fn build_synthesis_prompt(proposals: &[(&str, String)]) -> String {
 
 /// Run `claude --print` with the given prompt, returning stdout on success.
 ///
+/// Pipes the prompt via stdin to avoid OS argument size limits (E2BIG).
 /// Returns `None` on any failure (missing binary, non-zero exit, timeout, etc.).
 fn run_claude_print(prompt: &str) -> Option<String> {
-    let output = Command::new("claude")
-        .args(["--print", "-p", prompt])
+    let mut child = match Command::new("claude")
+        .args(["--print"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[brainstorm] Failed to spawn claude: {e}");
+            return None;
+        }
+    };
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+            eprintln!("[brainstorm] Failed to write prompt to stdin: {e}");
+            return None;
+        }
+    }
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[brainstorm] Failed to wait for claude: {e}");
+            return None;
+        }
+    };
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!(
+            "[brainstorm] claude exited with status {}: {}",
+            output.status.code().unwrap_or(-1),
+            stderr.trim()
+        );
         return None;
     }
 
     let text = String::from_utf8(output.stdout).ok()?;
     if text.trim().is_empty() {
+        eprintln!("[brainstorm] claude returned empty output");
         return None;
     }
 

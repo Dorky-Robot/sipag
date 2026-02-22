@@ -96,7 +96,7 @@ Rust binary. The `sipag work` command is fully implemented in Rust.
 
 ### Worker label gate
 
-Workers only pick up issues labeled **`approved`** (configurable via `SIPAG_WORK_LABEL` env var or `work_label=` in `~/.sipag/config`). Issues in flight get the `in-progress` label; on failure they return to `approved`.
+Workers only pick up issues labeled **`ready`** (configurable via `SIPAG_WORK_LABEL` env var or `work_label=` in `~/.sipag/config`). Issues in flight get the `in-progress` label; on failure they return to `ready`.
 
 Priority labels: P0–P3 (convention, not enforced by sipag).
 
@@ -133,7 +133,7 @@ changes must happen through PRs built inside Docker workers. This is a hard rule
 ### How changes get made
 1. Identify the need in conversation
 2. Create or update a GitHub issue describing the change
-3. Label the issue `approved`
+3. Label the issue `ready`
 4. `sipag work` dispatches a Docker worker that implements and opens a PR
 5. Review the PR via `gh pr diff` / `gh pr review`
 6. Merge via `gh pr merge`
@@ -144,7 +144,7 @@ This applies to all repos sipag manages, including sipag itself.
 
 ### Use sipag to manage its own backlog
 
-sipag manages its own development — Claude Code sessions for sipag issues are dispatched via `sipag work Dorky-Robot/sipag`. So when working on sipag: label an issue `approved` and the worker will pick it up.
+sipag manages its own development — Claude Code sessions for sipag issues are dispatched via `sipag work Dorky-Robot/sipag`. So when working on sipag: label an issue `ready` and the worker will pick it up.
 
 For interactive sessions: open a terminal, run `sipag`, and use the TUI to inspect queue state.
 

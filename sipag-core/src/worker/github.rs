@@ -332,11 +332,11 @@ fn get_current_labels(repo: &str, issue_num: u64) -> Vec<String> {
 /// Return true if adding `label` would be a lifecycle regression given the
 /// `effective_labels` already on the issue.
 ///
-/// Lifecycle order: `approved` (0) < `in-progress` (1) < `needs-review` (2).
+/// Lifecycle order: `ready` (0) < `in-progress` (1) < `needs-review` (2).
 /// Adding a label at level N when a label at level > N is already present is
 /// a regression and should be skipped.
 fn is_lifecycle_regression(label: &str, effective_labels: &[&str]) -> bool {
-    const LIFECYCLE: &[&str] = &["approved", "in-progress", "needs-review"];
+    const LIFECYCLE: &[&str] = &["ready", "in-progress", "needs-review"];
 
     let add_level = match LIFECYCLE.iter().position(|&l| l == label) {
         Some(pos) => pos,
@@ -823,13 +823,13 @@ mod tests {
     }
 
     #[test]
-    fn regression_approved_when_in_progress_present() {
-        assert!(is_lifecycle_regression("approved", &["in-progress"]));
+    fn regression_ready_when_in_progress_present() {
+        assert!(is_lifecycle_regression("ready", &["in-progress"]));
     }
 
     #[test]
-    fn regression_approved_when_needs_review_present() {
-        assert!(is_lifecycle_regression("approved", &["needs-review"]));
+    fn regression_ready_when_needs_review_present() {
+        assert!(is_lifecycle_regression("ready", &["needs-review"]));
     }
 
     #[test]
@@ -839,15 +839,15 @@ mod tests {
     }
 
     #[test]
-    fn no_regression_in_progress_when_only_approved_present() {
-        assert!(!is_lifecycle_regression("in-progress", &["approved"]));
+    fn no_regression_in_progress_when_only_ready_present() {
+        assert!(!is_lifecycle_regression("in-progress", &["ready"]));
     }
 
     #[test]
     fn no_regression_when_no_lifecycle_labels_present() {
         // Empty effective labels: no regression possible.
         assert!(!is_lifecycle_regression("in-progress", &[]));
-        assert!(!is_lifecycle_regression("approved", &[]));
+        assert!(!is_lifecycle_regression("ready", &[]));
         assert!(!is_lifecycle_regression("needs-review", &[]));
     }
 
@@ -867,9 +867,9 @@ mod tests {
 
     #[test]
     fn regression_considers_effective_labels_after_remove() {
-        // After removing needs-review, adding approved is not a regression.
+        // After removing needs-review, adding ready is not a regression.
         // (Simulates reconcile_closed_prs: remove needs-review, add work_label)
         // effective_labels = [] (needs-review removed)
-        assert!(!is_lifecycle_regression("approved", &[]));
+        assert!(!is_lifecycle_regression("ready", &[]));
     }
 }

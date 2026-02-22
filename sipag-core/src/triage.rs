@@ -311,13 +311,26 @@ pub fn build_triage_prompt(
 }
 
 /// Run `claude --print` with the given prompt, capture stdout.
+///
+/// Pipes the prompt via stdin to avoid OS argument size limits (E2BIG).
 fn run_claude_capture(prompt: &str) -> Result<String> {
-    let output = Command::new("claude")
-        .args(["--print", "--dangerously-skip-permissions", "-p", prompt])
+    let mut child = Command::new("claude")
+        .args(["--print", "--dangerously-skip-permissions"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output()
+        .spawn()
         .context("Failed to run `claude`. Is it installed and in PATH?")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .context("Failed to write prompt to claude stdin")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("Failed to wait for claude process")?;
 
     if !output.status.success() {
         bail!(
