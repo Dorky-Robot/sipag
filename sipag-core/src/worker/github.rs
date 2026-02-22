@@ -443,12 +443,25 @@ pub fn find_conflicted_prs(repo: &str) -> Vec<u64> {
 /// This catches both single-issue workers (`sipag/issue-N-*`) and grouped
 /// workers (`sipag/group-*`) that have already addressed an issue, so that
 /// the dispatch loop does not create duplicate PRs.
+///
+/// Post-filters results by fetching the PR body and confirming an exact match,
+/// because `gh pr list --search "closes #34"` can also match `closes #344`.
 pub fn find_open_pr_for_issue(repo: &str, issue_num: u64) -> Option<PrInfo> {
     let search = format!("closes #{issue_num}");
     let output = Command::new("gh")
         .args([
-            "pr", "list", "--repo", repo, "--state", "open", "--search", &search, "--json",
-            "number,url", "--limit", "1",
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--search",
+            &search,
+            "--json",
+            "number,url,body",
+            "--limit",
+            "5",
         ])
         .output()
         .ok()?;
@@ -460,11 +473,34 @@ pub fn find_open_pr_for_issue(repo: &str, issue_num: u64) -> Option<PrInfo> {
     let text = String::from_utf8_lossy(&output.stdout);
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
 
-    if let Some(first) = parsed.as_array().and_then(|a| a.first()) {
-        let number = first["number"].as_u64().unwrap_or(0);
-        let url = first["url"].as_str().unwrap_or("").to_string();
-        if number > 0 {
-            return Some(PrInfo { number, url });
+    // Post-filter: confirm the PR body contains an exact "closes #N" (not #N0, #N00, etc.).
+    let pattern = format!("#{issue_num}");
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let url = item["url"].as_str().unwrap_or("").to_string();
+            let body = item["body"].as_str().unwrap_or("");
+            if number == 0 {
+                continue;
+            }
+            // Check that the body contains "closes #N" where N is followed by a
+            // non-digit (word boundary) or end of string.
+            let lower_body = body.to_lowercase();
+            for keyword in &["closes ", "fixes ", "resolves "] {
+                let mut search_from = 0;
+                while let Some(pos) = lower_body[search_from..].find(keyword) {
+                    let abs_pos = search_from + pos + keyword.len();
+                    let rest = &body[abs_pos..];
+                    if rest.starts_with(&pattern) {
+                        let after = &rest[pattern.len()..];
+                        // Ensure the next char is not a digit (exact match).
+                        if after.is_empty() || !after.starts_with(|c: char| c.is_ascii_digit()) {
+                            return Some(PrInfo { number, url });
+                        }
+                    }
+                    search_from = abs_pos;
+                }
+            }
         }
     }
     None
@@ -528,6 +564,54 @@ pub fn count_open_prs(repo: &str) -> Option<usize> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim().parse::<usize>().ok()
+}
+
+/// Reconcile in-progress issues that have no running container.
+///
+/// When sipag crashes or a container fails before the cleanup handler runs,
+/// issues can get stuck with the `in-progress` label and no active worker.
+/// This function checks each in-progress issue against running Docker containers
+/// (via worker state files) and reverts orphaned issues back to `work_label`.
+pub fn reconcile_stale_in_progress(
+    repo: &str,
+    work_label: &str,
+    is_container_running: impl Fn(&str) -> bool,
+    load_worker_state: impl Fn(&str, u64) -> Option<(String, String)>, // -> (container_name, status)
+) -> Result<()> {
+    let in_progress = list_labeled_issues(repo, "in-progress").unwrap_or_default();
+    if in_progress.is_empty() {
+        return Ok(());
+    }
+
+    for issue_num in &in_progress {
+        // Check if we have a state file for this issue.
+        if let Some((container_name, status)) = load_worker_state(repo, *issue_num) {
+            if status == "running" {
+                // State says running — check if Docker container is actually alive.
+                if is_container_running(&container_name) {
+                    continue; // Container is alive, in-progress is correct.
+                }
+                // Container is dead but state says running — stale.
+                println!(
+                    "[reconcile] #{issue_num}: container {container_name} not running, reverting to {work_label}"
+                );
+            } else if status == "done" || status == "failed" {
+                // State is terminal but label is still in-progress — stale.
+                println!(
+                    "[reconcile] #{issue_num}: worker state is {status}, reverting to {work_label}"
+                );
+            } else {
+                continue; // enqueued or unknown — leave it alone.
+            }
+        } else {
+            // No state file at all — sipag crashed before writing one.
+            println!("[reconcile] #{issue_num}: no worker state found, reverting to {work_label}");
+        }
+
+        let _ = transition_label(repo, *issue_num, Some("in-progress"), Some(work_label));
+    }
+
+    Ok(())
 }
 
 /// Count open PRs created by sipag (branches matching `sipag/*`).

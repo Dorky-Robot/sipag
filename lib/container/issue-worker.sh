@@ -42,6 +42,15 @@ git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}
 sipag-state phase "creating branch" || true
 
 git checkout -b "$BRANCH"
+
+# Clean up stale remote branch from a previous cycle (e.g. closed PR).
+# Without this, git push fails with "non-fast-forward" when the branch name
+# is deterministic and a previous cycle used the same name.
+if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+    echo "[sipag] Deleting stale remote branch: $BRANCH"
+    git push origin --delete "$BRANCH" 2>/dev/null || true
+fi
+
 git push -u origin "$BRANCH"
 
 sipag-state phase "opening draft PR" || true

@@ -141,6 +141,7 @@ impl EventLog {
     }
 
     /// Emit an `error` event for non-fatal errors.
+    #[allow(dead_code)]
     pub fn error(&self, repo: &str, message: &str) {
         self.emit(json!({
             "event": "error",

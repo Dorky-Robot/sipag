@@ -46,4 +46,27 @@ You have been given multiple related issues to address. Read them all before sta
    - Commit with a clear message explaining the unified approach
    - Push to origin
 
+9. **Update the PR description.** After pushing, update the PR body with a structured summary using `gh pr edit <branch> --repo <repo> --body <body>`. The description must include:
+   - **Cluster name**: The dominant concern addressed (e.g., "This PR addresses the worker lifecycle cluster")
+   - **Per-issue summary**: For each issue addressed, a 1-2 sentence explanation of what was done
+   - **Issues NOT addressed**: List any issues from the batch that were skipped and why
+   - **Test plan**: How the changes were validated
+   - Keep `Closes #N` lines at the top for issues fully resolved
+
+   Example format:
+   ```
+   Closes #101
+   Closes #103
+
+   ## Cluster: error handling
+
+   - **#101** — Added retry logic to API calls with exponential backoff
+   - **#103** — Unified error messages to use structured format with error codes
+   - **#102** — Not addressed (config concern, better suited for a dedicated config PR)
+
+   ## Test plan
+   - `make dev` passes (fmt + clippy + all tests)
+   - Manual test: API timeout triggers retry and succeeds on second attempt
+   ```
+
 The PR will be marked ready for review automatically when you finish.

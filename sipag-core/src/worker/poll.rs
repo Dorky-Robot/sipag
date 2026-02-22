@@ -19,6 +19,7 @@ use super::event_log::EventLog;
 use super::github::{
     count_open_issues, count_open_prs, count_open_sipag_prs, find_conflicted_prs,
     find_prs_needing_iteration, list_labeled_issues, reconcile_closed_prs, reconcile_merged_prs,
+    reconcile_stale_in_progress,
 };
 use super::ports::{GitHubGateway, StateStore};
 use super::recovery::{recover_and_finalize, RecoveryOutcome};
@@ -234,6 +235,23 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
             let _ = reconcile_merged_prs(repo);
             let _ = reconcile_closed_prs(repo, &cfg.work_label);
 
+            // Reconcile in-progress issues with no running container.
+            {
+                let repo_slug = repo.replace('/', "--");
+                let _ = reconcile_stale_in_progress(
+                    repo,
+                    &cfg.work_label,
+                    is_container_running,
+                    |_repo, issue_num| {
+                        store
+                            .load(&repo_slug, issue_num)
+                            .ok()
+                            .flatten()
+                            .map(|w| (w.container_name, w.status.as_str().to_string()))
+                    },
+                );
+            }
+
             // ── Conflict fixes ───────────────────────────────────────────────
             let conflicted = find_conflicted_prs(repo);
             let to_fix: Vec<u64> = conflicted
@@ -315,7 +333,7 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                         use super::decision::SkipReason;
                         if reason == SkipReason::ExistingPr {
                             // Log which PR is blocking re-dispatch.
-                            if let Some(ref pr) = pr_by_branch.as_ref().or(pr_by_body.as_ref()) {
+                            if let Some(pr) = pr_by_branch.as_ref().or(pr_by_body.as_ref()) {
                                 println!(
                                     "[#{}] Skipping — already has PR #{}",
                                     issue_num, pr.number
@@ -522,13 +540,19 @@ pub fn run_worker_loop(repos: &[String], sipag_dir: &Path, cfg: WorkerConfig) ->
                         );
                         let duration_s = dispatch_start.elapsed().as_secs();
                         let success = result.is_ok();
+                        // Look up the PR for the grouped branch.
+                        let pr = super::github::find_pr_for_branch(
+                            repo,
+                            &format!("sipag/group-{anchor_num}-*"),
+                        )
+                        .unwrap_or(None);
                         event_log.worker_result(
                             repo,
                             issues_to_dispatch,
                             success,
                             duration_s,
-                            None,
-                            None,
+                            pr.as_ref().map(|p| p.number),
+                            pr.as_ref().map(|p| p.url.as_str()),
                         );
                     }
                     println!("--- Worker complete ---");
