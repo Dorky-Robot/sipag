@@ -12,6 +12,9 @@ pub fn get_repo_url(sipag_dir: &Path, name: &str) -> Result<String> {
     let content =
         fs::read_to_string(&conf).with_context(|| format!("Failed to read {}", conf.display()))?;
     for line in content.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
         if let Some((key, val)) = line.split_once('=') {
             if key.trim() == name {
                 return Ok(val.trim().to_string());
@@ -28,6 +31,9 @@ pub fn add_repo(sipag_dir: &Path, name: &str, url: &str) -> Result<()> {
         let content = fs::read_to_string(&conf)
             .with_context(|| format!("Failed to read {}", conf.display()))?;
         for line in content.lines() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
             if let Some((key, _)) = line.split_once('=') {
                 if key.trim() == name {
                     bail!("Error: repo '{}' already exists", name);
@@ -54,7 +60,7 @@ pub fn list_repos(sipag_dir: &Path) -> Result<Vec<(String, String)>> {
         fs::read_to_string(&conf).with_context(|| format!("Failed to read {}", conf.display()))?;
     let repos = content
         .lines()
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .filter_map(|line| {
             line.split_once('=')
                 .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
@@ -113,5 +119,33 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repos = list_repos(dir.path()).unwrap();
         assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn test_list_repos_skips_comments() {
+        let dir = TempDir::new().unwrap();
+        let conf = dir.path().join("repos.conf");
+        fs::write(
+            &conf,
+            "# This is a comment\nrepo1=https://github.com/org/repo1\n# another comment\nrepo2=https://github.com/org/repo2\n",
+        )
+        .unwrap();
+        let repos = list_repos(dir.path()).unwrap();
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].0, "repo1");
+        assert_eq!(repos[1].0, "repo2");
+    }
+
+    #[test]
+    fn test_get_repo_url_skips_comments() {
+        let dir = TempDir::new().unwrap();
+        let conf = dir.path().join("repos.conf");
+        fs::write(
+            &conf,
+            "# myrepo=https://old-url.com\nmyrepo=https://github.com/org/repo\n",
+        )
+        .unwrap();
+        let url = get_repo_url(dir.path(), "myrepo").unwrap();
+        assert_eq!(url, "https://github.com/org/repo");
     }
 }
