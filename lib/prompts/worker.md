@@ -4,6 +4,23 @@
 - Push all commits to branch `{BRANCH}` only. Do NOT create new PRs or new branches.
 - If the branch already has commits, build on top of them — do not force-push or rebase.
 
+## First: resolve merge conflicts
+
+Before doing anything else, check if the branch is behind main:
+
+```bash
+git fetch origin main
+git log HEAD..origin/main --oneline
+```
+
+If there are new commits on main, merge them in:
+
+```bash
+git merge origin/main
+```
+
+If there are conflicts, resolve them manually — read the conflicting files, understand both sides, keep the correct combination, then commit the merge. Push the merge commit before proceeding to implementation. This ensures the PR stays mergeable.
+
 ## How to work
 
 - The PR description above is your complete briefing. Trust it.
