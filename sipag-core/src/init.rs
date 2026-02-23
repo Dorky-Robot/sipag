@@ -3,11 +3,11 @@ use std::path::Path;
 
 /// Create the sipag directory structure (idempotent).
 ///
-/// Creates `workers/` and `logs/` under `sipag_dir`.
+/// Creates `workers/`, `logs/`, and `events/` under `sipag_dir`.
 pub fn init_dirs(sipag_dir: &Path) -> Result<()> {
     let mut created = false;
 
-    for subdir in &["workers", "logs"] {
+    for subdir in &["workers", "logs", "events"] {
         let path = sipag_dir.join(subdir);
         if !path.exists() {
             std::fs::create_dir_all(&path)?;
@@ -36,6 +36,7 @@ mod tests {
         init_dirs(dir.path()).unwrap();
         assert!(dir.path().join("workers").exists());
         assert!(dir.path().join("logs").exists());
+        assert!(dir.path().join("events").exists());
     }
 
     #[test]

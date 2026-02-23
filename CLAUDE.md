@@ -98,8 +98,6 @@ sipag version                 Print version
 | `work_label` | `ready` | Issue label gate |
 | `max_open_prs` | `3` | Back-pressure limit |
 | `poll_interval` | `120` | Seconds between polling cycles |
-| `tao_actor` | (none) | tao actor for human escalation |
-| `tao_role` | (none) | tao role for human escalation |
 
 Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`.
 
@@ -108,6 +106,7 @@ Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPA
 ```
 workers/     # PR-keyed state JSON files
 logs/        # Worker log files ({owner}--{repo}--pr-{N}.log)
+events/      # Lifecycle event files (worker failures, escalations)
 config       # optional config file
 ```
 

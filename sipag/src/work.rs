@@ -47,30 +47,10 @@ pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
     let board_state = format_board_state(&repos)?;
 
     // Build system prompt.
-    let tao_section = if let (Some(actor), Some(role)) = (&cfg.tao_actor, &cfg.tao_role) {
-        format!(
-            "## Escalation via tao\n\n\
-             When a worker fails or something needs human judgment, escalate via tao:\n\n\
-             ```bash\n\
-             echo '{{\"repo\": \"<repo>\", \"pr\": <N>, \"error\": \"<reason>\"}}' | \\\n\
-             tao resolve-failure {role} {actor} --detach\n\
-             ```\n\n\
-             This sends the failure to **{actor}** (role: {role}) and returns a tracking ID immediately.\n\
-             Log the tracking ID and move on — don't block the polling loop.\n\
-             The human will respond asynchronously via tao."
-        )
-    } else {
-        "## Escalation\n\n\
-         No tao actor configured. When a worker fails, log the failure and move on.\n\
-         To enable human escalation, add `tao_actor` and `tao_role` to `~/.sipag/config`."
-            .to_string()
-    };
-
     let system_prompt = WORK_PROMPT
         .replace("{BOARD_STATE}", &board_state)
         .replace("{POLL_INTERVAL}", &cfg.poll_interval.to_string())
-        .replace("{WORK_LABEL}", &cfg.work_label)
-        .replace("{TAO_ESCALATION}", &tao_section);
+        .replace("{WORK_LABEL}", &cfg.work_label);
 
     // Exec into claude.
     eprintln!("Launching Claude session...\n");

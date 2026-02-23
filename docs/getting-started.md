@@ -125,16 +125,18 @@ Before looking at any issues, Claude reads the local codebase to build a mental 
 
 This happens first because disease clustering is meaningless without understanding the patient. When Claude later sees three issues about "config crashes," it already knows the config parser is 400 lines of ad-hoc string matching — so it can identify the structural disease instead of treating each crash as an isolated symptom.
 
-### Analysis
+### Parallel deep analysis
 
-With the codebase understood, Claude fetches the issue backlog and identifies **diseases, not symptoms**. Three issues about different error messages probably mean there's no unified error handling. Five issues about Docker configuration probably mean the config boundary is wrong.
+With the codebase understood, Claude spins up **four parallel analysis agents** that examine the codebase simultaneously from different angles:
 
-Claude spins up parallel analysis agents (security, architecture, usability), each grounded in the actual codebase structure, to find the deepest problem it can address well, then:
+1. **Security reviewer** — OWASP top 10, secrets in code, auth/authz gaps, input validation, dependency CVEs
+2. **Architecture reviewer** — module boundaries, coupling, abstraction leaks, separation of concerns
+3. **Code quality reviewer** — dead code, duplication, error handling patterns, missing abstractions
+4. **Testing reviewer** — coverage gaps, missing edge cases, integration test needs
 
-1. Picks the highest-impact disease cluster
-2. Cross-references against the code it already read — what files are involved, what the current design looks like, where the structural weakness lives
-3. Crafts a refined PR — title names the disease, body contains the full architectural brief with specific files, target design, and constraints
-4. Marks affected issues as in-progress
+Each agent identifies **diseases, not symptoms**. Three issues about different error messages probably mean there's no unified error handling. Five issues about Docker configuration probably mean the config boundary is wrong.
+
+After all agents return, Claude synthesizes the findings — deduplicates across reviewers, ranks by impact, and creates GitHub issues labeled `ready` for the top findings. These issues contain full architectural briefs: disease name, affected files, target design, and constraints.
 
 ### Implementation
 
@@ -149,9 +151,9 @@ The container is the safety boundary — Claude runs `--dangerously-skip-permiss
 
 ### Review and merge
 
-When the worker finishes, Claude reviews the PR diff and walks you through it. You decide: merge or close. If the PR is good, Claude merges it. If not, the issues return to the backlog for a different approach next cycle.
+When a worker finishes successfully, Claude auto-merges the PR via squash merge. If a worker fails, Claude writes an event file to `~/.sipag/events/` and moves on — external systems can observe that directory for notifications. The issues return to the backlog for a different approach next cycle.
 
-Then the cycle repeats. The backlog has changed, the codebase is healthier, and the next analysis starts from a different place because the project is different.
+The cycle repeats continuously. The backlog changes, the codebase gets healthier, and the next analysis starts from a different place because the project is different.
 
 In a multi-project session, Claude manages the cycle independently per repo — workers for different repos can run in parallel since they don't conflict.
 
@@ -202,8 +204,6 @@ timeout=7200
 work_label=ready
 max_open_prs=3
 poll_interval=120
-tao_actor=felix
-tao_role=developer
 ```
 
 | Key | Default | Description |
@@ -213,10 +213,8 @@ tao_role=developer
 | `work_label` | `ready` | Issue label that marks tasks ready for dispatch |
 | `max_open_prs` | `3` | Max open sipag PRs before dispatch is paused (0 = no limit) |
 | `poll_interval` | `120` | Seconds between polling cycles |
-| `tao_actor` | (none) | tao actor name for human escalation via tao |
-| `tao_role` | (none) | tao role name for human escalation via tao |
 
-Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_POLL_INTERVAL`, `SIPAG_TAO_ACTOR`, `SIPAG_TAO_ROLE`, `SIPAG_DIR`.
+Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_POLL_INTERVAL`, `SIPAG_DIR`.
 
 ## File layout
 
@@ -225,7 +223,8 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 ├── config          # Optional key=value config
 ├── token           # Claude OAuth token (chmod 600)
 ├── workers/        # PR-keyed state JSON files
-└── logs/           # Worker log files
+├── logs/           # Worker log files
+└── events/         # Lifecycle event files (worker failures, escalations)
 ```
 
 ## Quick reference
