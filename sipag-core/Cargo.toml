@@ -1,6 +1,6 @@
 [package]
 name = "sipag-core"
-version = "0.1.0"
+version = "3.0.0"
 edition = "2021"
 description = "Core library for sipag — sandbox launcher for Claude Code"
 
