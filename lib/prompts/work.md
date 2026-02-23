@@ -40,18 +40,20 @@ After all agents return, synthesize their findings:
 
 This seeds the issue backlog with high-quality, structurally-informed work items that the poller will pick up and dispatch to workers.
 
-### Step 3: Recover orphaned PRs
+### Step 3: Recover and finish in-flight work
 
-Before launching the poller, check for sipag PRs from previous sessions that were left orphaned:
+Before launching the poller or picking up new issues, recover and prioritize all in-flight work. **Finishing started work always takes priority over starting new work** — per flow theory, reducing work-in-progress increases throughput more than adding new items.
 
 1. List open sipag PRs: `gh pr list --repo <repo> --label sipag --state open --json number,title,headRefName,comments`
 2. Cross-reference with `sipag ps` — any sipag PR with no active worker is orphaned
-3. For each orphaned PR:
-   - If the PR has a self-review comment (search comments for "Self-review summary"): treat it as finished and review it yourself (merge or close)
-   - If the PR has commits beyond the placeholder but no self-review: re-dispatch a worker to complete it — `sipag dispatch --repo <repo> --pr <N>`
-   - If the PR has no real commits (only `.sipag-marker`): leave it for now, a worker will be dispatched for it
+3. **Triage by progress** (most-progressed first):
+   - **Self-reviewed PRs** (comments contain "Self-review summary"): review and merge/close immediately — this is the cheapest win, the work is done
+   - **PRs with real commits** (ahead of main by more than 1 commit): re-dispatch a worker to finish — `sipag dispatch --repo <repo> --pr <N>`. These are closest to done.
+   - **Placeholder-only PRs** (only `.sipag-marker`): the PR description is a refined architectural brief — that refinement is real work product. Dispatch a worker to implement it — `sipag dispatch --repo <repo> --pr <N>`. Do NOT close these to "clean up" — discarding a well-crafted PR description wastes the analysis work that created it.
 
-This recovers work from crashed or killed sessions instead of starting over.
+4. **Also check closed sipag PRs with preserved branches**: `gh pr list --repo <repo> --label sipag --state closed --json number,title,headRefName`. If a branch still exists and has commits, the work is recoverable — reopen with `gh pr reopen <N>` and re-dispatch.
+
+This recovers work from crashed or killed sessions. Finish what's started before starting anything new.
 
 ### Step 4: Launch background poller
 
@@ -63,18 +65,19 @@ while true; do sleep {POLL_INTERVAL}; echo "SIPAG_POLL_TICK"; done &
 
 Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
 
-1. **Fetch ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
-2. **Skip active work**: Check `sipag ps` — skip issues that already have a running worker
-3. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate.
-4. **For each new ready issue**:
-   a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
-   b. Create a branch: `git checkout -b sipag/issue-<N>`
-   c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
-   d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
-   e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
-5. **Check finished workers** (via `sipag ps`):
-   a. **Success** (finished phase): Review the PR and decide — merge or close (see below)
-   b. **Failed**: Escalate (see below) or log the failure and move on
+1. **Check finished workers first** (via `sipag ps`):
+   a. **Success** (finished phase): Review the PR and decide — merge or close (see below). Merging frees capacity for the next item.
+   b. **Failed**: Escalate (see below), log the failure, and move on
+2. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
+3. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
+4. **Only then, pick up new ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
+   - Skip issues that already have an open sipag PR or running worker
+   - For each new ready issue:
+     a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
+     b. Create a branch: `git checkout -b sipag/issue-<N>`
+     c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
+     d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
+     e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
 
 ### Review finished PRs
 
@@ -91,13 +94,13 @@ Your job as the host session is to make the final call:
 
 ### Step 5: Continuous operation
 
-The poller runs indefinitely. Each cycle:
-- Picks up new `{WORK_LABEL}` issues
-- Monitors in-flight workers
-- Reviews finished PRs (workers self-review before finishing)
-- Merges good PRs, closes bad ones
-- Escalates failures
-- Repeats
+The poller runs indefinitely. Each cycle follows the priority order: **finish → recover → start new**.
+
+1. **Finish**: Review and merge completed PRs — this frees capacity
+2. **Recover**: Re-dispatch orphaned PRs (most-progressed first) — cheaper than starting from scratch
+3. **Start new**: Only pick up new issues when in-flight work is handled and capacity allows
+
+This priority order minimizes work-in-progress and maximizes throughput. A cycle that merges 2 finished PRs and re-dispatches 1 orphan is more productive than a cycle that starts 3 new PRs.
 
 Design PRs for elegance — structural improvements, not patches. A clean PR addressing 2 issues beats a sprawling one addressing 5 poorly. If removing code fixes the problem better than adding code, remove code.
 
