@@ -192,22 +192,23 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Check whether any commits were pushed to the remote branch after Claude ran.
+/// Check whether the remote branch has commits beyond origin/main.
 ///
-/// Compares local HEAD against the remote tracking branch. If they differ,
-/// commits were pushed. If git commands fail, assume success (don't block on
-/// verification failures).
+/// After a successful push, local HEAD and origin/{branch} are identical,
+/// so we compare the remote branch against the base (origin/main) to detect
+/// whether any work was done. If git commands fail, assume success (don't
+/// block on verification failures).
 fn verify_commits_pushed(branch: &str) -> bool {
-    // Fetch latest remote state.
+    // Fetch latest remote state for both the branch and main.
     let fetch = Command::new("git")
-        .args(["-C", "/work", "fetch", "origin", branch])
+        .args(["-C", "/work", "fetch", "origin", branch, "main"])
         .output();
     if fetch.is_err() {
         return true; // can't verify, assume ok
     }
 
-    // Compare local branch against remote.
-    let output = Command::new("git")
+    // Check for unpushed local commits (made but not pushed).
+    let unpushed = Command::new("git")
         .args([
             "-C",
             "/work",
@@ -217,30 +218,29 @@ fn verify_commits_pushed(branch: &str) -> bool {
         ])
         .output();
 
-    match output {
-        Ok(o) => {
-            let unpushed = String::from_utf8_lossy(&o.stdout);
-            // If there are unpushed commits, that's a problem — changes were made but not pushed.
-            // If both local and remote are the same, check if remote has new commits vs base.
-            if !unpushed.trim().is_empty() {
-                // Commits exist locally but weren't pushed — that's a failure.
-                eprintln!("sipag-worker: found unpushed commits:\n{}", unpushed.trim());
-                return false;
-            }
+    if let Ok(o) = unpushed {
+        let out = String::from_utf8_lossy(&o.stdout);
+        if !out.trim().is_empty() {
+            eprintln!("sipag-worker: found unpushed commits:\n{}", out.trim());
+            return false;
+        }
+    }
 
-            // Check if the branch has any commits at all beyond what was there at clone time.
-            // Use the PR base (typically main/master) to see if the branch diverged.
-            let diff_output = Command::new("git")
-                .args(["-C", "/work", "diff", "--stat", &format!("origin/{branch}")])
-                .output();
-            match diff_output {
-                Ok(d) => {
-                    let diff = String::from_utf8_lossy(&d.stdout);
-                    // If there's a diff stat, the branch has changes (pushed or pre-existing).
-                    !diff.trim().is_empty()
-                }
-                Err(_) => true,
-            }
+    // Check if the remote branch diverges from origin/main (i.e., work was pushed).
+    let diff_output = Command::new("git")
+        .args([
+            "-C",
+            "/work",
+            "log",
+            &format!("origin/main..origin/{branch}"),
+            "--oneline",
+        ])
+        .output();
+
+    match diff_output {
+        Ok(d) => {
+            let commits = String::from_utf8_lossy(&d.stdout);
+            !commits.trim().is_empty()
         }
         Err(_) => true, // can't verify, assume ok
     }
