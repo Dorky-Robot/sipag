@@ -56,6 +56,18 @@ fn run() -> Result<i32> {
     run_cmd("git", &["-C", "/work", "fetch", "origin", &branch])?;
     run_cmd("git", &["-C", "/work", "checkout", &branch])?;
 
+    // Sanity check: verify the working tree has a reasonable number of files.
+    // A branch created from a broken tree (e.g., API error dropping base_tree)
+    // could have nearly zero files. Operating on such a branch would generate
+    // a PR that deletes the entire codebase.
+    let file_count = count_tracked_files();
+    if file_count < 5 {
+        bail!(
+            "working tree sanity check failed: only {file_count} tracked files found. \
+             Expected a full checkout. The branch may have been created incorrectly."
+        );
+    }
+
     // Read PR description as the assignment.
     let pr_body = get_pr_body(&repo, pr_num)?;
 
@@ -205,6 +217,21 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} exited with code {}", status.code().unwrap_or(-1));
     }
     Ok(())
+}
+
+/// Count the number of tracked files in the /work checkout.
+fn count_tracked_files() -> usize {
+    Command::new("git")
+        .args(["-C", "/work", "ls-files"])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// Get the current HEAD SHA in /work.
