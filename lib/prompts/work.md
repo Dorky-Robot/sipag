@@ -71,6 +71,8 @@ This watches `~/.sipag/workers/` for state file changes (sub-second latency via 
 
 - **`SIPAG_WORKER_STARTED <repo> <pr_num>`** / **`SIPAG_WORKER_WORKING <repo> <pr_num>`** — Informational. No action needed. Confirms a worker is progressing.
 
+- **`SIPAG_WORKER_STALE <repo> <pr_num>`** — A worker's heartbeat has gone stale (stopped writing heartbeats but never transitioned to finished/failed). The worker is likely hung or crashed. Kill it (`sipag kill <pr_num>`), check logs, and re-dispatch if the PR has real commits.
+
 - **`SIPAG_GITHUB_POLL`** — Periodic GitHub check. Run the full poll cycle:
   1. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
   2. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.

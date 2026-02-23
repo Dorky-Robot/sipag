@@ -175,7 +175,15 @@ impl WorkerConfig {
                     ));
                 }
             },
-            _ => {}
+            _ => {
+                let msg = match closest_known_key(key) {
+                    Some(suggestion) => format!(
+                        "config: unknown key '{key}' (did you mean '{suggestion}'?); ignoring"
+                    ),
+                    None => format!("config: unknown key '{key}'; ignoring"),
+                };
+                return Some(msg);
+            }
         }
         None
     }

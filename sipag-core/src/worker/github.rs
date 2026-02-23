@@ -63,7 +63,7 @@ pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
 
 /// Ensure the `sipag` label exists on a repo (idempotent).
 pub fn ensure_sipag_label(repo: &str) {
-    let _ = Command::new("gh")
+    let status = Command::new("gh")
         .args([
             "label",
             "create",
@@ -78,16 +78,29 @@ pub fn ensure_sipag_label(repo: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    // Label already existing is fine (gh exits 0 or 1 for "already exists").
+    if let Err(e) = status {
+        eprintln!("sipag warning: failed to ensure sipag label on {repo}: {e}");
+    }
 }
 
 /// Add the `sipag` label to a PR.
 pub fn label_pr_sipag(repo: &str, pr_num: u64) {
     let n = pr_num.to_string();
-    let _ = Command::new("gh")
+    let output = Command::new("gh")
         .args(["pr", "edit", &n, "--repo", repo, "--add-label", "sipag"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .output();
+    match output {
+        Ok(o) if !o.status.success() => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!("sipag warning: failed to label PR #{pr_num} on {repo}: {stderr}");
+        }
+        Err(e) => {
+            eprintln!("sipag warning: failed to label PR #{pr_num} on {repo}: {e}");
+        }
+        _ => {}
+    }
 }
 
 /// Check whether `gh` is authenticated.

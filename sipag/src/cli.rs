@@ -84,10 +84,14 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
         Some(Commands::Work { dirs }) => crate::work::run_work(&dirs),
-        Some(Commands::Watch) => crate::watch::run_watch(
-            &default_sipag_dir(),
-            WorkerConfig::load(&default_sipag_dir())?.poll_interval,
-        ),
+        Some(Commands::Watch) => {
+            let cfg = WorkerConfig::load(&default_sipag_dir())?;
+            crate::watch::run_watch(
+                &default_sipag_dir(),
+                cfg.poll_interval,
+                cfg.heartbeat_stale_secs,
+            )
+        }
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch {
             repo,
@@ -253,11 +257,11 @@ fn run_ps(show_all: bool) -> Result<()> {
             "?".to_string()
         };
 
-        let container_short = if w.container_id.len() > 12 {
-            &w.container_id[..12]
-        } else {
-            &w.container_id
-        };
+        let container_short = w
+            .container_id
+            .rfind("pr-")
+            .map(|i| &w.container_id[i..])
+            .unwrap_or(&w.container_id);
 
         println!(
             "#{:<7} {:<30} {:<12} {:<8} {}",
