@@ -149,11 +149,24 @@ Claude dispatches a Docker worker in the background. The container spins up, sta
 
 The container is the safety boundary — Claude runs `--dangerously-skip-permissions` inside it without risking your machine.
 
-### Self-review and merge
+### Review gate
 
-Before finishing, the worker runs a **self-review** — 4 parallel agents examine its own diff for security issues, architecture violations, correctness bugs, and test gaps. The worker addresses any findings, pushes fixes, and posts a summary comment on the PR. By the time a worker finishes, its code has already been reviewed and improved from within.
+Before finishing, the worker runs a **self-review** — 4 parallel agents examine its own diff for security issues, architecture violations, correctness bugs, and test gaps. The worker addresses any findings, pushes fixes, and posts a summary comment on the PR.
 
-When the host session sees a finished worker, it reads the PR diff and the self-review summary, then makes a binary decision: **merge or close**. If the PR makes the codebase structurally healthier, it merges via squash merge. If not, it closes the PR and the issues return to the backlog for a different approach next cycle.
+When the host session sees a finished worker, it runs a **multi-agent review gate** — 5 parallel agents examine the PR from different angles:
+
+1. **Scope reviewer** — Does the PR match the originating issues? Any unrelated changes or scope creep?
+2. **Security reviewer** — Secrets in diff, injection risks, unsafe patterns, dependency risks
+3. **Architecture reviewer** — Boundary violations, coupling increases, pattern breaks
+4. **Correctness reviewer** — Logic errors, edge cases, race conditions, error handling gaps
+5. **Test adequacy reviewer** — Coverage for new code, updated tests for changed behavior
+
+Each agent returns a verdict: **APPROVE**, **APPROVE_WITH_NOTES**, or **REQUEST_CHANGES**.
+
+- If all agents approve, the PR is squash-merged.
+- If any agent requests changes, the findings are posted as a structured comment on the PR and appended to the PR body. The worker is re-dispatched to address the feedback. This loop runs up to 2 times before escalating to a human.
+
+This means every PR passes through two layers of review — the worker's internal self-review and the host's external review gate — before merging.
 
 If a worker fails outright, Claude writes an event file to `~/.sipag/events/` and appends a lesson to `~/.sipag/lessons/` so the next worker doesn't repeat the same mistake.
 

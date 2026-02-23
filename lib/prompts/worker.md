@@ -98,13 +98,11 @@ This appends `Closes #N` to the PR body so GitHub auto-closes the issue on merge
 - It's okay to do less. A clean PR addressing 2 issues well beats a sprawling one addressing 5 poorly.
 - Boy Scout Rule: when you touch a file, leave it better than you found it.
 
-## Self-review (exactly once)
+## Review, fix, and merge
 
-After you finish implementation and all tests pass, run **one** self-review. This catches issues while you can still fix them.
+After you finish implementation and all tests pass, run a review→fix loop and then merge the PR yourself. You own the full lifecycle.
 
-**Hard rule**: self-review runs exactly once per worker session. After you fix any findings from the review, push the fixes and post the summary — do NOT run a second review to verify your fixes. The tests passing is sufficient verification. A review → fix → re-review loop wastes time and produces duplicate comments.
-
-**Skip self-review entirely if**: the PR already has a self-review comment and you made no new code changes (e.g., you only resolved merge conflicts or addressed existing feedback).
+**Skip this section entirely if**: the PR already has a self-review comment and you made no new code changes (e.g., you only resolved merge conflicts or addressed existing feedback). In that case, proceed directly to the merge step.
 
 ### 1. Get your diff
 
@@ -149,21 +147,27 @@ VERDICT: REQUEST_CHANGES
 
 Followed by a brief explanation (2-3 sentences max).
 
-### 3. Address findings, then stop
+### 3. Address findings (max 2 review cycles)
 
-For each agent that returned `REQUEST_CHANGES`:
+**Cycle 1**: For each agent that returned `REQUEST_CHANGES`:
 - Fix the issue in code
 - Run tests again
 - Push the fix
 
 For agents that returned `APPROVE_WITH_NOTES`:
-- Address the notes if they're actionable, otherwise note them for the PR comment
+- Address the notes if they're actionable, otherwise note them for the summary
 
-**Do NOT re-run the review after fixing.** Tests passing is sufficient. Proceed directly to step 4.
+If all agents returned `APPROVE` or `APPROVE_WITH_NOTES`, skip to step 4.
 
-### 4. Post review summary and finish
+If any agent returned `REQUEST_CHANGES`, after fixing and pushing, re-run the 4 review agents on the updated diff. This is **cycle 2** — the final review cycle.
 
-After addressing all findings, post a single comment on the PR summarizing what the self-review found and what was done about it. Then you are done — do not loop back.
+**Cycle 2**: If all agents now approve, proceed to step 4. If any agent still returns `REQUEST_CHANGES` after 2 cycles, post the summary (step 4) but do **NOT** merge — leave the PR open for human review.
+
+**Hard limit**: Never run more than 2 review cycles. Two rounds of review→fix is enough. If issues persist, a human should look.
+
+### 4. Post review summary
+
+Post a single comment on the PR summarizing what the review found and what was done about it.
 
 ```bash
 gh pr comment {PR_NUM} --repo {REPO} --body "## Self-review summary
@@ -178,7 +182,50 @@ gh pr comment {PR_NUM} --repo {REPO} --body "## Self-review summary
 <findings and resolution, or 'No issues'>
 
 ### Test adequacy
-<findings and resolution, or 'No issues'>"
+<findings and resolution, or 'No issues'>
+
+### Review cycles
+<1 or 2> cycle(s). <Final outcome: all approved / still has open findings>"
 ```
 
-This gives the reviewer (human or main session) visibility into what was caught and fixed during implementation.
+### 5. Merge the PR
+
+**Only merge if all reviewers approved** (after at most 2 cycles). If any reviewer still has `REQUEST_CHANGES` after 2 cycles, skip this step — leave the PR open for human review.
+
+```bash
+gh pr merge {PR_NUM} --repo {REPO} --squash --delete-branch
+```
+
+If the merge fails (branch protection, merge conflicts, permissions), report the error in a PR comment and stop. Do NOT force-push or attempt workarounds.
+
+### 6. Close related issues and clean up
+
+After a successful merge:
+
+1. **Close related issues** that aren't auto-closed by `Closes #N` keywords in the PR body:
+
+```bash
+# For each issue referenced in the PR that doesn't have a Closes keyword
+gh issue close <N> --repo {REPO} --comment "Resolved by PR #{PR_NUM}"
+```
+
+2. **Label transition** on related issues:
+
+```bash
+gh issue edit <N> --repo {REPO} --remove-label in-progress
+```
+
+### 7. Post final summary
+
+After merge and cleanup, post a final comment confirming everything is done:
+
+```bash
+gh pr comment {PR_NUM} --repo {REPO} --body "## Worker complete
+
+PR merged via squash. Related issues closed.
+
+Review cycles: <1 or 2>
+All reviewers: <APPROVE or APPROVE_WITH_NOTES>"
+```
+
+This gives the host session visibility into what happened. Then you are done.

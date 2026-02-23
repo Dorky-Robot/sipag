@@ -10,6 +10,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 /// Worker disposition prompt (embedded at compile time).
 const WORKER_PROMPT: &str = include_str!("../../lib/prompts/worker.md");
@@ -24,6 +28,71 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Emit a lifecycle event to the mounted events directory (best-effort).
+fn emit_event(event_type: &str, repo: &str, pr_num: u64, detail: &str) {
+    let events_dir = env::var("EVENTS_DIR").unwrap_or_default();
+    if events_dir.is_empty() {
+        return;
+    }
+    let _ = sipag_core::events::write_event_to(
+        Path::new(&events_dir),
+        event_type,
+        repo,
+        &format!("{event_type}: PR #{pr_num} in {repo}"),
+        detail,
+    );
+}
+
+/// Write a heartbeat file alongside the state file.
+///
+/// The file's mtime is the primary liveness signal. Contents are JSON for debugging.
+fn write_heartbeat(state_path: &Path, repo: &str, pr_num: u64) {
+    let heartbeat_path = state_path.with_extension("heartbeat");
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let content = serde_json::json!({
+        "repo": repo,
+        "pr_num": pr_num,
+        "sub_phase": "working",
+        "timestamp": timestamp,
+        "pid": std::process::id(),
+    });
+    let _ = fs::write(&heartbeat_path, content.to_string());
+}
+
+/// Remove the heartbeat file on exit.
+fn remove_heartbeat(state_path: &Path) {
+    let heartbeat_path = state_path.with_extension("heartbeat");
+    let _ = fs::remove_file(&heartbeat_path);
+}
+
+/// Spawn a background thread that writes the heartbeat file at a fixed interval.
+///
+/// Returns the shutdown flag — set it to `true` to stop the thread.
+fn spawn_heartbeat_thread(
+    state_path: PathBuf,
+    repo: String,
+    pr_num: u64,
+    interval_secs: u64,
+) -> Arc<AtomicBool> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
+    thread::spawn(move || {
+        while !shutdown_clone.load(Ordering::Relaxed) {
+            write_heartbeat(&state_path, &repo, pr_num);
+            // Sleep in small increments so we notice shutdown quickly.
+            for _ in 0..interval_secs {
+                if shutdown_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+        }
+    });
+
+    shutdown
 }
 
 fn run() -> Result<i32> {
@@ -104,6 +173,21 @@ fn run() -> Result<i32> {
 
     // Phase: working.
     update_phase(&state_path, WorkerPhase::Working)?;
+    emit_event(
+        "worker-started",
+        &repo,
+        pr_num,
+        "Worker entered working phase",
+    );
+
+    // Start heartbeat thread.
+    let heartbeat_interval: u64 = env::var("SIPAG_HEARTBEAT_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    write_heartbeat(&state_path, &repo, pr_num); // immediate first heartbeat
+    let heartbeat_shutdown =
+        spawn_heartbeat_thread(state_path.clone(), repo.clone(), pr_num, heartbeat_interval);
 
     // Build the prompt: PR description + lessons + worker disposition.
     // Replace placeholders in the worker prompt with actual values.
@@ -145,9 +229,18 @@ fn run() -> Result<i32> {
         exit_code
     };
 
+    // Stop heartbeat thread before writing final state.
+    heartbeat_shutdown.store(true, Ordering::Relaxed);
+
     // Post-run verification: check if commits were actually pushed.
+    // If the worker self-merged the PR, the branch is deleted on remote,
+    // so we skip push verification (the merge is proof enough).
     if exit_code == 0 {
-        let pushed = verify_commits_pushed(&branch, &pre_claude_sha);
+        let pushed = if is_pr_merged(&repo, pr_num) {
+            true
+        } else {
+            verify_commits_pushed(&branch, &pre_claude_sha)
+        };
         if !pushed {
             eprintln!("sipag-worker: claude exited 0 but no commits were pushed to {branch}");
             let mut s = state::read_state(&state_path).context("failed to read state file")?;
@@ -159,12 +252,35 @@ fn run() -> Result<i32> {
             s.error =
                 Some("no_changes_pushed: claude exited 0 but no commits were pushed".to_string());
             state::write_state(&s).context("failed to write state file")?;
+            emit_event(
+                "worker-failed",
+                &repo,
+                pr_num,
+                "claude exited 0 but no commits were pushed",
+            );
+            remove_heartbeat(&state_path);
             return Ok(1);
         }
     }
 
     // Report completion.
     finish_state(&state_path, exit_code)?;
+    if exit_code == 0 {
+        emit_event(
+            "worker-finished",
+            &repo,
+            pr_num,
+            "Worker completed successfully",
+        );
+    } else {
+        emit_event(
+            "worker-failed",
+            &repo,
+            pr_num,
+            &format!("claude exited with code {exit_code}"),
+        );
+    }
+    remove_heartbeat(&state_path);
 
     Ok(exit_code)
 }
@@ -279,6 +395,13 @@ fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
         return false;
     }
 
+    // Refresh remote tracking refs before checking for unpushed commits.
+    // Without this, origin/{branch} may be stale from the initial clone.
+    let _ = Command::new("git")
+        .args(["-C", "/work", "fetch", "origin", branch])
+        .stderr(std::process::Stdio::null())
+        .output();
+
     // HEAD changed, but check if commits were actually pushed.
     let unpushed = Command::new("git")
         .args([
@@ -307,21 +430,63 @@ fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
     }
 }
 
+/// Check if a PR has been merged on GitHub.
+fn is_pr_merged(repo: &str, pr_num: u64) -> bool {
+    Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "-q",
+            ".state",
+        ])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .is_some_and(|state| state == "MERGED")
+}
+
+/// Max bytes of lessons to include in the worker prompt.
+/// Matches sipag_core::lessons::DEFAULT_MAX_BYTES (8KB ≈ 20 lessons).
+const LESSONS_MAX_BYTES: usize = 8 * 1024;
+
 /// Read the lessons file for a repo from the mounted lessons directory.
 ///
-/// Returns a formatted section to include in the prompt, or an empty string
-/// if no lessons exist.
+/// Truncates from the front if the file exceeds LESSONS_MAX_BYTES, cutting at
+/// the nearest `## ` heading boundary so entries stay intact. This prevents old
+/// lessons from bloating the prompt.
 fn read_lessons_file(repo: &str) -> String {
     let repo_slug = repo.replace('/', "--");
     let path = format!("/sipag-lessons/{repo_slug}.md");
     match std::fs::read_to_string(&path) {
         Ok(content) if !content.trim().is_empty() => {
+            let trimmed = if content.len() <= LESSONS_MAX_BYTES {
+                content.trim().to_string()
+            } else {
+                // Truncate from front, keeping last LESSONS_MAX_BYTES at a heading boundary.
+                let start = content.len() - LESSONS_MAX_BYTES;
+                let tail = &content[start..];
+                if let Some(pos) = tail.find("\n## ") {
+                    tail[pos + 1..].trim().to_string()
+                } else {
+                    tail.trim().to_string()
+                }
+            };
             format!(
                 "## Lessons from previous workers\n\n\
                  Previous workers for this repo recorded the following lessons.\n\
                  Avoid repeating their mistakes:\n\n\
-                 {}\n\n",
-                content.trim()
+                 {trimmed}\n\n",
             )
         }
         _ => String::new(),
@@ -396,5 +561,7 @@ fn try_mark_failed(error_msg: &str) {
         s.heartbeat = now;
         s.error = Some(error_msg.to_string());
         let _ = state::write_state(&s);
+        emit_event("worker-failed", &s.repo, s.pr_num, error_msg);
+        remove_heartbeat(&state_path);
     }
 }

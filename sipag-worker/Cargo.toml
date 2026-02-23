@@ -12,3 +12,4 @@ path = "src/main.rs"
 sipag-core = { path = "../sipag-core" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde_json = "1"

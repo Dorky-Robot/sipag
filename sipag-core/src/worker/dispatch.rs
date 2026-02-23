@@ -27,6 +27,8 @@ pub fn dispatch_worker(
     let container_name = format!("sipag-{repo_slug}-pr-{pr_num}");
     let log_dir = cfg.sipag_dir.join("logs");
     fs::create_dir_all(&log_dir)?;
+    let events_dir = cfg.sipag_dir.join("events");
+    fs::create_dir_all(&events_dir)?;
     let log_path = log_dir.join(format!("{repo_slug}--pr-{pr_num}.log"));
 
     // Clean up any stale container from a previous attempt.
@@ -93,6 +95,19 @@ pub fn dispatch_worker(
             "{}:/sipag-lessons:ro",
             cfg.sipag_dir.join("lessons").display()
         ))
+        // Mount events directory for lifecycle event emission
+        .arg("-v")
+        .arg(format!(
+            "{}:/sipag-events",
+            cfg.sipag_dir.join("events").display()
+        ))
+        .arg("-e")
+        .arg("EVENTS_DIR=/sipag-events")
+        .arg("-e")
+        .arg(format!(
+            "SIPAG_HEARTBEAT_INTERVAL={}",
+            cfg.heartbeat_interval
+        ))
         .arg("-e")
         .arg(format!("STATE_FILE=/sipag-state/{state_filename}"))
         // Environment
@@ -147,7 +162,11 @@ pub fn dispatch_worker(
     Ok(container_name)
 }
 
-/// Extract a failure reason from the last 50 lines of a log file.
+/// Extract a failure reason from a log file.
+///
+/// Checks for known patterns (git errors, Claude failures, OOM, etc.) and
+/// falls back to the last non-empty line. Short logs with only git output
+/// are classified as "claude failed to start."
 pub fn extract_failure_reason(log_path: &Path) -> Option<String> {
     let content = std::fs::read_to_string(log_path).ok()?;
     let lines: Vec<&str> = content.lines().collect();
@@ -157,6 +176,7 @@ pub fn extract_failure_reason(log_path: &Path) -> Option<String> {
         &lines
     };
 
+    // Pattern match known failures (reverse order: last match wins).
     for line in tail.iter().rev() {
         let lower = line.to_lowercase();
         if lower.contains("repository")
@@ -169,6 +189,35 @@ pub fn extract_failure_reason(log_path: &Path) -> Option<String> {
         }
         if lower.contains("authentication failed") {
             return Some("git clone failed: authentication failed".to_string());
+        }
+        if lower.contains("killed") && lower.contains("oom") {
+            return Some("container killed by OOM (out of memory)".to_string());
+        }
+        if lower.contains("no_changes_pushed") {
+            return Some("no commits pushed to remote branch".to_string());
+        }
+        if lower.contains("claude exited with code") {
+            return Some(line.trim().to_string());
+        }
+        if lower.contains("api error") || lower.contains("rate limit") {
+            return Some(format!("API error: {}", line.trim()));
+        }
+    }
+
+    // Heuristic: if the log is short (1-10 non-empty lines) and only contains git commands,
+    // Claude likely never started or produced no output.
+    let non_empty_lines = lines.iter().filter(|l| !l.trim().is_empty()).count();
+    if non_empty_lines > 0 && lines.len() < 10 {
+        let has_claude_output = lines.iter().any(|l| {
+            !l.starts_with("Cloning")
+                && !l.starts_with("From ")
+                && !l.starts_with("Switched")
+                && !l.starts_with(" * branch")
+                && !l.starts_with("branch ")
+                && !l.trim().is_empty()
+        });
+        if !has_claude_output {
+            return Some("claude failed to start: no output after git checkout".to_string());
         }
     }
 

@@ -49,7 +49,11 @@ pub enum Commands {
     },
 
     /// List active and recent workers
-    Ps,
+    Ps {
+        /// Show all workers (not just active + recent)
+        #[arg(long, default_value_t = false)]
+        all: bool,
+    },
 
     /// Show logs for a worker
     Logs {
@@ -83,7 +87,7 @@ pub fn run(cli: Cli) -> Result<()> {
             pr,
             session_file,
         }) => run_dispatch(&repo, pr, session_file.as_deref()),
-        Some(Commands::Ps) => run_ps(),
+        Some(Commands::Ps { all }) => run_ps(all),
         Some(Commands::Logs { id }) => run_logs(&id),
         Some(Commands::Kill { id }) => run_kill(&id),
         Some(Commands::Doctor) => run_doctor(),
@@ -182,19 +186,24 @@ fn run_dispatch(repo: &str, pr_num: u64, session_file: Option<&Path>) -> Result<
     Ok(())
 }
 
-fn run_ps() -> Result<()> {
+/// Maximum number of terminal workers to show by default (use --all for full list).
+const PS_DEFAULT_TERMINAL_LIMIT: usize = 5;
+
+fn run_ps(show_all: bool) -> Result<()> {
     let sipag_dir = default_sipag_dir();
     lifecycle::cleanup_stale(&sipag_dir, 24);
-    let workers = lifecycle::scan_workers(&sipag_dir);
+    let all_workers = lifecycle::scan_workers(&sipag_dir);
 
-    // Filter out terminal workers older than 24 hours from display.
     let now = chrono::Utc::now();
-    let workers: Vec<_> = workers
+
+    // Partition into active and terminal.
+    let (active, terminal): (Vec<_>, Vec<_>) =
+        all_workers.iter().partition(|w| !w.phase.is_terminal());
+
+    // Filter terminal: drop workers older than 24h with unparsable timestamps.
+    let mut terminal: Vec<_> = terminal
         .into_iter()
         .filter(|w| {
-            if !w.phase.is_terminal() {
-                return true;
-            }
             let timestamp = w.ended.as_deref().unwrap_or(&w.started);
             match chrono::DateTime::parse_from_rfc3339(timestamp) {
                 Ok(ts) => {
@@ -202,23 +211,32 @@ fn run_ps() -> Result<()> {
                         (now - ts.with_timezone(&chrono::Utc)).num_hours().max(0) as u64;
                     age_hours < 24
                 }
-                Err(_) => false, // unparsable timestamp → hide
+                Err(_) => false,
             }
         })
         .collect();
 
-    if workers.is_empty() {
+    // Sort terminal by ended/started time descending (most recent first).
+    terminal.sort_by(|a, b| {
+        let ts_a = a.ended.as_deref().unwrap_or(&a.started);
+        let ts_b = b.ended.as_deref().unwrap_or(&b.started);
+        ts_b.cmp(ts_a)
+    });
+
+    let hidden = if !show_all && terminal.len() > PS_DEFAULT_TERMINAL_LIMIT {
+        let hidden = terminal.len() - PS_DEFAULT_TERMINAL_LIMIT;
+        terminal.truncate(PS_DEFAULT_TERMINAL_LIMIT);
+        hidden
+    } else {
+        0
+    };
+
+    if active.is_empty() && terminal.is_empty() {
         println!("No workers found.");
         return Ok(());
     }
 
-    println!(
-        "{:<8} {:<30} {:<12} {:<8} CONTAINER",
-        "PR", "REPO", "PHASE", "AGE"
-    );
-    println!("{}", "-".repeat(78));
-
-    for w in &workers {
+    let print_worker = |w: &state::WorkerState| {
         let age = if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&w.started) {
             let secs = (now - started.with_timezone(&chrono::Utc))
                 .num_seconds()
@@ -238,29 +256,44 @@ fn run_ps() -> Result<()> {
             "#{:<7} {:<30} {:<12} {:<8} {}",
             w.pr_num, w.repo, w.phase, age, container_short
         );
-        // Show truncated error for failed workers.
         if let Some(ref err) = w.error {
             let short = if err.len() > 60 { &err[..60] } else { err };
             println!("         \x1b[31m↳ {short}\x1b[0m");
         }
+    };
+
+    println!(
+        "{:<8} {:<30} {:<12} {:<8} CONTAINER",
+        "PR", "REPO", "PHASE", "AGE"
+    );
+    println!("{}", "-".repeat(78));
+
+    for w in &active {
+        print_worker(w);
+    }
+    for w in &terminal {
+        print_worker(w);
+    }
+
+    if hidden > 0 {
+        println!("         ... {hidden} older workers hidden (use --all to show)");
     }
 
     // Summary counts.
-    let working = workers.iter().filter(|w| !w.phase.is_terminal()).count();
-    let finished = workers
+    let finished_count = all_workers
         .iter()
         .filter(|w| w.phase == state::WorkerPhase::Finished)
         .count();
-    let failed = workers
+    let failed_count = all_workers
         .iter()
         .filter(|w| w.phase == state::WorkerPhase::Failed)
         .count();
     println!(
         "\n{} active, {} finished, {} failed ({} total)",
-        working,
-        finished,
-        failed,
-        workers.len()
+        active.len(),
+        finished_count,
+        failed_count,
+        all_workers.len()
     );
 
     Ok(())

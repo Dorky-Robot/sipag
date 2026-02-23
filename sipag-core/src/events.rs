@@ -20,12 +20,31 @@ pub fn write_event(
     subject: &str,
     body: &str,
 ) -> Result<PathBuf> {
-    let events_dir = sipag_dir.join("events");
-    std::fs::create_dir_all(&events_dir)?;
+    write_event_to(&sipag_dir.join("events"), event_type, repo, subject, body)
+}
 
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+/// Write a lifecycle event file to a specific directory.
+///
+/// This variant accepts the events directory directly, which is useful for
+/// worker containers that mount the events dir at a known path rather than
+/// deriving it from sipag_dir.
+pub fn write_event_to(
+    events_dir: &Path,
+    event_type: &str,
+    repo: &str,
+    subject: &str,
+    body: &str,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(events_dir)?;
+
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%dT%H%M%SZ");
     let repo_slug = repo.replace('/', "--");
-    let filename = format!("{timestamp}-{event_type}-{repo_slug}.md");
+    // Include subsecond precision + PID to prevent collisions when multiple
+    // events fire in the same second (e.g., concurrent worker failures).
+    let millis = now.timestamp_subsec_millis();
+    let pid = std::process::id();
+    let filename = format!("{timestamp}-{event_type}-{repo_slug}-{millis:03}{pid}.md");
     let path = events_dir.join(&filename);
 
     let content = format!("Subject: {subject}\n\n{body}\n");
@@ -106,5 +125,23 @@ mod tests {
         assert!(!dir.path().join("events").exists());
         write_event(dir.path(), "test", "o/r", "s", "b").unwrap();
         assert!(dir.path().join("events").exists());
+    }
+
+    #[test]
+    fn write_event_to_works_with_explicit_dir() {
+        let dir = TempDir::new().unwrap();
+        let events_dir = dir.path().join("my-events");
+        let path = write_event_to(
+            &events_dir,
+            "worker-started",
+            "owner/repo",
+            "Started",
+            "Details",
+        )
+        .unwrap();
+        assert!(path.exists());
+        assert!(path.starts_with(&events_dir));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Subject: Started"));
     }
 }

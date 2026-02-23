@@ -66,7 +66,7 @@ while true; do sleep {POLL_INTERVAL}; echo "SIPAG_POLL_TICK"; done &
 Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
 
 1. **Check finished workers first** (via `sipag ps`):
-   a. **Success** (finished phase): Review the PR and decide — merge or close (see below). Merging frees capacity for the next item.
+   a. **Success** (finished phase): First check if the PR is already merged: `gh pr view <N> --repo <repo> --json state -q .state`. If `MERGED`, skip the review gate — the worker already reviewed and merged it. Just close any related issues that weren't auto-closed and move on. If `OPEN`, the worker didn't merge (hit review loop limit, or old worker without merge logic) — run the review gate as a fallback (see below).
    b. **Failed**: Escalate (see below), log the failure, and move on
 2. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
 3. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
@@ -79,18 +79,113 @@ Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
      d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
      e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
 
-### Review finished PRs
+### Review gate for finished PRs
 
-Workers run a self-review before finishing — 4 parallel agents check for security, architecture, correctness, and test adequacy issues. The worker addresses findings and posts a summary comment on the PR. By the time a worker finishes successfully, its PR has already been self-reviewed.
+When a worker finishes successfully, run a multi-agent review gate before merging. Never auto-merge — every PR gets reviewed by 5 parallel agents first.
 
-Your job as the host session is to make the final call:
+#### 1. Gather context
 
-1. Read the PR diff: `gh pr diff <N> --repo <repo>`
-2. Read the self-review comment on the PR (if present)
-3. Check that the PR addresses the originating issues — does it fix the disease, not just the symptoms?
-4. **Merge or close.** Binary decision:
-   - If the PR makes the codebase structurally healthier → `gh pr merge <N> --repo <repo> --squash --delete-branch`
-   - If it doesn't (wrong approach, incomplete, introduces new problems) → `gh pr close <N> --repo <repo>` (do NOT use `--delete-branch` — preserve the branch for recovery). The issues return to `ready` for a different approach next cycle.
+```bash
+gh pr diff <N> --repo <repo>
+gh pr view <N> --repo <repo> --json title,body
+# Fetch bodies of originating issues referenced in the PR
+gh issue view <ISSUE_N> --repo <repo> --json body
+```
+
+#### 2. Launch 5 review agents in parallel
+
+Use the Task tool to launch all 5 agents **in a single message** so they run concurrently. Each agent receives the same common context plus agent-specific instructions.
+
+Common context for every agent (include literally in each prompt):
+
+```
+<pr-title>{title}</pr-title>
+
+<issue-bodies>
+{issue body text for each originating issue}
+</issue-bodies>
+
+<pr-diff>
+{full PR diff}
+</pr-diff>
+```
+
+The 5 agents and their instructions:
+
+1. **Scope reviewer** — Does the PR match the originating issues? Flag: unrelated changes, missing fixes listed in the issue, over-engineering beyond what was asked, scope creep. Ignore minor cleanup adjacent to the fix.
+
+2. **Security reviewer** — Check the diff for: secrets or credentials, injection risks (SQL, command, path traversal), unsafe deserialization, hardcoded tokens, new dependencies with known CVEs, OWASP top 10 patterns.
+
+3. **Architecture reviewer** — Check for: crate/module boundary violations, increased coupling between layers, broken abstraction boundaries, public API surface changes without justification, pattern breaks vs established conventions.
+
+4. **Correctness reviewer** — Check for: logic errors, off-by-one bugs, unhandled error cases, race conditions, resource leaks, edge cases in new code paths, incorrect assumptions about input ranges or types.
+
+5. **Test adequacy reviewer** — Check for: new code paths without tests, changed behavior without updated tests, missing edge case tests, test assertions that don't verify the actual fix, integration test gaps for cross-module changes.
+
+Each agent prompt must end with:
+
+```
+Return your verdict as one of exactly these three values:
+- APPROVE — No issues found.
+- APPROVE_WITH_NOTES — Minor observations that do not block merge. List them.
+- REQUEST_CHANGES — Issues that must be fixed before merge. List each with file path and description.
+
+Start your response with your verdict on the first line, then your reasoning.
+```
+
+#### 3. Synthesize verdicts
+
+After all 5 agents return:
+
+- **All APPROVE or APPROVE_WITH_NOTES** → Merge the PR: `gh pr merge <N> --repo <repo> --squash --delete-branch`. If any agent returned APPROVE_WITH_NOTES, post the notes as a PR comment for the record before merging.
+- **Any REQUEST_CHANGES** → Do NOT merge. Continue to step 4.
+
+#### 4. Re-dispatch on REQUEST_CHANGES
+
+When any reviewer requests changes:
+
+1. **Check retry count**: Count previous comments on the PR that start with `## sipag review gate`. If >= 2 previous review gate comments exist, do NOT re-dispatch. Instead escalate: write an event file to `~/.sipag/events/` and leave the PR open for human review. Move on.
+
+2. **Post structured feedback** as a PR comment:
+
+   ```
+   ## sipag review gate — changes requested
+
+   ### Scope
+   {scope reviewer findings or "Approved"}
+
+   ### Security
+   {security reviewer findings or "Approved"}
+
+   ### Architecture
+   {architecture reviewer findings or "Approved"}
+
+   ### Correctness
+   {correctness reviewer findings or "Approved"}
+
+   ### Test adequacy
+   {test adequacy reviewer findings or "Approved"}
+   ```
+
+3. **Append review feedback to the PR body** so the next worker sees it as part of its assignment:
+
+   ```bash
+   # Get current body, append feedback, update
+   gh pr edit <N> --repo <repo> --body "$(gh pr view <N> --repo <repo> --json body -q .body)
+
+   ## Review Feedback
+
+   The following issues were identified by the review gate and must be addressed:
+
+   {consolidated list of REQUEST_CHANGES findings with file paths}
+   "
+   ```
+
+   This is critical — the worker reads the PR body as its complete assignment via `gh pr view --json body`.
+
+4. **Re-dispatch**: `sipag dispatch --repo <repo> --pr <N>`
+
+5. The new worker sees the original assignment + review feedback, addresses the issues, pushes. The review gate runs again when the worker finishes.
 
 ### Step 5: Continuous operation
 

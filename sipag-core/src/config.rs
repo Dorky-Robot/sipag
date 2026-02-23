@@ -3,14 +3,16 @@
 //! Resolution order: **env var > `~/.sipag/config` file > hardcoded default**.
 //!
 //! ```text
-//! Field          Env Var             Config Key      Default
-//! ────────────── ─────────────────── ─────────────── ─────────────────────────────────────
-//! sipag_dir      SIPAG_DIR           —               ~/.sipag
-//! image          SIPAG_IMAGE         image           ghcr.io/dorky-robot/sipag-worker:latest
-//! timeout        SIPAG_TIMEOUT       timeout         7200s
-//! work_label     SIPAG_WORK_LABEL    work_label      "ready"
-//! max_open_prs   SIPAG_MAX_OPEN_PRS  max_open_prs    3 (0 = disabled)
-//! poll_interval  SIPAG_POLL_INTERVAL poll_interval   120s
+//! Field               Env Var                  Config Key           Default
+//! ──────────────────  ───────────────────────  ──────────────────── ─────────────────────────────────
+//! sipag_dir           SIPAG_DIR                —                    ~/.sipag
+//! image               SIPAG_IMAGE              image                ghcr.io/dorky-robot/sipag-worker:latest
+//! timeout             SIPAG_TIMEOUT            timeout              7200s
+//! work_label          SIPAG_WORK_LABEL         work_label           "ready"
+//! max_open_prs        SIPAG_MAX_OPEN_PRS       max_open_prs         3 (0 = disabled)
+//! poll_interval       SIPAG_POLL_INTERVAL      poll_interval        120s
+//! heartbeat_interval  SIPAG_HEARTBEAT_INTERVAL heartbeat_interval   30s
+//! heartbeat_stale     SIPAG_HEARTBEAT_STALE    heartbeat_stale      90s
 //! ```
 
 use anyhow::Result;
@@ -29,6 +31,8 @@ const KNOWN_KEYS: &[&str] = &[
     "work_label",
     "max_open_prs",
     "poll_interval",
+    "heartbeat_interval",
+    "heartbeat_stale",
 ];
 
 /// Runtime configuration for sipag.
@@ -46,6 +50,10 @@ pub struct WorkerConfig {
     pub max_open_prs: usize,
     /// Seconds between polling cycles (default 120).
     pub poll_interval: u64,
+    /// Seconds between heartbeat file writes inside worker containers (default 30).
+    pub heartbeat_interval: u64,
+    /// Seconds after which a stale heartbeat means the worker is dead (default 90).
+    pub heartbeat_stale_secs: u64,
 }
 
 impl WorkerConfig {
@@ -94,6 +102,8 @@ impl WorkerConfig {
             work_label: "ready".to_string(),
             max_open_prs: 3,
             poll_interval: 120,
+            heartbeat_interval: 30,
+            heartbeat_stale_secs: 90,
         }
     }
 
@@ -134,6 +144,34 @@ impl WorkerConfig {
                 Err(_) => {
                     return Some(format!(
                         "config: poll_interval={value} is not a valid number; using default 120s"
+                    ));
+                }
+            },
+            "heartbeat_interval" => match value.parse::<u64>() {
+                Ok(n) if n < 5 => {
+                    self.heartbeat_interval = 5;
+                    return Some(format!(
+                        "config: heartbeat_interval={n} is too low (minimum 5s); using 5s"
+                    ));
+                }
+                Ok(n) => self.heartbeat_interval = n,
+                Err(_) => {
+                    return Some(format!(
+                        "config: heartbeat_interval={value} is not a valid number; using default 30s"
+                    ));
+                }
+            },
+            "heartbeat_stale" => match value.parse::<u64>() {
+                Ok(n) if n < 15 => {
+                    self.heartbeat_stale_secs = 15;
+                    return Some(format!(
+                        "config: heartbeat_stale={n} is too low (minimum 15s); using 15s"
+                    ));
+                }
+                Ok(n) => self.heartbeat_stale_secs = n,
+                Err(_) => {
+                    return Some(format!(
+                        "config: heartbeat_stale={value} is not a valid number; using default 90s"
                     ));
                 }
             },
@@ -184,6 +222,34 @@ impl WorkerConfig {
                 Ok(n) => self.poll_interval = n,
                 Err(_) => warnings.push(format!(
                     "SIPAG_POLL_INTERVAL={v} is not a valid number; using default 120s"
+                )),
+            }
+        }
+        if let Some(v) = get_env("SIPAG_HEARTBEAT_INTERVAL") {
+            match v.parse::<u64>() {
+                Ok(n) if n < 5 => {
+                    self.heartbeat_interval = 5;
+                    warnings.push(format!(
+                        "SIPAG_HEARTBEAT_INTERVAL={n} is too low (minimum 5s); using 5s"
+                    ));
+                }
+                Ok(n) => self.heartbeat_interval = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_HEARTBEAT_INTERVAL={v} is not a valid number; using default 30s"
+                )),
+            }
+        }
+        if let Some(v) = get_env("SIPAG_HEARTBEAT_STALE") {
+            match v.parse::<u64>() {
+                Ok(n) if n < 15 => {
+                    self.heartbeat_stale_secs = 15;
+                    warnings.push(format!(
+                        "SIPAG_HEARTBEAT_STALE={n} is too low (minimum 15s); using 15s"
+                    ));
+                }
+                Ok(n) => self.heartbeat_stale_secs = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_HEARTBEAT_STALE={v} is not a valid number; using default 90s"
                 )),
             }
         }
@@ -251,6 +317,24 @@ fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
             Ok(_) => ConfigEntryStatus::Valid,
             Err(_) => ConfigEntryStatus::InvalidValue {
                 clamped_to: "120 (default)".to_string(),
+            },
+        },
+        "heartbeat_interval" => match value.parse::<u64>() {
+            Ok(n) if n < 5 => ConfigEntryStatus::InvalidValue {
+                clamped_to: "5".to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "30 (default)".to_string(),
+            },
+        },
+        "heartbeat_stale" => match value.parse::<u64>() {
+            Ok(n) if n < 15 => ConfigEntryStatus::InvalidValue {
+                clamped_to: "15".to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "90 (default)".to_string(),
             },
         },
         "image" | "work_label" => ConfigEntryStatus::Valid,

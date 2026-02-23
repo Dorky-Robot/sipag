@@ -19,7 +19,7 @@ The three-phase flow:
 sipag-core/src/
 ├── lib.rs              # pub mod: auth, config, docker, init, repo, state, worker
 ├── auth.rs             # Token resolution (OAuth, API key, GH token)
-├── config.rs           # WorkerConfig (5 fields), Credentials, default_sipag_dir()
+├── config.rs           # WorkerConfig (7 fields), Credentials, default_sipag_dir()
 ├── docker.rs           # Preflight checks (daemon running, image available)
 ├── init.rs             # Create ~/.sipag/{workers,logs}
 ├── repo.rs             # Git remote resolution (local dir → GitHub owner/repo)
@@ -28,7 +28,7 @@ sipag-core/src/
     ├── mod.rs           # pub use dispatch, github, lifecycle
     ├── dispatch.rs      # dispatch_worker() → Docker container
     ├── github.rs        # list_labeled_issues, count_open_sipag_prs, fetch_open_issues/prs
-    └── lifecycle.rs     # scan_workers, check_container_alive, cleanup_finished
+    └── lifecycle.rs     # scan_workers (heartbeat-based liveness), cleanup_finished
 
 sipag/src/
 ├── main.rs             # Entry point
@@ -98,17 +98,19 @@ sipag version                 Print version
 | `work_label` | `ready` | Issue label gate |
 | `max_open_prs` | `3` | Back-pressure limit |
 | `poll_interval` | `120` | Seconds between polling cycles |
+| `heartbeat_interval` | `30` | Seconds between heartbeat writes |
+| `heartbeat_stale` | `90` | Seconds before a heartbeat is considered stale |
 
-Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`.
+Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`, `SIPAG_HEARTBEAT_INTERVAL`, `SIPAG_HEARTBEAT_STALE`.
 
 ## File layout (~/.sipag/)
 
 ```
-workers/     # PR-keyed state JSON files
-logs/        # Worker log files ({owner}--{repo}--pr-{N}.log)
-events/      # Lifecycle event files (worker failures, escalations)
-lessons/     # Per-repo lessons from failed workers ({owner}--{repo}.md)
-config       # optional config file
+workers/     # PR-keyed state JSON + heartbeat files
+events/      # Append-only lifecycle events (the event bus)
+logs/        # Worker stdout/stderr ({owner}--{repo}--pr-{N}.log)
+lessons/     # Per-repo learning from failures ({owner}--{repo}.md)
+config       # Optional config file
 ```
 
 ## Conventions
