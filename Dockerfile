@@ -1,5 +1,5 @@
 # Stage 1: Build sipag-worker binary
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /build
 

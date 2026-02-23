@@ -42,6 +42,32 @@ pub fn cleanup_finished(worker: &WorkerState, _sipag_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove state files for terminal workers (finished/failed) older than `max_age_hours`.
+///
+/// Returns the number of files cleaned up.
+pub fn cleanup_stale(sipag_dir: &Path, max_age_hours: u64) -> usize {
+    let workers = scan_workers(sipag_dir);
+    let now = chrono::Utc::now();
+    let mut cleaned = 0;
+
+    for w in &workers {
+        if !w.phase.is_terminal() {
+            continue;
+        }
+
+        // Use ended time if available, otherwise started time.
+        let timestamp = w.ended.as_deref().unwrap_or(&w.started);
+        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+            let age_hours = (now - ts.with_timezone(&chrono::Utc)).num_hours().max(0) as u64;
+            if age_hours >= max_age_hours && state::remove_state(&w.file_path).is_ok() {
+                cleaned += 1;
+            }
+        }
+    }
+
+    cleaned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

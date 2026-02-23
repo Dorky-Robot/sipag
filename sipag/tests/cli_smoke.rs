@@ -204,9 +204,11 @@ fn ps_multiple_workers_all_shown() {
 #[test]
 fn ps_shows_finished_and_failed() {
     let dir = temp_sipag_dir();
+    // Use a recent timestamp so the stale-filter doesn't hide these.
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     for (pr, phase) in [(1, "finished"), (2, "failed")] {
         let json = format!(
-            r#"{{"repo":"o/r","pr_num":{pr},"issues":[],"branch":"b","container_id":"c","phase":"{phase}","heartbeat":"2026-01-01T00:00:00Z","started":"2026-01-01T00:00:00Z"}}"#
+            r#"{{"repo":"o/r","pr_num":{pr},"issues":[],"branch":"b","container_id":"c","phase":"{phase}","heartbeat":"{now}","started":"{now}"}}"#
         );
         fs::write(dir.path().join(format!("workers/o--r--pr-{pr}.json")), json).unwrap();
     }

@@ -66,6 +66,12 @@ fn run() -> Result<i32> {
     update_phase(&state_path, WorkerPhase::Working)?;
 
     // Build the prompt: PR description + lessons + worker disposition.
+    // Replace placeholders in the worker prompt with actual values.
+    let worker_prompt = WORKER_PROMPT
+        .replace("{BRANCH}", &branch)
+        .replace("{PR_NUM}", &pr_num.to_string())
+        .replace("{REPO}", &repo);
+
     let prompt = format!(
         "You are a sipag worker implementing a PR. The PR description below is your\n\
          complete assignment — it contains the architectural insight, approach, affected\n\
@@ -78,7 +84,7 @@ fn run() -> Result<i32> {
          --- END PR DESCRIPTION ---\n\
          \n\
          {lessons_section}\
-         {WORKER_PROMPT}"
+         {worker_prompt}"
     );
 
     // Write prompt to a temp file to avoid argument size limits.
@@ -94,6 +100,24 @@ fn run() -> Result<i32> {
         .context("failed to run claude")?;
 
     let exit_code = status.code().unwrap_or(1);
+
+    // Post-run verification: check if commits were actually pushed.
+    if exit_code == 0 {
+        let pushed = verify_commits_pushed(&branch);
+        if !pushed {
+            eprintln!("sipag-worker: claude exited 0 but no commits were pushed to {branch}");
+            let mut s = state::read_state(&state_path).context("failed to read state file")?;
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            s.phase = WorkerPhase::Failed;
+            s.exit_code = Some(1);
+            s.ended = Some(now.clone());
+            s.heartbeat = now;
+            s.error =
+                Some("no_changes_pushed: claude exited 0 but no commits were pushed".to_string());
+            state::write_state(&s).context("failed to write state file")?;
+            return Ok(1);
+        }
+    }
 
     // Report completion.
     finish_state(&state_path, exit_code)?;
@@ -166,6 +190,60 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} exited with code {}", status.code().unwrap_or(-1));
     }
     Ok(())
+}
+
+/// Check whether any commits were pushed to the remote branch after Claude ran.
+///
+/// Compares local HEAD against the remote tracking branch. If they differ,
+/// commits were pushed. If git commands fail, assume success (don't block on
+/// verification failures).
+fn verify_commits_pushed(branch: &str) -> bool {
+    // Fetch latest remote state.
+    let fetch = Command::new("git")
+        .args(["-C", "/work", "fetch", "origin", branch])
+        .output();
+    if fetch.is_err() {
+        return true; // can't verify, assume ok
+    }
+
+    // Compare local branch against remote.
+    let output = Command::new("git")
+        .args([
+            "-C",
+            "/work",
+            "log",
+            &format!("origin/{branch}..HEAD"),
+            "--oneline",
+        ])
+        .output();
+
+    match output {
+        Ok(o) => {
+            let unpushed = String::from_utf8_lossy(&o.stdout);
+            // If there are unpushed commits, that's a problem — changes were made but not pushed.
+            // If both local and remote are the same, check if remote has new commits vs base.
+            if !unpushed.trim().is_empty() {
+                // Commits exist locally but weren't pushed — that's a failure.
+                eprintln!("sipag-worker: found unpushed commits:\n{}", unpushed.trim());
+                return false;
+            }
+
+            // Check if the branch has any commits at all beyond what was there at clone time.
+            // Use the PR base (typically main/master) to see if the branch diverged.
+            let diff_output = Command::new("git")
+                .args(["-C", "/work", "diff", "--stat", &format!("origin/{branch}")])
+                .output();
+            match diff_output {
+                Ok(d) => {
+                    let diff = String::from_utf8_lossy(&d.stdout);
+                    // If there's a diff stat, the branch has changes (pushed or pre-existing).
+                    !diff.trim().is_empty()
+                }
+                Err(_) => true,
+            }
+        }
+        Err(_) => true, // can't verify, assume ok
+    }
 }
 
 /// Read the lessons file for a repo from the mounted lessons directory.

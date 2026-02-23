@@ -86,6 +86,9 @@ fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
     let sipag_dir = default_sipag_dir();
     init::init_dirs(&sipag_dir)?;
 
+    // Clean up stale terminal state files older than 24 hours.
+    lifecycle::cleanup_stale(&sipag_dir, 24);
+
     let cfg = WorkerConfig::load(&sipag_dir)?;
 
     // Preflight checks.
@@ -155,6 +158,26 @@ fn run_ps() -> Result<()> {
     let sipag_dir = default_sipag_dir();
     let workers = lifecycle::scan_workers(&sipag_dir);
 
+    // Filter out terminal workers older than 24 hours from display.
+    let now = chrono::Utc::now();
+    let workers: Vec<_> = workers
+        .into_iter()
+        .filter(|w| {
+            if !w.phase.is_terminal() {
+                return true;
+            }
+            let timestamp = w.ended.as_deref().unwrap_or(&w.started);
+            match chrono::DateTime::parse_from_rfc3339(timestamp) {
+                Ok(ts) => {
+                    let age_hours =
+                        (now - ts.with_timezone(&chrono::Utc)).num_hours().max(0) as u64;
+                    age_hours < 24
+                }
+                Err(_) => false, // unparsable timestamp → hide
+            }
+        })
+        .collect();
+
     if workers.is_empty() {
         println!("No workers found.");
         return Ok(());
@@ -166,7 +189,6 @@ fn run_ps() -> Result<()> {
     );
     println!("{}", "-".repeat(78));
 
-    let now = chrono::Utc::now();
     for w in &workers {
         let age = if let Ok(started) = chrono::DateTime::parse_from_rfc3339(&w.started) {
             let secs = (now - started.with_timezone(&chrono::Utc))
