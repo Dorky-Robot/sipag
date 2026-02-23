@@ -1,0 +1,14 @@
+[package]
+name = "sipag-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Container-side worker binary for sipag — replaces worker.sh"
+
+[[bin]]
+name = "sipag-worker"
+path = "src/main.rs"
+
+[dependencies]
+sipag-core = { path = "../sipag-core" }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

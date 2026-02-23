@@ -1,10 +1,12 @@
 //! PR-keyed worker state — the single source of truth for worker lifecycle.
 //!
 //! Each worker gets a JSON state file at `~/.sipag/workers/{owner}--{repo}--pr-{N}.json`.
-//! The container writes to it via `sipag-state.sh`; the Rust side reads it.
+//! Both the host (sipag) and container (sipag-worker) use this module, ensuring
+//! field names and serialization are always consistent.
 
 use anyhow::Result;
 use std::fmt;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 /// Lifecycle phase of a worker container.
@@ -126,7 +128,13 @@ pub fn write_state(state: &WorkerState) -> Result<()> {
     }
 
     let json = serde_json::to_string_pretty(&obj)?;
-    std::fs::write(&state.file_path, json)?;
+
+    // Atomic write: write to temp file in same directory, then rename.
+    // rename(2) is atomic on POSIX when src and dst are on the same filesystem.
+    let parent = state.file_path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(json.as_bytes())?;
+    tmp.persist(&state.file_path)?;
     Ok(())
 }
 
@@ -274,5 +282,30 @@ mod tests {
     fn remove_nonexistent_file_is_ok() {
         let path = Path::new("/tmp/nonexistent-sipag-state.json");
         assert!(remove_state(path).is_ok());
+    }
+
+    #[test]
+    fn read_state_malformed_json_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json at all{{{").unwrap();
+        assert!(read_state(&path).is_err());
+    }
+
+    #[test]
+    fn read_state_missing_fields_defaults_gracefully() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("minimal.json");
+        std::fs::write(&path, r#"{"repo": "a/b"}"#).unwrap();
+        let state = read_state(&path).unwrap();
+        assert_eq!(state.repo, "a/b");
+        assert_eq!(state.pr_num, 0);
+        assert_eq!(state.phase, WorkerPhase::Failed); // unknown phase → Failed
+    }
+
+    #[test]
+    fn phase_parse_unknown_defaults_to_failed() {
+        assert_eq!(WorkerPhase::parse("bogus"), WorkerPhase::Failed);
+        assert_eq!(WorkerPhase::parse(""), WorkerPhase::Failed);
     }
 }

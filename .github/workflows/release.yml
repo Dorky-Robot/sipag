@@ -60,14 +60,11 @@ jobs:
 
           # Staging directory
           mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/prompts"
-          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/container"
 
           # Binary
           cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
 
-          # Bash scripts (setup, doctor, start, merge, refresh-docs)
-          cp lib/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/"
-          cp lib/container/*.sh "dist/sipag-${VERSION}-${TARGET}/lib/container/"
+          # Prompts
           cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
 
           # Create tarball
@@ -147,7 +144,6 @@ jobs:
             echo "  version \"${VERSION_CLEAN}\""
             echo '  license "MIT"'
             echo ''
-            echo '  depends_on "jq"'
             echo '  depends_on "gh"'
             echo ''
             echo '  on_macos do'

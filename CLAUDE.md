@@ -13,7 +13,7 @@ The three-phase flow:
 
 ## Architecture
 
-### Rust workspace (3 crates)
+### Rust workspace (4 crates)
 
 ```
 sipag-core/src/
@@ -22,7 +22,7 @@ sipag-core/src/
 ├── config.rs           # WorkerConfig (5 fields), Credentials, default_sipag_dir()
 ├── docker.rs           # Preflight checks (daemon running, image available)
 ├── init.rs             # Create ~/.sipag/{workers,logs}
-├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files
+├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files (atomic writes)
 └── worker/
     ├── mod.rs           # pub use dispatch, github, lifecycle
     ├── dispatch.rs      # dispatch_worker() → Docker container
@@ -33,6 +33,9 @@ sipag/src/
 ├── main.rs             # Entry point
 └── cli.rs              # 7 commands: dispatch, ps, logs, kill, tui, doctor, version
 
+sipag-worker/src/
+└── main.rs             # Container-side binary: clone, fetch PR, run Claude Code
+
 tui/src/
 ├── main.rs             # Terminal setup, event loop, attach
 ├── app.rs              # App state, key handling, task refresh
@@ -40,17 +43,13 @@ tui/src/
 └── ui/                 # list.rs (table view), detail.rs (metadata + log)
 ```
 
-### Container scripts
+### Worker prompt
 
 ```
-lib/container/worker.sh      # Worker entrypoint (embedded via include_str!)
-lib/container/sipag-state.sh  # Atomic JSON state updates (copied into image)
 lib/prompts/worker.md         # Worker disposition prompt (embedded via include_str!)
 ```
 
-### Worker prompt
-
-The PR description is the complete assignment. `worker.sh` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`.
+The PR description is the complete assignment. `sipag-worker` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`. Both host and container use `sipag-core::state` for state I/O, ensuring field names are always consistent.
 
 ### State model
 

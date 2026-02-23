@@ -6,7 +6,9 @@ on:
       - main
     paths:
       - 'Dockerfile'
-      - 'lib/**'
+      - 'sipag-core/**'
+      - 'sipag-worker/**'
+      - 'lib/prompts/**'
       - '.github/workflows/publish-worker.yml'
   release:
     types: [published]

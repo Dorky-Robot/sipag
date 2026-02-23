@@ -1,7 +1,34 @@
+# Stage 1: Build sipag-worker binary
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /build
+
+# Copy workspace root
+COPY Cargo.toml Cargo.lock ./
+
+# Copy the crates we need to build
+COPY sipag-core/ sipag-core/
+COPY sipag-worker/ sipag-worker/
+
+# Stub out sipag/ and tui/ so Cargo can resolve the workspace
+RUN mkdir -p sipag/src tui/src \
+    && echo 'fn main() {}' > sipag/src/main.rs \
+    && echo 'fn main() {}' > tui/src/main.rs
+COPY sipag/Cargo.toml sipag/Cargo.toml
+COPY tui/Cargo.toml tui/Cargo.toml
+
+# Copy prompts (needed by include_str! in sipag-worker)
+COPY lib/prompts/ lib/prompts/
+
+# Build only the sipag-worker binary
+RUN cargo build --release --package sipag-worker \
+    && strip target/release/sipag-worker
+
+# Stage 2: Runtime image
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
-    git curl build-essential ca-certificates tmux jq gnupg locales \
+    git curl build-essential ca-certificates tmux gnupg locales \
     && locale-gen en_US.UTF-8 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,9 +55,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# State-reporting helper for worker containers
-COPY lib/container/sipag-state.sh /usr/local/bin/sipag-state
-RUN chmod +x /usr/local/bin/sipag-state
+# sipag-worker binary (replaces worker.sh + sipag-state.sh)
+COPY --from=builder /build/target/release/sipag-worker /usr/local/bin/sipag-worker
 
 # Non-root user (claude refuses --dangerously-skip-permissions as root)
 RUN useradd -m -s /bin/bash sipag \

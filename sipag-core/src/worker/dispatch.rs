@@ -8,12 +8,6 @@ use std::process::{Command, Stdio};
 use crate::config::{Credentials, WorkerConfig};
 use crate::state::{self, WorkerPhase, WorkerState};
 
-/// Container entrypoint script (embedded at compile time).
-const WORKER_SCRIPT: &str = include_str!("../../../lib/container/worker.sh");
-
-/// Worker disposition prompt (embedded at compile time).
-const WORKER_PROMPT: &str = include_str!("../../../lib/prompts/worker.md");
-
 /// Launch a Docker container to implement a PR.
 ///
 /// The worker clones the repo, checks out the PR branch, reads the PR
@@ -68,10 +62,6 @@ pub fn dispatch_worker(
     let workers_dir = cfg.sipag_dir.join("workers");
     let state_filename = format!("{repo_slug}--pr-{pr_num}.json");
 
-    // Write prompt to a temp file to avoid argument size limits.
-    let prompt_dir = tempfile::tempdir()?;
-    fs::write(prompt_dir.path().join("worker.md"), WORKER_PROMPT)?;
-
     let timeout_bin = crate::docker::resolve_timeout_command();
     let mut cmd;
     if let Some(ref bin) = timeout_bin {
@@ -95,9 +85,6 @@ pub fn dispatch_worker(
         .arg(format!("{}:/sipag-state", workers_dir.display()))
         .arg("-e")
         .arg(format!("STATE_FILE=/sipag-state/{state_filename}"))
-        // Mount prompt
-        .arg("-v")
-        .arg(format!("{}:/prompts:ro", prompt_dir.path().display()))
         // Environment
         .arg("-e")
         .arg(format!("REPO={repo}"))
@@ -111,11 +98,9 @@ pub fn dispatch_worker(
         .arg("ANTHROPIC_API_KEY")
         .arg("-e")
         .arg("GH_TOKEN")
-        // Image and script
+        // Image and entrypoint
         .arg(&cfg.image)
-        .arg("bash")
-        .arg("-c")
-        .arg(WORKER_SCRIPT)
+        .arg("/usr/local/bin/sipag-worker")
         .stdout(Stdio::from(log_out))
         .stderr(Stdio::from(log_err));
 
@@ -194,16 +179,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_script_is_not_empty() {
-        assert!(!WORKER_SCRIPT.is_empty());
-    }
-
-    #[test]
-    fn worker_prompt_is_not_empty() {
-        assert!(!WORKER_PROMPT.is_empty());
-    }
-
-    #[test]
     fn failure_reason_repo_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("test.log");
@@ -227,5 +202,56 @@ mod tests {
         let log = dir.path().join("test.log");
         fs::write(&log, "").unwrap();
         assert!(extract_failure_reason(&log).is_none());
+    }
+
+    #[test]
+    fn failure_reason_auth_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("test.log");
+        fs::write(
+            &log,
+            "Cloning into '/work'...\nfatal: Authentication failed for 'https://github.com/o/r'\n",
+        )
+        .unwrap();
+        let reason = extract_failure_reason(&log).unwrap();
+        assert!(reason.contains("authentication failed"));
+    }
+
+    #[test]
+    fn container_name_format() {
+        // The naming convention in dispatch_worker is: sipag-worker-pr-{pr_num}
+        let name = format!("sipag-worker-pr-{}", 42);
+        assert_eq!(name, "sipag-worker-pr-42");
+        assert!(!name.contains('/'));
+    }
+
+    #[test]
+    fn initial_state_has_starting_phase() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("workers")).unwrap();
+
+        let state_path = state::state_file_path(dir.path(), "owner/repo", 7);
+        let initial = WorkerState {
+            repo: "owner/repo".to_string(),
+            pr_num: 7,
+            issues: vec![10, 20],
+            branch: "sipag/pr-7".to_string(),
+            container_id: String::new(),
+            phase: WorkerPhase::Starting,
+            heartbeat: "2026-01-01T00:00:00Z".to_string(),
+            started: "2026-01-01T00:00:00Z".to_string(),
+            ended: None,
+            exit_code: None,
+            error: None,
+            file_path: state_path.clone(),
+        };
+        state::write_state(&initial).unwrap();
+
+        let loaded = state::read_state(&state_path).unwrap();
+        assert_eq!(loaded.phase, WorkerPhase::Starting);
+        assert_eq!(loaded.repo, "owner/repo");
+        assert_eq!(loaded.pr_num, 7);
+        assert_eq!(loaded.issues, vec![10, 20]);
+        assert!(loaded.container_id.is_empty());
     }
 }

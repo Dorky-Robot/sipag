@@ -10,9 +10,9 @@ install:
 	@# Rust binaries — sipag is the sole entry point, sipag-tui for the TUI
 	cargo install --path sipag
 	cargo install --path tui
-	@# Container scripts and prompts — kept in share/ for reference
-	@mkdir -p "$(SHARE_DIR)/lib/prompts" "$(SHARE_DIR)/lib/container"
-	@install -m 644 lib/container/*.sh "$(SHARE_DIR)/lib/container/"
+	cargo install --path sipag-worker
+	@# Prompts — kept in share/ for reference
+	@mkdir -p "$(SHARE_DIR)/lib/prompts"
 	@install -m 644 lib/prompts/*.md "$(SHARE_DIR)/lib/prompts/"
 	@echo ""
 	@echo "sipag installed. Try: sipag version"

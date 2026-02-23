@@ -87,7 +87,7 @@ echo "      ✓ No clippy warnings"
 step "[7/7] Shell lint (shellcheck)"
 if command -v shellcheck >/dev/null 2>&1; then
     SHELL_FILES=()
-    for glob in lib/*.sh lib/container/*.sh; do
+    for glob in lib/*.sh; do
         # shellcheck disable=SC2086
         [ -e "$glob" ] && SHELL_FILES+=("$glob")
     done
