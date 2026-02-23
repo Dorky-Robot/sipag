@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use sipag_core::{
-    config::{default_sipag_dir, WorkerConfig},
+    auth,
+    config::{default_sipag_dir, Credentials, WorkerConfig},
     docker,
     repo::{self, ResolvedRepo},
     worker::github,
@@ -35,6 +36,8 @@ pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
     // Preflight checks.
     let sipag_dir = default_sipag_dir();
     let cfg = WorkerConfig::load(&sipag_dir)?;
+    let creds = Credentials::load(&sipag_dir)?;
+    auth::preflight_auth(&sipag_dir)?;
     github::preflight_gh_auth()?;
     docker::preflight_docker_running()?;
     docker::preflight_docker_image(&cfg.image)?;
@@ -44,11 +47,34 @@ pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
     let board_state = format_board_state(&repos)?;
 
     // Build system prompt.
-    let system_prompt = WORK_PROMPT.replace("{BOARD_STATE}", &board_state);
+    let tao_section = if let (Some(actor), Some(role)) = (&cfg.tao_actor, &cfg.tao_role) {
+        format!(
+            "## Escalation via tao\n\n\
+             When a worker fails or something needs human judgment, escalate via tao:\n\n\
+             ```bash\n\
+             echo '{{\"repo\": \"<repo>\", \"pr\": <N>, \"error\": \"<reason>\"}}' | \\\n\
+             tao resolve-failure {role} {actor} --detach\n\
+             ```\n\n\
+             This sends the failure to **{actor}** (role: {role}) and returns a tracking ID immediately.\n\
+             Log the tracking ID and move on — don't block the polling loop.\n\
+             The human will respond asynchronously via tao."
+        )
+    } else {
+        "## Escalation\n\n\
+         No tao actor configured. When a worker fails, log the failure and move on.\n\
+         To enable human escalation, add `tao_actor` and `tao_role` to `~/.sipag/config`."
+            .to_string()
+    };
+
+    let system_prompt = WORK_PROMPT
+        .replace("{BOARD_STATE}", &board_state)
+        .replace("{POLL_INTERVAL}", &cfg.poll_interval.to_string())
+        .replace("{WORK_LABEL}", &cfg.work_label)
+        .replace("{TAO_ESCALATION}", &tao_section);
 
     // Exec into claude.
     eprintln!("Launching Claude session...\n");
-    exec_claude(&system_prompt)
+    exec_claude(&system_prompt, &creds)
 }
 
 /// Fetch and format board state for all repos.
@@ -96,11 +122,24 @@ fn format_board_state(repos: &[ResolvedRepo]) -> Result<String> {
 }
 
 /// Replace the current process with an interactive Claude session.
-fn exec_claude(system_prompt: &str) -> Result<()> {
-    let err = Command::new("claude")
-        .arg("--append-system-prompt")
+///
+/// Sets auth credentials in the environment and passes an initial message
+/// so Claude starts the disease identification cycle immediately.
+fn exec_claude(system_prompt: &str, creds: &Credentials) -> Result<()> {
+    let mut cmd = Command::new("claude");
+    cmd.arg("--append-system-prompt")
         .arg(system_prompt)
-        .exec();
+        .arg("Begin the sipag autonomous cycle. Study the codebase first, then launch the background poller to continuously monitor and resolve issues.");
+
+    // Pass auth credentials so Claude picks them up.
+    if let Some(ref token) = creds.oauth_token {
+        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
+    }
+    if let Some(ref key) = creds.api_key {
+        cmd.env("ANTHROPIC_API_KEY", key);
+    }
+
+    let err = cmd.exec();
 
     // exec() only returns on error.
     bail!("failed to exec claude: {err}")

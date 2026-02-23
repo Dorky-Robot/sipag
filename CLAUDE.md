@@ -97,6 +97,9 @@ sipag version                 Print version
 | `timeout` | `7200` | Worker timeout in seconds |
 | `work_label` | `ready` | Issue label gate |
 | `max_open_prs` | `3` | Back-pressure limit |
+| `poll_interval` | `120` | Seconds between polling cycles |
+| `tao_actor` | (none) | tao actor for human escalation |
+| `tao_role` | (none) | tao role for human escalation |
 
 Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`.
 

@@ -201,6 +201,9 @@ image=ghcr.io/dorky-robot/sipag-worker:latest
 timeout=7200
 work_label=ready
 max_open_prs=3
+poll_interval=120
+tao_actor=felix
+tao_role=developer
 ```
 
 | Key | Default | Description |
@@ -209,8 +212,11 @@ max_open_prs=3
 | `timeout` | `7200` | Worker timeout in seconds (2 hours) |
 | `work_label` | `ready` | Issue label that marks tasks ready for dispatch |
 | `max_open_prs` | `3` | Max open sipag PRs before dispatch is paused (0 = no limit) |
+| `poll_interval` | `120` | Seconds between polling cycles |
+| `tao_actor` | (none) | tao actor name for human escalation via tao |
+| `tao_role` | (none) | tao role name for human escalation via tao |
 
-Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`.
+Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_POLL_INTERVAL`, `SIPAG_TAO_ACTOR`, `SIPAG_TAO_ROLE`, `SIPAG_DIR`.
 
 ## File layout
 

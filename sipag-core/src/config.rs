@@ -3,13 +3,16 @@
 //! Resolution order: **env var > `~/.sipag/config` file > hardcoded default**.
 //!
 //! ```text
-//! Field         Env Var            Config Key     Default
-//! ───────────── ────────────────── ────────────── ─────────────────────────────────────
-//! sipag_dir     SIPAG_DIR          —              ~/.sipag
-//! image         SIPAG_IMAGE        image          ghcr.io/dorky-robot/sipag-worker:latest
-//! timeout       SIPAG_TIMEOUT      timeout        7200s
-//! work_label    SIPAG_WORK_LABEL   work_label     "ready"
-//! max_open_prs  SIPAG_MAX_OPEN_PRS max_open_prs   3 (0 = disabled)
+//! Field          Env Var             Config Key      Default
+//! ────────────── ─────────────────── ─────────────── ─────────────────────────────────────
+//! sipag_dir      SIPAG_DIR           —               ~/.sipag
+//! image          SIPAG_IMAGE         image           ghcr.io/dorky-robot/sipag-worker:latest
+//! timeout        SIPAG_TIMEOUT       timeout         7200s
+//! work_label     SIPAG_WORK_LABEL    work_label      "ready"
+//! max_open_prs   SIPAG_MAX_OPEN_PRS  max_open_prs    3 (0 = disabled)
+//! poll_interval  SIPAG_POLL_INTERVAL poll_interval   120s
+//! tao_actor      SIPAG_TAO_ACTOR     tao_actor       (none)
+//! tao_role       SIPAG_TAO_ROLE      tao_role        (none)
 //! ```
 
 use anyhow::Result;
@@ -22,7 +25,15 @@ const TIMEOUT_MIN_SECS: u64 = 1;
 pub const DEFAULT_IMAGE: &str = "ghcr.io/dorky-robot/sipag-worker:latest";
 
 /// All known keys in the `~/.sipag/config` file.
-const KNOWN_KEYS: &[&str] = &["image", "timeout", "work_label", "max_open_prs"];
+const KNOWN_KEYS: &[&str] = &[
+    "image",
+    "timeout",
+    "work_label",
+    "max_open_prs",
+    "poll_interval",
+    "tao_actor",
+    "tao_role",
+];
 
 /// Runtime configuration for sipag.
 #[derive(Debug, Clone)]
@@ -37,6 +48,12 @@ pub struct WorkerConfig {
     pub work_label: String,
     /// Maximum open sipag PRs before dispatch is paused (default 3; 0 = disabled).
     pub max_open_prs: usize,
+    /// Seconds between polling cycles (default 120).
+    pub poll_interval: u64,
+    /// tao actor for human escalation (e.g. "felix"). None = no escalation.
+    pub tao_actor: Option<String>,
+    /// tao role for human escalation (e.g. "developer"). None = no escalation.
+    pub tao_role: Option<String>,
 }
 
 impl WorkerConfig {
@@ -84,6 +101,9 @@ impl WorkerConfig {
             timeout: 7200,
             work_label: "ready".to_string(),
             max_open_prs: 3,
+            poll_interval: 120,
+            tao_actor: None,
+            tao_role: None,
         }
     }
 
@@ -113,6 +133,22 @@ impl WorkerConfig {
                     ));
                 }
             },
+            "poll_interval" => match value.parse::<u64>() {
+                Ok(n) if n < 10 => {
+                    self.poll_interval = 10;
+                    return Some(format!(
+                        "config: poll_interval={n} is too low (minimum 10s); using 10s"
+                    ));
+                }
+                Ok(n) => self.poll_interval = n,
+                Err(_) => {
+                    return Some(format!(
+                        "config: poll_interval={value} is not a valid number; using default 120s"
+                    ));
+                }
+            },
+            "tao_actor" => self.tao_actor = Some(value.to_string()),
+            "tao_role" => self.tao_role = Some(value.to_string()),
             _ => {}
         }
         None
@@ -148,6 +184,26 @@ impl WorkerConfig {
                     "SIPAG_MAX_OPEN_PRS={v} is not a valid number; using default 3"
                 )),
             }
+        }
+        if let Some(v) = get_env("SIPAG_POLL_INTERVAL") {
+            match v.parse::<u64>() {
+                Ok(n) if n < 10 => {
+                    self.poll_interval = 10;
+                    warnings.push(format!(
+                        "SIPAG_POLL_INTERVAL={n} is too low (minimum 10s); using 10s"
+                    ));
+                }
+                Ok(n) => self.poll_interval = n,
+                Err(_) => warnings.push(format!(
+                    "SIPAG_POLL_INTERVAL={v} is not a valid number; using default 120s"
+                )),
+            }
+        }
+        if let Some(v) = get_env("SIPAG_TAO_ACTOR") {
+            self.tao_actor = Some(v);
+        }
+        if let Some(v) = get_env("SIPAG_TAO_ROLE") {
+            self.tao_role = Some(v);
         }
 
         warnings
@@ -207,7 +263,16 @@ fn validate_entry_status(key: &str, value: &str) -> ConfigEntryStatus {
                 clamped_to: "3 (default)".to_string(),
             },
         },
-        "image" | "work_label" => ConfigEntryStatus::Valid,
+        "poll_interval" => match value.parse::<u64>() {
+            Ok(n) if n < 10 => ConfigEntryStatus::InvalidValue {
+                clamped_to: "10".to_string(),
+            },
+            Ok(_) => ConfigEntryStatus::Valid,
+            Err(_) => ConfigEntryStatus::InvalidValue {
+                clamped_to: "120 (default)".to_string(),
+            },
+        },
+        "image" | "work_label" | "tao_actor" | "tao_role" => ConfigEntryStatus::Valid,
         _ => ConfigEntryStatus::Unknown {
             suggestion: closest_known_key(key),
         },
