@@ -1411,6 +1411,7 @@ dependencies = [
  "chrono",
  "clap",
  "predicates",
+ "serde_json",
  "sipag-core",
  "tempfile",
 ]

@@ -1,81 +1,109 @@
 # CLAUDE.md — sipag
 
 This file primes Claude Code sessions working **on sipag itself**.
-For guidance on adding CLAUDE.md to repos that sipag manages, see [Customizing behavior with CLAUDE.md](#customizing-behavior-with-claudemd) in README.md.
 
 ## Project overview
 
-sipag is a sandbox launcher for Claude Code. It spins up isolated Docker containers, runs `claude --dangerously-skip-permissions` inside them, and turns GitHub issues into pull requests. Claude is the orchestrator — it decides what to do and how; sipag provides the infrastructure (containers, credentials, lifecycle tracking) and makes progress visible.
+sipag is a sandbox launcher for Claude Code. It spins up isolated Docker containers, runs `claude --dangerously-skip-permissions` inside them, and implements GitHub PRs. sipag is pure infrastructure — containers, state files, lifecycle tracking. Claude Code is intelligence — analysis, implementation, review.
 
-Architecture has two layers:
-
-- **Rust CLI** (`sipag-cli/`, `sipag-core/`, `tui/`) — the primary binary, handles sandbox management, task queue, and TUI
-- **Bash scripts** (`bin/sipag`, `lib/`) — the worker polling loop and checklist helpers (the part that runs *inside* containers or in CI-style batch flows)
+The three-phase flow:
+1. **Analysis** (main Claude Code) — Cluster issues, craft a refined PR with architectural context
+2. **Implementation** (Docker worker) — Read PR description as assignment, implement, test, push
+3. **Review** (main Claude Code) — Review PR diff, merge or close, loop
 
 ## Architecture
 
-### Rust (primary CLI and core library)
+### Rust workspace (3 crates)
 
 ```
-sipag-core/    # Library: task parsing, repo registry, Docker executor
-sipag-cli/     # Binary: CLI (clap) + dispatches to sipag-core
-tui/           # Binary: ratatui TUI, exec'd by `sipag tui`
+sipag-core/src/
+├── lib.rs              # pub mod: auth, config, docker, init, state, worker
+├── auth.rs             # Token resolution (OAuth, API key, GH token)
+├── config.rs           # WorkerConfig (5 fields), Credentials, default_sipag_dir()
+├── docker.rs           # Preflight checks (daemon running, image available)
+├── init.rs             # Create ~/.sipag/{workers,logs}
+├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files
+└── worker/
+    ├── mod.rs           # pub use dispatch, github, lifecycle
+    ├── dispatch.rs      # dispatch_worker() → Docker container
+    ├── github.rs        # list_labeled_issues, count_open_sipag_prs, label_issues
+    └── lifecycle.rs     # scan_workers, check_container_alive, cleanup_finished
+
+sipag/src/
+├── main.rs             # Entry point
+└── cli.rs              # 7 commands: dispatch, ps, logs, kill, tui, doctor, version
+
+tui/src/
+├── main.rs             # Terminal setup, event loop, attach
+├── app.rs              # App state, key handling, task refresh
+├── task.rs             # Task struct (PR-keyed, built from WorkerState)
+└── ui/                 # list.rs (table view), detail.rs (metadata + log)
 ```
 
-Key modules in `sipag-core/`:
-- `executor` — Docker container lifecycle (run, ps, kill, logs, status, retry)
-- `task` — task file format (YAML frontmatter + description), slugify, queue filenames
-- `repo` — `~/.sipag/repos.conf` registry (name → URL)
-- `config` — environment-based config (`SIPAG_DIR`, `SIPAG_IMAGE`, etc.)
-- `init` — creates `~/.sipag/{queue,running,done,failed}`
-
-### Bash scripts (shell-out only)
+### Container scripts
 
 ```
-lib/setup.sh           # Interactive setup wizard (called by `sipag setup`)
-lib/start.sh           # Agile session primer (called by `sipag start`)
-lib/merge.sh           # PR merge session (called by `sipag merge`)
-lib/refresh-docs.sh    # ARCHITECTURE.md/VISION.md refresh (called by `sipag refresh-docs`)
-lib/container/*.sh     # Container entrypoint scripts (embedded in Rust via include_str!)
-lib/prompts/*.md       # Prompt templates
+lib/container/worker.sh      # Worker entrypoint (embedded via include_str!)
+lib/container/sipag-state.sh  # Atomic JSON state updates (copied into image)
+lib/prompts/worker.md         # Worker disposition prompt (embedded via include_str!)
 ```
 
-Note: `sipag doctor` was ported to native Rust. The worker loop (`sipag work`) is
-fully implemented in Rust (`sipag-core/src/worker/`).
+### Worker prompt
 
-### Prompt injected into each worker container
+The PR description is the complete assignment. `worker.sh` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`.
 
-`sipag-core/src/prompt.rs:build_prompt()` builds the prompt that every container receives. It includes:
-- The GitHub issue title and body
-- Standard instructions: branch, implement, test, commit, draft PR, mark ready
+### State model
+
+All state is PR-keyed JSON at `~/.sipag/workers/{owner}--{repo}--pr-{N}.json`:
+
+```json
+{
+  "repo": "owner/repo",
+  "pr_num": 42,
+  "issues": [10, 11],
+  "branch": "sipag/pr-42",
+  "container_id": "abc123",
+  "phase": "working",
+  "heartbeat": "2026-01-15T10:30:00Z",
+  "started": "2026-01-15T10:30:00Z"
+}
+```
+
+Phases: `starting` → `working` → `finished` | `failed`
 
 ## Commands
 
-### Rust CLI (installed binary)
-
 ```
-sipag run --repo <url> [--issue <n>] [-b] "<task>"
-                              Launch a Docker sandbox for a task
-sipag ps                      List running and recent tasks with status
-sipag logs <id>               Print the log for a task
-sipag kill <id>               Kill a running container, move task to failed/
-sipag status                  Show queue state across all directories
-sipag show <name>             Print task file and log
-sipag retry <name>            Re-queue a failed task
-sipag add "<title>" [--repo <name>] [--priority <level>]
-                              Add a task to queue/ or to tasks.md
-sipag repo add <name> <url>   Register a repo name → URL mapping
-sipag repo list               List registered repos
-sipag init                    Create ~/.sipag/{queue,running,done,failed}
-sipag start                   Process queue/ serially using Docker
+sipag dispatch --repo <owner/repo> --pr <N>
+                              Launch a Docker worker for a PR
+sipag ps                      List active and recent workers
+sipag logs <id>               Show logs for a worker (PR number or container name)
+sipag kill <id>               Kill a running worker
 sipag tui                     Launch interactive TUI (also: run sipag with no args)
+sipag doctor                  Check system prerequisites
 sipag version                 Print version
 ```
 
-### Legacy Bash CLI (removed)
+## Config
 
-The bash CLI (`bin/sipag`) has been removed. All commands are now handled by the
-Rust binary. The `sipag work` command is fully implemented in Rust.
+`~/.sipag/config` (optional, key=value):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `image` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker image |
+| `timeout` | `7200` | Worker timeout in seconds |
+| `work_label` | `ready` | Issue label gate |
+| `max_open_prs` | `3` | Back-pressure limit |
+
+Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`.
+
+## File layout (~/.sipag/)
+
+```
+workers/     # PR-keyed state JSON files
+logs/        # Worker log files ({owner}--{repo}--pr-{N}.log)
+config       # optional config file
+```
 
 ## Conventions
 
@@ -83,96 +111,7 @@ Rust binary. The `sipag work` command is fully implemented in Rust.
 
 - `make dev` — full local validation: `cargo fmt` + `cargo clippy -D warnings` + `cargo test`
 - `make build` — release build
-- `make lint` — clippy with `-D warnings`
-- `make fmt` — format in place
-- `make fmt-check` — CI-safe format check (no writes)
 - `make install` — `cargo install --path sipag`
-
-### Bash scripts
-
-- All scripts use `set -euo pipefail`
-- shellcheck-clean (run `shellcheck bin/sipag lib/*.sh` before committing)
-- Tests live in `test/unit/` and `test/integration/` (BATS-style)
-
-### Worker label gate
-
-Workers only pick up issues labeled **`ready`** (configurable via `SIPAG_WORK_LABEL` env var or `work_label=` in `~/.sipag/config`). Issues in flight get the `in-progress` label; on failure they return to `ready`.
-
-Priority labels: P0–P3 (convention, not enforced by sipag).
-
-### File layout (~/.sipag/)
-
-```
-queue/       # pending tasks (YAML frontmatter + description)
-running/     # active containers (tracking file + .log)
-done/        # completed
-failed/      # needs attention — use `sipag retry` to re-queue
-repos.conf   # name → URL registry
-config       # optional: image, timeout, poll_interval, work_label
-seen         # worker dedup list (issue numbers already dispatched)
-token        # Claude OAuth token for worker containers
-```
-
-## PR-only workflow
-
-The host machine running sipag is for **conversation and commands only**. All code
-changes must happen through PRs built inside Docker workers. This is a hard rule.
-
-### What the host does
-- Runs `sipag start` to prime a Claude Code session
-- Runs `sipag work <repo>` to dispatch Docker workers
-- Manages issues and PRs via `gh` commands
-- Reviews and merges PRs via `gh pr review` / `gh pr merge`
-- That's it
-
-### What the host must NEVER do
-- Edit files locally (`nano`, `vim`, `sed`, `Edit`/`Write` tools, etc.)
-- Commit or push to main directly (`git commit`, `git push`)
-- Apply patches or run `git apply`
-
-### How changes get made
-1. Identify the need in conversation
-2. Create or update a GitHub issue describing the change
-3. Label the issue `ready`
-4. `sipag work` dispatches a Docker worker that implements and opens a PR
-5. Review the PR via `gh pr diff` / `gh pr review`
-6. Merge via `gh pr merge`
-
-This applies to all repos sipag manages, including sipag itself.
-
-## Working on sipag
-
-### Use sipag to manage its own backlog
-
-sipag manages its own development — Claude Code sessions for sipag issues are dispatched via `sipag work Dorky-Robot/sipag`. So when working on sipag: label an issue `ready` and the worker will pick it up.
-
-For interactive sessions: open a terminal, run `sipag`, and use the TUI to inspect queue state.
-
-### What changes most
-
-- `sipag-core/src/worker/` — the worker loop, dispatch, recovery, and state
-- `sipag-core/src/executor.rs` — Docker executor logic
-- `sipag-core/src/task/` — task file format and state machine
-
-### Docker image
-
-Worker containers use `ghcr.io/dorky-robot/sipag-worker:latest`, published automatically to GHCR via the `Publish Worker Image` GitHub Actions workflow on every release and on Dockerfile/lib changes to main.
-
-To test with a locally built image:
-
-```bash
-docker build -t sipag-worker:local .
-SIPAG_IMAGE=sipag-worker:local sipag work <owner/repo>
-```
-
-### Running tests
-
-```bash
-make dev       # fmt + lint + test (recommended before pushing)
-make test      # cargo test only
-```
-
-The pre-push hook runs the full test suite automatically (installed via `make install-hooks`).
 
 ### Quality gates — git hooks
 
@@ -190,11 +129,37 @@ Install once after cloning:
 make install-hooks
 ```
 
-#### Rules
-
 - **Never use `--no-verify`**. Fix the issue instead.
-- Run `make dev` (fmt + clippy + test) before opening or updating PRs.
-- Tests must pass before push.
+- Run `make dev` before opening or updating PRs.
+
+### Docker image
+
+Worker containers use `ghcr.io/dorky-robot/sipag-worker:latest`, published via GitHub Actions.
+
+```bash
+docker build -t sipag-worker:local .
+SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
+```
+
+## Working on sipag
+
+### What changes most
+
+- `sipag-core/src/worker/` — dispatch, lifecycle, GitHub operations
+- `sipag-core/src/state.rs` — state file format and management
+- `sipag/src/cli.rs` — CLI commands
+- `tui/src/` — TUI views and task model
+
+### PR-only workflow
+
+The host machine is for **conversation and commands only**. All code changes happen through PRs built inside Docker workers.
+
+1. Identify the need in conversation
+2. Create or update a GitHub issue
+3. Label the issue `ready`
+4. Main Claude Code crafts a PR with architectural context
+5. `sipag dispatch` launches a Docker worker
+6. Review the PR, merge or close
 
 ### Part of the dorky robot stack
 

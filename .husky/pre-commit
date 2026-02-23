@@ -86,10 +86,18 @@ echo "      ✓ No clippy warnings"
 # ── 7. Shell lint (BLOCKING) ─────────────────────────────────────────────────
 step "[7/7] Shell lint (shellcheck)"
 if command -v shellcheck >/dev/null 2>&1; then
-    if ! shellcheck --severity=warning lib/*.sh lib/container/*.sh; then
+    SHELL_FILES=()
+    for glob in lib/*.sh lib/container/*.sh; do
+        # shellcheck disable=SC2086
+        [ -e "$glob" ] && SHELL_FILES+=("$glob")
+    done
+    if [ ${#SHELL_FILES[@]} -eq 0 ]; then
+        echo "      ✓ No shell scripts to check"
+    elif ! shellcheck --severity=warning "${SHELL_FILES[@]}"; then
         fail "shellcheck errors — commit blocked. Fix shell script issues before committing."
+    else
+        echo "      ✓ Shell scripts OK"
     fi
-    echo "      ✓ Shell scripts OK"
 else
     warn "shellcheck not installed — skipping shell lint."
     warn "Install: apt-get install shellcheck  OR  brew install shellcheck"

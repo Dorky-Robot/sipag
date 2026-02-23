@@ -1,16 +1,15 @@
 //! Binary smoke tests for the `sipag` CLI.
 //!
 //! These tests use `assert_cmd` to run the actual compiled binary and verify
-//! basic behavior. They would have caught regressions like "sipag status
-//! outputs text instead of launching TUI" because the binary must build
-//! and respond correctly to each subcommand.
+//! basic behavior for the v3 CLI (7 commands: dispatch, ps, logs, kill,
+//! tui, doctor, version).
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
-#[allow(deprecated)] // cargo_bin works fine for our use case
+#[allow(deprecated)]
 fn sipag() -> Command {
     Command::cargo_bin("sipag").unwrap()
 }
@@ -18,7 +17,7 @@ fn sipag() -> Command {
 /// Helper: create a temp SIPAG_DIR with the expected subdirectories.
 fn temp_sipag_dir() -> TempDir {
     let dir = TempDir::new().unwrap();
-    for sub in &["queue", "running", "done", "failed"] {
+    for sub in &["workers", "logs"] {
         fs::create_dir(dir.path().join(sub)).unwrap();
     }
     dir
@@ -69,106 +68,12 @@ fn help_lists_subcommands() {
     let output = sipag().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Verify key subcommands appear in help text
-    for cmd in &[
-        "tui",
-        "work",
-        "status",
-        "run",
-        "ps",
-        "logs",
-        "kill",
-        "add",
-        "show",
-        "retry",
-        "repo",
-        "init",
-        "version",
-        "drain",
-        "resume",
-        "setup",
-        "doctor",
-        "triage",
-        "completions",
-    ] {
+    for cmd in &["dispatch", "ps", "logs", "kill", "tui", "doctor", "version"] {
         assert!(
             stdout.contains(cmd),
             "Help text should mention '{cmd}' subcommand"
         );
     }
-}
-
-// ── Init ────────────────────────────────────────────────────────────────────
-
-#[test]
-fn init_creates_directories() {
-    let dir = TempDir::new().unwrap();
-    sipag()
-        .arg("init")
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success();
-
-    for sub in &["queue", "running", "done", "failed"] {
-        assert!(
-            dir.path().join(sub).exists(),
-            "init should create {sub}/ directory"
-        );
-    }
-}
-
-#[test]
-fn init_idempotent() {
-    let dir = TempDir::new().unwrap();
-    sipag()
-        .arg("init")
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success();
-    // Running again should also succeed
-    sipag()
-        .arg("init")
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success();
-}
-
-// ── Completions ─────────────────────────────────────────────────────────────
-
-#[test]
-fn completions_bash() {
-    sipag()
-        .args(["completions", "bash"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("complete -F _sipag sipag"));
-}
-
-#[test]
-fn completions_zsh() {
-    sipag()
-        .args(["completions", "zsh"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("#compdef sipag"));
-}
-
-#[test]
-fn completions_fish() {
-    sipag()
-        .args(["completions", "fish"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("complete -c sipag"));
-}
-
-#[test]
-fn completions_unknown_shell_fails() {
-    sipag()
-        .args(["completions", "powershell"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("Unknown shell"));
 }
 
 // ── Ps ──────────────────────────────────────────────────────────────────────
@@ -181,48 +86,32 @@ fn ps_empty() {
         .env("SIPAG_DIR", dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("No tasks found"));
+        .stdout(predicate::str::contains("No workers found"));
 }
 
-// ── Add ─────────────────────────────────────────────────────────────────────
-
 #[test]
-fn add_creates_task_file() {
+fn ps_shows_worker() {
     let dir = temp_sipag_dir();
-    // Write a repos.conf so the repo lookup works
-    fs::write(
-        dir.path().join("repos.conf"),
-        "myrepo=https://github.com/test/repo\n",
-    )
-    .unwrap();
+    let json = r#"{
+        "repo": "test/repo",
+        "pr_num": 42,
+        "issues": [1],
+        "branch": "sipag/pr-42",
+        "container_id": "abc123",
+        "phase": "working",
+        "heartbeat": "2026-01-15T10:30:00Z",
+        "started": "2026-01-15T10:30:00Z"
+    }"#;
+    fs::write(dir.path().join("workers/test--repo--pr-42.json"), json).unwrap();
 
     sipag()
-        .args(["add", "Fix the bug", "--repo", "myrepo"])
+        .arg("ps")
         .env("SIPAG_DIR", dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("Added: Fix the bug"));
-
-    // Verify a .md file was created in queue/
-    let queue_entries: Vec<_> = fs::read_dir(dir.path().join("queue"))
-        .unwrap()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
-        .collect();
-    assert_eq!(queue_entries.len(), 1, "Should have one task in queue/");
-}
-
-// ── Show ────────────────────────────────────────────────────────────────────
-
-#[test]
-fn show_missing_task() {
-    let dir = temp_sipag_dir();
-    sipag()
-        .args(["show", "nonexistent-task"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found"));
+        .stdout(predicate::str::contains("#42"))
+        .stdout(predicate::str::contains("test/repo"))
+        .stdout(predicate::str::contains("working"));
 }
 
 // ── Logs ────────────────────────────────────────────────────────────────────
@@ -235,128 +124,58 @@ fn logs_missing_task() {
         .env("SIPAG_DIR", dir.path())
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no log found"));
+        .stderr(predicate::str::contains("No logs found"));
 }
 
 // ── Kill ────────────────────────────────────────────────────────────────────
 
 #[test]
-fn kill_missing_task() {
+fn kill_nonexistent_prints_message() {
     let dir = temp_sipag_dir();
     sipag()
         .args(["kill", "nonexistent-task"])
         .env("SIPAG_DIR", dir.path())
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found in running"));
-}
-
-// ── Retry ───────────────────────────────────────────────────────────────────
-
-#[test]
-fn retry_missing_task() {
-    let dir = temp_sipag_dir();
-    sipag()
-        .args(["retry", "nonexistent-task"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not found in failed"));
-}
-
-// ── Drain / Resume ──────────────────────────────────────────────────────────
-
-#[test]
-fn drain_creates_signal_file() {
-    let dir = temp_sipag_dir();
-    sipag()
-        .arg("drain")
-        .env("SIPAG_DIR", dir.path())
-        .assert()
         .success()
-        .stdout(predicate::str::contains("Drain signal sent"));
-
-    assert!(dir.path().join("drain").exists());
+        .stdout(predicate::str::contains("Killed nonexistent-task"));
 }
 
-#[test]
-fn resume_clears_drain_signal() {
-    let dir = temp_sipag_dir();
-    fs::write(dir.path().join("drain"), "").unwrap();
-
-    sipag()
-        .arg("resume")
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Drain signal cleared"));
-
-    assert!(!dir.path().join("drain").exists());
-}
-
-// ── Repo ────────────────────────────────────────────────────────────────────
+// ── Doctor ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn repo_add_and_list() {
+fn doctor_outputs_checks() {
     let dir = temp_sipag_dir();
-
-    // Add a repo
-    sipag()
-        .args(["repo", "add", "myrepo", "https://github.com/test/repo"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Registered"));
-
-    // List repos
-    sipag()
-        .args(["repo", "list"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("myrepo"));
-}
-
-#[test]
-fn repo_list_empty() {
-    let dir = temp_sipag_dir();
-    sipag()
-        .args(["repo", "list"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("No repos registered"));
-}
-
-// ── Doctor ───────────────────────────────────────────────────────────────────
-
-#[test]
-fn doctor_outputs_section_headers() {
-    let dir = temp_sipag_dir();
-    // Create a token file so the OAuth check passes
-    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
-
     sipag()
         .arg("doctor")
         .env("SIPAG_DIR", dir.path())
         .assert()
-        .stdout(predicate::str::contains("=== sipag doctor ==="))
-        .stdout(predicate::str::contains("Core tools:"))
-        .stdout(predicate::str::contains("Authentication:"))
-        .stdout(predicate::str::contains("Docker:"))
-        .stdout(predicate::str::contains("sipag:"));
+        .success()
+        .stdout(predicate::str::contains("sipag doctor"))
+        .stdout(predicate::str::contains("Docker daemon:"))
+        .stdout(predicate::str::contains("GitHub CLI:"))
+        .stdout(predicate::str::contains("sipag dir:"));
 }
 
 #[test]
-fn doctor_shows_ok_for_queue_dirs() {
+fn doctor_shows_sipag_dir_ok() {
     let dir = temp_sipag_dir();
-    fs::write(dir.path().join("token"), "fake-token\n").unwrap();
-
     sipag()
         .arg("doctor")
         .env("SIPAG_DIR", dir.path())
         .assert()
-        .stdout(predicate::str::contains("OK  Queue directories exist"));
+        .success()
+        .stdout(predicate::str::contains("sipag dir:      OK"));
+}
+
+// ── Dispatch (validation errors) ────────────────────────────────────────────
+
+#[test]
+fn dispatch_requires_repo_and_pr() {
+    sipag()
+        .arg("dispatch")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--repo"));
 }
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────

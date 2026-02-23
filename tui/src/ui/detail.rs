@@ -1,5 +1,4 @@
 use crate::app::App;
-use crate::task::Status;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -7,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
-use sipag_core::worker::state::format_duration;
+use sipag_core::state::{format_duration, WorkerPhase};
 
 pub fn render_detail(f: &mut Frame, app: &App) {
     if app.tasks.is_empty() {
@@ -16,7 +15,6 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     let task = &app.tasks[app.selected];
     let area = f.area();
 
-    // 3-part layout: header bar | body | footer bar
     let chunks = Layout::vertical([
         Constraint::Length(1), // header bar
         Constraint::Min(0),    // body
@@ -25,8 +23,7 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     .split(area);
 
     // ── Header bar ────────────────────────────────────────────────────────────
-    let issue_str = task.issue.map(|n| format!(" #{}", n)).unwrap_or_default();
-    let header_text = format!(" sipag Detail{} — {}", issue_str, task.title);
+    let header_text = format!(" sipag  PR #{} — {}", task.pr_num, task.repo);
     let header = Paragraph::new(Line::from(header_text)).style(
         Style::default()
             .fg(Color::White)
@@ -36,15 +33,9 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     f.render_widget(header, chunks[0]);
 
     // ── Footer bar ────────────────────────────────────────────────────────────
-    let is_terminal = task.status == Status::Done || task.status == Status::Failed;
-    // Only task-file backed failed tasks support in-TUI retry.
-    let can_retry = task.status == Status::Failed && !task.file_path.as_os_str().is_empty();
-
-    let footer_text = if task.status == Status::Running {
+    let footer_text = if !task.phase.is_terminal() && !task.container_id.is_empty() {
         " [Esc] back  [j/k] scroll  [a] attach  [q] quit"
-    } else if can_retry {
-        " [Esc] back  [j/k] scroll  [r] retry  [x] dismiss  [q] quit"
-    } else if is_terminal {
+    } else if task.phase.is_terminal() {
         " [Esc] back  [j/k] scroll  [x] dismiss  [q] quit"
     } else {
         " [Esc] back  [j/k] scroll  [q] quit"
@@ -53,7 +44,7 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         .style(Style::default().fg(Color::White).bg(Color::DarkGray));
     f.render_widget(footer, chunks[2]);
 
-    // ── Outer content block (Cyan borders) ───────────────────────────────────
+    // ── Outer content block ───────────────────────────────────────────────────
     let outer_block = Block::default()
         .title(" Detail ")
         .borders(Borders::ALL)
@@ -62,119 +53,107 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     let content_area = outer_block.inner(chunks[1]);
     f.render_widget(outer_block, chunks[1]);
 
-    // ── Build the top section (title + metadata + description) ────────────────
+    // ── Build the top section (metadata) ──────────────────────────────────────
     let mut top_lines: Vec<Line> = Vec::new();
+    let label_style = Style::default().add_modifier(Modifier::BOLD);
 
-    // Blank line then task title.
     top_lines.push(Line::from(""));
     top_lines.push(Line::from(Span::styled(
-        format!("  {}", task.title),
+        format!("  PR #{}", task.pr_num),
         Style::default().add_modifier(Modifier::BOLD),
     )));
     top_lines.push(Line::from(""));
 
     // Metadata fields.
-    let label_style = Style::default().add_modifier(Modifier::BOLD);
     top_lines.push(Line::from(vec![
         Span::styled("  Repo:     ", label_style),
-        Span::raw(task.repo.as_deref().unwrap_or("-")),
+        Span::raw(task.repo.clone()),
+    ]));
+    top_lines.push(Line::from(vec![
+        Span::styled("  Branch:   ", label_style),
+        Span::raw(task.branch.clone()),
     ]));
 
-    let status_style = match task.status {
-        Status::Queue => Style::default().fg(Color::Yellow),
-        Status::Running => Style::default().fg(Color::Cyan),
-        Status::Done => Style::default().fg(Color::Green),
-        Status::Failed => Style::default().fg(Color::Red),
+    let phase_style = match task.phase {
+        WorkerPhase::Starting => Style::default().fg(Color::Yellow),
+        WorkerPhase::Working => Style::default().fg(Color::Cyan),
+        WorkerPhase::Finished => Style::default().fg(Color::Green),
+        WorkerPhase::Failed => Style::default().fg(Color::Red),
     };
     top_lines.push(Line::from(vec![
-        Span::styled("  Status:   ", label_style),
-        Span::styled(task.status.name(), status_style),
+        Span::styled("  Phase:    ", label_style),
+        Span::styled(task.phase.to_string(), phase_style),
     ]));
 
     top_lines.push(Line::from(vec![
-        Span::styled("  Priority: ", label_style),
-        Span::raw(task.priority.as_deref().unwrap_or("-")),
+        Span::styled("  Started:  ", label_style),
+        Span::raw(format!("{} ago", task.format_age())),
     ]));
-    if let Some(src) = &task.source {
+
+    // Issues addressed.
+    if !task.issues.is_empty() {
+        let issues_str = task
+            .issues
+            .iter()
+            .map(|n| format!("#{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         top_lines.push(Line::from(vec![
-            Span::styled("  Source:   ", label_style),
-            Span::raw(src.as_str()),
+            Span::styled("  Issues:   ", label_style),
+            Span::raw(issues_str),
         ]));
     }
-    top_lines.push(Line::from(vec![
-        Span::styled("  Added:    ", label_style),
-        Span::raw(task.format_age()),
-    ]));
 
-    // ── Extra metadata for done/failed archive tasks ──────────────────────────
-    if task.status == Status::Done {
-        // Duration
-        top_lines.push(Line::from(vec![
-            Span::styled("  Duration: ", label_style),
-            Span::raw(format_duration(task.duration_s)),
-        ]));
+    // ── Terminal-phase fields (finished or failed) ────────────────────────────
+    if task.phase.is_terminal() {
+        if let Some(duration) = task.duration_secs() {
+            top_lines.push(Line::from(vec![
+                Span::styled("  Duration: ", label_style),
+                Span::raw(format_duration(duration)),
+            ]));
+        }
 
-        // Completion time (human age)
-        if task.ended_at.is_some() {
+        if task.ended.is_some() {
             top_lines.push(Line::from(vec![
                 Span::styled("  Ended:    ", label_style),
                 Span::raw(format!("{} ago", task.format_ended_age())),
             ]));
         }
 
-        // PR info
-        if let Some(pr_num) = task.pr_num {
-            let pr_display = task
-                .pr_url
-                .as_deref()
-                .map(|url| format!("PR #{} — {}", pr_num, url))
-                .unwrap_or_else(|| format!("PR #{}", pr_num));
+        if let Some(code) = task.exit_code {
+            let code_style = if code == 0 {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Red)
+            };
             top_lines.push(Line::from(vec![
-                Span::styled("  PR:       ", label_style),
-                Span::styled(
-                    pr_display,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::UNDERLINED),
-                ),
-            ]));
-        }
-    } else if task.status == Status::Failed {
-        // Duration
-        top_lines.push(Line::from(vec![
-            Span::styled("  Duration: ", label_style),
-            Span::raw(format_duration(task.duration_s)),
-        ]));
-
-        // Completion time (human age)
-        if task.ended_at.is_some() {
-            top_lines.push(Line::from(vec![
-                Span::styled("  Ended:    ", label_style),
-                Span::raw(format!("{} ago", task.format_ended_age())),
+                Span::styled("  Exit:     ", label_style),
+                Span::styled(code.to_string(), code_style),
             ]));
         }
 
-        // Exit code
-        let exit_str = task
-            .exit_code
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        if let Some(ref error) = task.error {
+            top_lines.push(Line::from(vec![
+                Span::styled("  Error:    ", label_style),
+                Span::styled(error.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+    }
+
+    // Container ID.
+    if !task.container_id.is_empty() {
+        let short = if task.container_id.len() > 12 {
+            &task.container_id[..12]
+        } else {
+            &task.container_id
+        };
         top_lines.push(Line::from(vec![
-            Span::styled("  Exit:     ", label_style),
-            Span::styled(exit_str, Style::default().fg(Color::Red)),
+            Span::styled("  Container:", label_style),
+            Span::raw(format!(" {short}")),
         ]));
     }
 
     top_lines.push(Line::from(""));
-
-    // Description section.
-    if !task.body.is_empty() {
-        top_lines.push(section_header("── Description ", content_area.width));
-        for body_line in task.body.lines() {
-            top_lines.push(Line::from(format!("  {}", body_line)));
-        }
-        top_lines.push(Line::from(""));
-    }
 
     let top_height = top_lines.len() as u16;
 
@@ -201,15 +180,12 @@ pub fn render_detail(f: &mut Frame, app: &App) {
     if !app.log_lines.is_empty() && log_rect.height > 0 {
         let mut log_lines: Vec<Line> = Vec::new();
 
-        // Section header.
         log_lines.push(section_header(
             &format!("── Log (last {} lines) ", app.log_lines.len()),
             content_area.width,
         ));
 
-        // Visible log rows: log_rect.height minus the header row (and 1 blank below).
         let visible_rows = log_rect.height.saturating_sub(1) as usize;
-
         let start = app.log_scroll;
         let end = (start + visible_rows).min(app.log_lines.len());
 
@@ -220,7 +196,7 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         let log_para = Paragraph::new(log_lines);
         f.render_widget(log_para, log_rect);
 
-        // Scroll indicator in top-right of log rect if there are more lines.
+        // Scroll indicator.
         if app.log_lines.len() > visible_rows && log_rect.width > 10 {
             let indicator = format!(
                 "[{}/{}]",
@@ -242,9 +218,8 @@ pub fn render_detail(f: &mut Frame, app: &App) {
 
 /// Build a styled section-header line that spans the full inner width.
 fn section_header(label: &str, inner_width: u16) -> Line<'static> {
-    // Pad with dashes to the inner width (accounting for 2-char left indent).
     let min_dashes = 2usize;
-    let label_len = label.chars().count() + 2; // "  " prefix
+    let label_len = label.chars().count() + 2;
     let total = inner_width as usize;
     let dash_count = if total > label_len + min_dashes {
         total - label_len

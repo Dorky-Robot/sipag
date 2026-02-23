@@ -1,11 +1,9 @@
 use anyhow::Result;
-use std::fs::File;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Find a working timeout command: `timeout` (Linux/coreutils) or `gtimeout` (macOS Homebrew).
-/// Returns `None` if neither is available — the caller should run Docker without a timeout wrapper.
-pub(crate) fn resolve_timeout_command() -> Option<String> {
+/// Returns `None` if neither is available.
+pub fn resolve_timeout_command() -> Option<String> {
     for bin in ["timeout", "gtimeout"] {
         if Command::new(bin)
             .arg("--version")
@@ -46,122 +44,8 @@ pub fn preflight_docker_image(image: &str) -> Result<()> {
     match status {
         Ok(s) if s.success() => Ok(()),
         _ => anyhow::bail!(
-            "Docker image '{}' not found.\n\n  To fix, run:\n\n    sipag setup\n\n  Or build manually:\n\n    docker build -t {} .",
-            image,
-            image
+            "Docker image '{}' not found.\n\n  To fix:\n\n    docker pull {}\n\n  Or build locally:\n\n    docker build -t {} .",
+            image, image, image
         ),
     }
-}
-
-/// Configuration for running a task in a Docker container.
-pub struct RunConfig<'a> {
-    pub task_id: &'a str,
-    pub repo_url: &'a str,
-    pub description: &'a str,
-    pub issue: Option<&'a str>,
-    pub background: bool,
-    pub image: &'a str,
-    pub timeout_secs: u64,
-}
-
-const BASH_SCRIPT: &str = r#"git clone "$REPO_URL" /work && cd /work
-git config user.name "sipag"
-git config user.email "sipag@localhost"
-tmux new-session -d -s claude "claude --dangerously-skip-permissions -p \"$PROMPT\"; echo \$? > /tmp/.claude-exit"
-tmux set-option -t claude history-limit 50000
-touch /tmp/claude.log
-tmux pipe-pane -t claude -o 'cat >> /tmp/claude.log'
-tail -f /tmp/claude.log &
-TAIL_PID=$!
-while tmux has-session -t claude 2>/dev/null; do sleep 1; done
-kill $TAIL_PID 2>/dev/null || true
-wait $TAIL_PID 2>/dev/null || true
-exit "$(cat /tmp/.claude-exit 2>/dev/null || echo 1)""#;
-
-/// Run a Docker container and stream output to `log_path`.
-///
-/// Returns `true` if the container exited successfully, `false` otherwise.
-///
-/// Uses `timeout`/`gtimeout` if available on the host (macOS ships without
-/// `timeout` — the worker's own Docker has it, but the *host* wrapping call
-/// may not). Falls back to running Docker directly without a wrapper.
-///
-/// Also removes any pre-existing container with `container_name` before
-/// starting, so retries for the same task don't collide with a stale container.
-pub fn run_container(
-    container_name: &str,
-    repo_url: &str,
-    prompt: &str,
-    image: &str,
-    timeout_secs: u64,
-    oauth_token: Option<&str>,
-    api_key: Option<&str>,
-    log_path: &Path,
-) -> bool {
-    // Clean up any stale container from a previous cycle — idempotent.
-    let _ = Command::new("docker")
-        .args(["rm", "-f", container_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    let log_out = match File::create(log_path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "sipag: failed to create log file {}: {e}",
-                log_path.display()
-            );
-            return false;
-        }
-    };
-    let log_err = match log_out.try_clone() {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "sipag: failed to clone log file handle for {}: {e}",
-                log_path.display()
-            );
-            return false;
-        }
-    };
-
-    let timeout_bin = resolve_timeout_command();
-    let mut cmd;
-    if let Some(ref bin) = timeout_bin {
-        cmd = Command::new(bin);
-        cmd.arg(timeout_secs.to_string()).arg("docker").arg("run");
-    } else {
-        cmd = Command::new("docker");
-        cmd.arg("run");
-    }
-
-    cmd.arg("--rm")
-        .arg("--name")
-        .arg(container_name)
-        .arg("-e")
-        .arg("CLAUDE_CODE_OAUTH_TOKEN")
-        .arg("-e")
-        .arg("ANTHROPIC_API_KEY")
-        .arg("-e")
-        .arg("GH_TOKEN")
-        .arg("-e")
-        .arg(format!("REPO_URL={repo_url}"))
-        .arg("-e")
-        .arg(format!("PROMPT={prompt}"))
-        .arg(image)
-        .arg("bash")
-        .arg("-c")
-        .arg(BASH_SCRIPT)
-        .stdout(Stdio::from(log_out))
-        .stderr(Stdio::from(log_err));
-
-    if let Some(token) = oauth_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    if let Some(key) = api_key {
-        cmd.env("ANTHROPIC_API_KEY", key);
-    }
-
-    cmd.status().map(|s| s.success()).unwrap_or(false)
 }

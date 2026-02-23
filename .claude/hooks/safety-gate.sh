@@ -167,6 +167,24 @@ is_within_project() {
 	[[ "$resolved" == "${PROJECT_DIR}/"* || "$resolved" == "${PROJECT_DIR}" ]]
 }
 
+# Check whether a path is within any safe directory (project, ~/.sipag, ~/.claude).
+is_within_safe_dir() {
+	local path="$1"
+	if is_within_project "$path"; then
+		return 0
+	fi
+	if [[ "$path" != /* ]]; then
+		path="${PROJECT_DIR}/${path}"
+	fi
+	local parent
+	parent=$(cd "$(dirname "$path")" 2>/dev/null && pwd) || return 1
+	local resolved
+	resolved="${parent}/$(basename "$path")"
+	[[ "$resolved" == "${HOME}/.sipag/"* || "$resolved" == "${HOME}/.sipag" ]] && return 0
+	[[ "$resolved" == "${HOME}/.claude/"* || "$resolved" == "${HOME}/.claude" ]] && return 0
+	return 1
+}
+
 # Check whether a path starts with any entry in the config deny list.
 is_path_denied() {
 	local path="$1"
@@ -208,15 +226,17 @@ BASH_ALLOW_PATTERNS=(
 	'^git push( |$)'
 	'^(npm|yarn|pnpm) (test|run|exec)'
 	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|fmt|format|clippy|install)'
-	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false)( |$)'
+	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false|sleep)( |$)'
 	'^mkdir '
 	'^(cp|mv) '
 	'^(npm|yarn|pnpm) install'
 	'^pip install'
 	'^chmod [0-7]{3} '
-	'^node |^python |^ruby '
+	'^node |^python3? |^ruby '
+	# Shell control flow (for/while/if loops wrapping allowed commands)
+	'^for |^while |^if '
 	# Docker (non-privileged)
-	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|pull|build)'
+	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|kill|pull|build)'
 	# Development tools
 	'^shellcheck '
 	'^bats '
@@ -320,7 +340,7 @@ Bash)
 		deny "Empty bash command"
 	fi
 
-	# rm is allowed only within the project directory.
+	# rm is allowed within the project directory, ~/.sipag, and ~/.claude.
 	if echo "$cmd" | grep -qE '^rm '; then
 		# Extract file paths from rm command (skip flags like -f, -r, -rf).
 		local rm_ok=true
@@ -328,15 +348,15 @@ Bash)
 		for arg in $cmd; do
 			[[ "$arg" == "rm" ]] && continue
 			[[ "$arg" == -* ]] && continue
-			if ! is_within_project "$arg"; then
+			if ! is_within_safe_dir "$arg"; then
 				rm_ok=false
 				break
 			fi
 		done
 		if $rm_ok; then
-			allow "rm within project directory"
+			allow "rm within safe directory"
 		else
-			deny "rm targets path outside project: $cmd"
+			deny "rm targets path outside safe directories: $cmd"
 		fi
 	fi
 
