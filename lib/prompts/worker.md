@@ -228,4 +228,11 @@ Review cycles: <1 or 2>
 All reviewers: <APPROVE or APPROVE_WITH_NOTES>"
 ```
 
-This gives the host session visibility into what happened. Then you are done.
+This gives the host session visibility into what happened.
+
+### 8. Exit immediately
+
+After posting the final summary you are DONE. Do NOT run tests, linters, or any
+other commands after the PR is merged. The merge is proof the work succeeded —
+further local activity wastes compute and can hang the container on slow test
+suites. Exit cleanly and let the host session take over.

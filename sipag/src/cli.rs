@@ -126,8 +126,9 @@ fn run_dispatch(repo: &str, pr_num: u64, session_file: Option<&Path>) -> Result<
 
     // Back-pressure: count active workers (non-terminal state files).
     // This reconciles against Docker to detect dead containers, so zombie
-    // workers don't inflate the count.
-    let workers = lifecycle::scan_workers(&sipag_dir);
+    // workers don't inflate the count. Use the configured staleness threshold
+    // rather than the hardcoded default so operator tuning is respected.
+    let workers = lifecycle::scan_workers_with_stale_secs(&sipag_dir, cfg.heartbeat_stale_secs);
     if cfg.max_open_prs > 0 {
         let active = workers.iter().filter(|w| !w.phase.is_terminal()).count();
         if active >= cfg.max_open_prs {
