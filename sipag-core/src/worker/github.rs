@@ -82,6 +82,125 @@ pub fn preflight_gh_auth() -> Result<()> {
     }
 }
 
+/// Summary of a GitHub issue for board state display.
+pub struct IssueSummary {
+    pub number: u64,
+    pub title: String,
+    pub labels: Vec<String>,
+}
+
+/// Summary of a GitHub PR for board state display.
+pub struct PrSummary {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub labels: Vec<String>,
+}
+
+/// Fetch open issues for a repo with titles and labels.
+pub fn fetch_open_issues(repo: &str) -> Result<Vec<IssueSummary>> {
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,labels",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .context("Failed to run gh issue list")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    let mut issues = vec![];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let labels = item["labels"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if number > 0 {
+                issues.push(IssueSummary {
+                    number,
+                    title,
+                    labels,
+                });
+            }
+        }
+    }
+    issues.sort_by_key(|i| i.number);
+    Ok(issues)
+}
+
+/// Fetch open PRs for a repo with titles, state, and labels.
+pub fn fetch_open_prs(repo: &str) -> Result<Vec<PrSummary>> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,state,labels",
+            "--limit",
+            "100",
+        ])
+        .output()
+        .context("Failed to run gh pr list")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!([]));
+
+    let mut prs = vec![];
+    if let Some(arr) = parsed.as_array() {
+        for item in arr {
+            let number = item["number"].as_u64().unwrap_or(0);
+            let title = item["title"].as_str().unwrap_or("").to_string();
+            let state = item["state"].as_str().unwrap_or("OPEN").to_string();
+            let labels = item["labels"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if number > 0 {
+                prs.push(PrSummary {
+                    number,
+                    title,
+                    state,
+                    labels,
+                });
+            }
+        }
+    }
+    prs.sort_by_key(|p| p.number);
+    Ok(prs)
+}
+
 /// Transition labels on a batch of GitHub issues.
 ///
 /// Removes `remove_label` and adds `add_label` on each issue.

@@ -81,4 +81,33 @@ mod tests {
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].pr_num, 42);
     }
+
+    #[test]
+    fn scan_workers_ignores_malformed_files() {
+        let dir = TempDir::new().unwrap();
+        let workers_dir = dir.path().join("workers");
+        std::fs::create_dir_all(&workers_dir).unwrap();
+
+        // Write one valid and one malformed state file.
+        let state = WorkerState {
+            repo: "owner/repo".to_string(),
+            pr_num: 1,
+            issues: vec![],
+            branch: "sipag/pr-1".to_string(),
+            container_id: "abc".to_string(),
+            phase: WorkerPhase::Working,
+            heartbeat: "2026-01-01T00:00:00Z".to_string(),
+            started: "2026-01-01T00:00:00Z".to_string(),
+            ended: None,
+            exit_code: None,
+            error: None,
+            file_path: state::state_file_path(dir.path(), "owner/repo", 1),
+        };
+        state::write_state(&state).unwrap();
+        std::fs::write(workers_dir.join("bad--file--pr-99.json"), "not json{{{").unwrap();
+
+        let workers = scan_workers(dir.path());
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].pr_num, 1);
+    }
 }

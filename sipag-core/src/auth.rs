@@ -7,7 +7,15 @@ use std::path::Path;
 /// Checks `CLAUDE_CODE_OAUTH_TOKEN` env var first, then `sipag_dir/token` file.
 /// Returns `None` if no OAuth token is found (does not check `ANTHROPIC_API_KEY`).
 pub(crate) fn resolve_token(sipag_dir: &Path) -> Option<String> {
-    if let Ok(token) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+    resolve_token_with_env(sipag_dir, |k| std::env::var(k).ok())
+}
+
+/// Testable token resolution — accepts an env-var lookup function.
+fn resolve_token_with_env(
+    sipag_dir: &Path,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if let Some(token) = get_env("CLAUDE_CODE_OAUTH_TOKEN") {
         if !token.is_empty() {
             return Some(token);
         }
@@ -79,4 +87,52 @@ pub fn preflight_auth(sipag_dir: &Path) -> Result<()> {
         "Error: No Claude authentication found.\n\n  To fix, run these two commands:\n\n    claude setup-token\n    cp ~/.claude/token {}/token\n\n  The first command opens your browser to authenticate with Anthropic.\n  The second copies the token to where sipag workers can use it.\n\n  Alternative: export ANTHROPIC_API_KEY=sk-ant-... (if you have an API key)",
         sipag_dir.display()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_token_prefers_env_over_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("token"), "file-token\n").unwrap();
+
+        let token = resolve_token_with_env(dir.path(), |k| match k {
+            "CLAUDE_CODE_OAUTH_TOKEN" => Some("env-token".to_string()),
+            _ => None,
+        });
+        assert_eq!(token, Some("env-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_token_falls_back_to_file() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("token"), "file-token\n").unwrap();
+
+        let token = resolve_token_with_env(dir.path(), |_| None);
+        assert_eq!(token, Some("file-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_token_skips_empty_env() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("token"), "file-token\n").unwrap();
+
+        let token = resolve_token_with_env(dir.path(), |k| match k {
+            "CLAUDE_CODE_OAUTH_TOKEN" => Some(String::new()),
+            _ => None,
+        });
+        assert_eq!(token, Some("file-token".to_string()));
+    }
+
+    #[test]
+    fn token_file_trims_whitespace() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("token"), "  my-token  \n").unwrap();
+
+        let token = resolve_token_with_env(dir.path(), |_| None);
+        assert_eq!(token, Some("my-token".to_string()));
+    }
 }

@@ -68,7 +68,9 @@ fn help_lists_subcommands() {
     let output = sipag().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    for cmd in &["dispatch", "ps", "logs", "kill", "tui", "doctor", "version"] {
+    for cmd in &[
+        "work", "dispatch", "ps", "logs", "kill", "tui", "doctor", "version",
+    ] {
         assert!(
             stdout.contains(cmd),
             "Help text should mention '{cmd}' subcommand"
@@ -176,6 +178,122 @@ fn dispatch_requires_repo_and_pr() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("--repo"));
+}
+
+// ── Ps (state verification) ─────────────────────────────────────────────────
+
+#[test]
+fn ps_multiple_workers_all_shown() {
+    let dir = temp_sipag_dir();
+    for (pr, phase) in [(10, "working"), (20, "starting")] {
+        let json = format!(
+            r#"{{"repo":"a/b","pr_num":{pr},"issues":[],"branch":"sipag/pr-{pr}","container_id":"c{pr}","phase":"{phase}","heartbeat":"2026-01-01T00:00:00Z","started":"2026-01-01T00:00:00Z"}}"#
+        );
+        fs::write(dir.path().join(format!("workers/a--b--pr-{pr}.json")), json).unwrap();
+    }
+
+    sipag()
+        .arg("ps")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("#10"))
+        .stdout(predicate::str::contains("#20"));
+}
+
+#[test]
+fn ps_shows_finished_and_failed() {
+    let dir = temp_sipag_dir();
+    for (pr, phase) in [(1, "finished"), (2, "failed")] {
+        let json = format!(
+            r#"{{"repo":"o/r","pr_num":{pr},"issues":[],"branch":"b","container_id":"c","phase":"{phase}","heartbeat":"2026-01-01T00:00:00Z","started":"2026-01-01T00:00:00Z"}}"#
+        );
+        fs::write(dir.path().join(format!("workers/o--r--pr-{pr}.json")), json).unwrap();
+    }
+
+    sipag()
+        .arg("ps")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("finished"))
+        .stdout(predicate::str::contains("failed"));
+}
+
+// ── Kill (state mutation) ───────────────────────────────────────────────────
+
+#[test]
+fn kill_by_pr_number_updates_state() {
+    let dir = temp_sipag_dir();
+    let json = r#"{"repo":"o/r","pr_num":42,"issues":[],"branch":"b","container_id":"fake","phase":"working","heartbeat":"2026-01-01T00:00:00Z","started":"2026-01-01T00:00:00Z"}"#;
+    let state_path = dir.path().join("workers/o--r--pr-42.json");
+    fs::write(&state_path, json).unwrap();
+
+    sipag()
+        .args(["kill", "#42"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Killed worker for PR #42"));
+
+    // Verify the state file was updated to failed.
+    let updated = fs::read_to_string(&state_path).unwrap();
+    assert!(
+        updated.contains("\"failed\""),
+        "Phase should be 'failed' after kill"
+    );
+    assert!(
+        updated.contains("Killed by user"),
+        "Error should say 'Killed by user'"
+    );
+}
+
+// ── Doctor (config entries) ─────────────────────────────────────────────────
+
+#[test]
+fn doctor_shows_config_entries() {
+    let dir = temp_sipag_dir();
+    fs::write(dir.path().join("config"), "image=custom:v1\ntimeout=300\n").unwrap();
+
+    sipag()
+        .arg("doctor")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("image=custom:v1"))
+        .stdout(predicate::str::contains("timeout=300"));
+}
+
+// ── Logs (file fallback) ────────────────────────────────────────────────────
+
+#[test]
+fn logs_falls_back_to_log_file() {
+    let dir = temp_sipag_dir();
+    let state_json = r#"{"repo":"o/r","pr_num":7,"issues":[],"branch":"b","container_id":"nonexistent-container","phase":"finished","heartbeat":"2026-01-01T00:00:00Z","started":"2026-01-01T00:00:00Z"}"#;
+    fs::write(dir.path().join("workers/o--r--pr-7.json"), state_json).unwrap();
+    fs::write(
+        dir.path().join("logs/o--r--pr-7.log"),
+        "Worker output line 1\nWorker output line 2\n",
+    )
+    .unwrap();
+
+    sipag()
+        .args(["logs", "#7"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Worker output line 1"));
+}
+
+// ── Work ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn work_requires_valid_directory() {
+    sipag()
+        .args(["work", "/nonexistent/path/that/does/not/exist"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not exist"));
 }
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────

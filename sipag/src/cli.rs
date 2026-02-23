@@ -6,6 +6,7 @@ use sipag_core::{
     state::{self, format_duration},
     worker::{dispatch, github, lifecycle},
 };
+use std::path::PathBuf;
 use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -25,6 +26,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Start an interactive work session
+    Work {
+        /// Local project directories (defaults to current directory)
+        dirs: Vec<PathBuf>,
+    },
+
     /// Dispatch a Docker worker for a PR
     Dispatch {
         /// Repository in owner/repo format
@@ -64,6 +71,7 @@ pub enum Commands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
+        Some(Commands::Work { dirs }) => crate::work::run_work(&dirs),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
         Some(Commands::Ps) => run_ps(),
@@ -379,5 +387,28 @@ mod tests {
     #[test]
     fn extract_issue_nums_deduplicates() {
         assert_eq!(extract_issue_nums("Closes #5\nFixes #5"), vec![5]);
+    }
+
+    #[test]
+    fn extract_issue_nums_case_insensitive() {
+        assert_eq!(extract_issue_nums("closes #1"), vec![1]);
+        assert_eq!(extract_issue_nums("FIXES #2"), vec![2]);
+        assert_eq!(extract_issue_nums("Resolves #3"), vec![3]);
+    }
+
+    #[test]
+    fn extract_issue_nums_multiple_per_line() {
+        assert_eq!(extract_issue_nums("Closes #1, Closes #2"), vec![1, 2]);
+    }
+
+    #[test]
+    fn extract_issue_nums_ignores_non_numeric() {
+        assert!(extract_issue_nums("Closes #abc").is_empty());
+        assert!(extract_issue_nums("Closes #").is_empty());
+    }
+
+    #[test]
+    fn extract_issue_nums_large_numbers() {
+        assert_eq!(extract_issue_nums("Closes #99999"), vec![99999]);
     }
 }

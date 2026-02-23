@@ -17,21 +17,23 @@ The three-phase flow:
 
 ```
 sipag-core/src/
-├── lib.rs              # pub mod: auth, config, docker, init, state, worker
+├── lib.rs              # pub mod: auth, config, docker, init, repo, state, worker
 ├── auth.rs             # Token resolution (OAuth, API key, GH token)
 ├── config.rs           # WorkerConfig (5 fields), Credentials, default_sipag_dir()
 ├── docker.rs           # Preflight checks (daemon running, image available)
 ├── init.rs             # Create ~/.sipag/{workers,logs}
+├── repo.rs             # Git remote resolution (local dir → GitHub owner/repo)
 ├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files (atomic writes)
 └── worker/
     ├── mod.rs           # pub use dispatch, github, lifecycle
     ├── dispatch.rs      # dispatch_worker() → Docker container
-    ├── github.rs        # list_labeled_issues, count_open_sipag_prs, label_issues
+    ├── github.rs        # list_labeled_issues, count_open_sipag_prs, fetch_open_issues/prs
     └── lifecycle.rs     # scan_workers, check_container_alive, cleanup_finished
 
 sipag/src/
 ├── main.rs             # Entry point
-└── cli.rs              # 7 commands: dispatch, ps, logs, kill, tui, doctor, version
+├── cli.rs              # 8 commands: work, dispatch, ps, logs, kill, tui, doctor, version
+└── work.rs             # sipag work: resolve repos, fetch board state, exec claude
 
 sipag-worker/src/
 └── main.rs             # Container-side binary: clone, fetch PR, run Claude Code
@@ -43,9 +45,10 @@ tui/src/
 └── ui/                 # list.rs (table view), detail.rs (metadata + log)
 ```
 
-### Worker prompt
+### Prompts
 
 ```
+lib/prompts/work.md           # sipag work system prompt (embedded via include_str!)
 lib/prompts/worker.md         # Worker disposition prompt (embedded via include_str!)
 ```
 
@@ -73,6 +76,7 @@ Phases: `starting` → `working` → `finished` | `failed`
 ## Commands
 
 ```
+sipag work [<dirs>...]        Start an interactive work session (main entry point)
 sipag dispatch --repo <owner/repo> --pr <N>
                               Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
