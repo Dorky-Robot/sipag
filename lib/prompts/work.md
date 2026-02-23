@@ -55,29 +55,35 @@ Before launching the poller or picking up new issues, recover and prioritize all
 
 This recovers work from crashed or killed sessions. Finish what's started before starting anything new.
 
-### Step 4: Launch background poller
+### Step 4: Launch background watcher
 
-After orphan recovery and analysis, launch a background task that runs the monitoring loop. Use a bash background task that polls every {POLL_INTERVAL} seconds:
+After orphan recovery and analysis, launch a background task that watches for worker state changes and GitHub poll ticks:
 
 ```bash
-while true; do sleep {POLL_INTERVAL}; echo "SIPAG_POLL_TICK"; done &
+sipag watch &
 ```
 
-Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
+This watches `~/.sipag/workers/` for state file changes (sub-second latency via filesystem events) and emits a `SIPAG_GITHUB_POLL` tick every {POLL_INTERVAL} seconds. React to event markers as they appear:
 
-1. **Check finished workers first** (via `sipag ps`):
-   a. **Success** (finished phase): First check if the PR is already merged: `gh pr view <N> --repo <repo> --json state -q .state`. If `MERGED`, skip the review gate — the worker already reviewed and merged it. Just close any related issues that weren't auto-closed and move on. If `OPEN`, the worker didn't merge (hit review loop limit, or old worker without merge logic) — run the review gate as a fallback (see below).
-   b. **Failed**: Escalate (see below), log the failure, and move on
-2. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
-3. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
-4. **Only then, pick up new ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
-   - Skip issues that already have an open sipag PR or running worker
-   - For each new ready issue:
-     a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
-     b. Create a branch: `git checkout -b sipag/issue-<N>`
-     c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
-     d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
-     e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
+- **`SIPAG_WORKER_FINISHED <repo> <pr_num>`** — A worker completed successfully. Check if the PR is already merged: `gh pr view <N> --repo <repo> --json state -q .state`. If `MERGED`, skip the review gate — the worker already reviewed and merged it. Just close any related issues that weren't auto-closed and move on. If `OPEN`, the worker didn't merge (hit review loop limit, or old worker without merge logic) — run the review gate as a fallback (see below).
+
+- **`SIPAG_WORKER_FAILED <repo> <pr_num>`** — A worker failed. Check logs (`sipag logs <pr_num>`), escalate by writing an event file, consider re-dispatching if the failure is transient.
+
+- **`SIPAG_WORKER_STARTED <repo> <pr_num>`** / **`SIPAG_WORKER_WORKING <repo> <pr_num>`** — Informational. No action needed. Confirms a worker is progressing.
+
+- **`SIPAG_GITHUB_POLL`** — Periodic GitHub check. Run the full poll cycle:
+  1. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
+  2. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
+  3. **Only then, pick up new ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
+     - Skip issues that already have an open sipag PR or running worker
+     - For each new ready issue:
+       a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
+       b. Create a branch: `git checkout -b sipag/issue-<N>`
+       c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
+       d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
+       e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
+
+Worker finish/fail events are handled immediately (sub-second latency). GitHub polling for new issues still happens on a timer but is no longer the mechanism for detecting worker completion.
 
 ### Review gate for finished PRs
 

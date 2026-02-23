@@ -1,4 +1,5 @@
 mod cli;
+mod watch;
 mod work;
 
 use clap::Parser;

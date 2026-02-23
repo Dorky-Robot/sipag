@@ -67,6 +67,9 @@ pub enum Commands {
         id: String,
     },
 
+    /// Watch for worker state changes and emit event markers
+    Watch,
+
     /// Launch interactive TUI
     Tui,
 
@@ -81,6 +84,10 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
         Some(Commands::Work { dirs }) => crate::work::run_work(&dirs),
+        Some(Commands::Watch) => crate::watch::run_watch(
+            &default_sipag_dir(),
+            WorkerConfig::load(&default_sipag_dir())?.poll_interval,
+        ),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch {
             repo,
