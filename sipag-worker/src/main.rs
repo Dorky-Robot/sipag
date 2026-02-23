@@ -135,37 +135,15 @@ fn run() -> Result<i32> {
     let session_id = setup_session_resume();
 
     // Run Claude Code with full permissions from /work directory.
-    // Pipe prompt via stdin to avoid ARG_MAX limits on the command line.
-    use std::io::Write;
-    use std::process::Stdio;
-    let mut claude_args = vec!["--dangerously-skip-permissions"];
-    if let Some(ref id) = session_id {
-        claude_args.extend(["--resume", id]);
-    }
-    claude_args.extend(["-p", "-"]);
+    let exit_code = spawn_claude(&session_id, &prompt)?;
 
-    let mut child = Command::new("claude")
-        .args(&claude_args)
-        .current_dir("/work")
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("failed to spawn claude")?;
-
-    // Write prompt and explicitly close stdin before waiting.
-    // On write failure, kill the child to prevent zombie processes.
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e).context("failed to write prompt to claude stdin");
-        }
-        // stdin dropped here, closing the pipe — signals EOF to Claude.
-    }
-
-    let status = child.wait().context("failed to wait for claude")?;
-
-    let exit_code = status.code().unwrap_or(1);
+    // If --resume failed, fall back to a fresh session.
+    let exit_code = if exit_code != 0 && session_id.is_some() {
+        eprintln!("sipag-worker: --resume failed (exit {exit_code}), retrying without resume");
+        spawn_claude(&None, &prompt)?
+    } else {
+        exit_code
+    };
 
     // Post-run verification: check if commits were actually pushed.
     if exit_code == 0 {
@@ -348,6 +326,39 @@ fn read_lessons_file(repo: &str) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Spawn Claude Code with the given args and pipe the prompt via stdin.
+///
+/// Returns the exit code.
+fn spawn_claude(session_id: &Option<String>, prompt: &str) -> Result<i32> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut claude_args = vec!["--dangerously-skip-permissions"];
+    if let Some(ref id) = session_id {
+        claude_args.extend(["--resume", id]);
+    }
+    claude_args.extend(["-p", "-"]);
+
+    let mut child = Command::new("claude")
+        .args(&claude_args)
+        .current_dir("/work")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to spawn claude")?;
+
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e).context("failed to write prompt to claude stdin");
+        }
+    }
+
+    let status = child.wait().context("failed to wait for claude")?;
+    Ok(status.code().unwrap_or(1))
 }
 
 /// Copy the host's session file into Claude's expected location so `--resume` works.
