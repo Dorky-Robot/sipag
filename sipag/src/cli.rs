@@ -96,25 +96,26 @@ fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
     docker::preflight_docker_running()?;
     docker::preflight_docker_image(&cfg.image)?;
 
-    // Back-pressure: check open sipag PRs.
-    if cfg.max_open_prs > 0 {
-        if let Some(count) = github::count_open_sipag_prs(repo) {
-            if count >= cfg.max_open_prs {
-                anyhow::bail!(
-                    "Back-pressure: {count} open sipag PRs (max: {}). Merge or close some first.",
-                    cfg.max_open_prs
-                );
-            }
-        }
-    }
-
     // Ensure the sipag label exists and is on this PR.
     github::ensure_sipag_label(repo);
     github::label_pr_sipag(repo, pr_num);
 
+    // Back-pressure: count active workers (non-terminal state files).
+    // This reconciles against Docker to detect dead containers, so zombie
+    // workers don't inflate the count.
+    let workers = lifecycle::scan_workers(&sipag_dir);
+    if cfg.max_open_prs > 0 {
+        let active = workers.iter().filter(|w| !w.phase.is_terminal()).count();
+        if active >= cfg.max_open_prs {
+            anyhow::bail!(
+                "Back-pressure: {active} active workers (max: {}). Wait for workers to finish.",
+                cfg.max_open_prs
+            );
+        }
+    }
+
     // Check for existing worker for this PR.
-    let existing = state::list_all(&sipag_dir);
-    if existing
+    if workers
         .iter()
         .any(|w| w.pr_num == pr_num && !w.phase.is_terminal())
     {
@@ -225,27 +226,27 @@ fn run_logs(id: &str) -> Result<()> {
     if let Ok(pr_num) = id.trim_start_matches('#').parse::<u64>() {
         let workers = lifecycle::scan_workers(&sipag_dir);
         if let Some(w) = workers.iter().find(|w| w.pr_num == pr_num) {
-            if !w.container_id.is_empty() {
-                let status = Command::new("docker")
-                    .args(["logs", "--tail", "100", &w.container_id])
-                    .status();
-                return match status {
-                    Ok(s) if s.success() => Ok(()),
-                    _ => {
-                        // Try log file fallback.
-                        let log_path = sipag_dir
-                            .join("logs")
-                            .join(format!("{}--pr-{pr_num}.log", w.repo.replace('/', "--")));
-                        if log_path.exists() {
-                            let content = std::fs::read_to_string(&log_path)?;
-                            print!("{content}");
-                            Ok(())
-                        } else {
-                            anyhow::bail!("No logs found for PR #{pr_num}")
-                        }
-                    }
-                };
+            // Prefer the log file — it's the authoritative source because
+            // Docker stdout is piped directly to it (Docker's own journal
+            // receives nothing).
+            let log_path = sipag_dir
+                .join("logs")
+                .join(format!("{}--pr-{pr_num}.log", w.repo.replace('/', "--")));
+            if log_path.exists() {
+                let content = std::fs::read_to_string(&log_path)?;
+                print!("{content}");
+                return Ok(());
             }
+
+            // Fallback: try docker logs by container name.
+            let container_name = format!("sipag-worker-pr-{pr_num}");
+            let status = Command::new("docker")
+                .args(["logs", "--tail", "100", &container_name])
+                .status();
+            return match status {
+                Ok(s) if s.success() => Ok(()),
+                _ => anyhow::bail!("No logs found for PR #{pr_num}"),
+            };
         }
     }
 
@@ -267,12 +268,17 @@ fn run_kill(id: &str) -> Result<()> {
     if let Ok(pr_num) = id.trim_start_matches('#').parse::<u64>() {
         let workers = lifecycle::scan_workers(&sipag_dir);
         if let Some(w) = workers.iter().find(|w| w.pr_num == pr_num) {
-            if !w.container_id.is_empty() {
-                let _ = Command::new("docker")
-                    .args(["kill", &w.container_id])
-                    .status();
+            // If the worker already reached a terminal phase, preserve its state.
+            // This prevents overwriting a successful `finished` with `failed`.
+            if w.phase.is_terminal() {
+                println!(
+                    "Worker for PR #{pr_num} already {} — state preserved.",
+                    w.phase
+                );
+                return Ok(());
             }
-            // Also try named container.
+
+            // Kill the Docker container by name.
             let container_name = format!("sipag-worker-pr-{pr_num}");
             let _ = Command::new("docker")
                 .args(["kill", &container_name])

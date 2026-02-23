@@ -120,18 +120,18 @@ pub fn dispatch_worker(
     cmd.env("GH_TOKEN", &creds.gh_token);
 
     // Spawn the container.
-    let child = cmd.spawn().context("Failed to spawn Docker container")?;
+    let _child = cmd.spawn().context("Failed to spawn Docker container")?;
 
-    let container_id = child.id().to_string();
-
-    // Update state with container ID.
+    // Store the container name (deterministic, known at dispatch time) rather than
+    // the OS PID of the docker-run process. The container name is what Docker uses
+    // for `docker logs`, `docker kill`, `docker ps --filter name=...`.
     let mut updated = initial_state;
-    updated.container_id = container_id.clone();
+    updated.container_id = container_name.clone();
     state::write_state(&updated)?;
 
     println!("[PR #{pr_num}] Worker dispatched: {container_name}");
 
-    Ok(container_id)
+    Ok(container_name)
 }
 
 /// Check whether a Docker container with the given name is currently running.

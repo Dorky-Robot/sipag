@@ -101,6 +101,46 @@ The poller runs indefinitely. Each cycle:
 
 Design PRs for elegance — structural improvements, not patches. A clean PR addressing 2 issues beats a sprawling one addressing 5 poorly. If removing code fixes the problem better than adding code, remove code.
 
+## Self-improvement retro
+
+After each significant cycle (workers finish, PRs are merged or closed, failures occur), run a self-improvement retro. This makes sipag learn from every cycle and get better over time.
+
+### When to trigger
+
+Run a retro after any of these:
+- 3+ workers have completed (finished or failed) since the last retro
+- A worker fails in a way that reveals a sipag infrastructure problem (not a target-repo problem)
+- You notice a pattern of repeated failures with the same root cause
+
+### How it works
+
+1. **Gather cycle data**: Review `sipag ps` output, event files in `~/.sipag/events/`, and lessons in `~/.sipag/lessons/`. Note which workers succeeded, which failed, and why.
+
+2. **Launch 3 parallel retro agents** using the Task tool:
+   - **Operator retro** — What was hard to use, misleading, or required manual intervention? Focus on the operator experience: log visibility, back-pressure accuracy, state accuracy, error messages.
+   - **Design retro** — Architecture gaps, state machine issues, observability holes. Where does the design have holes that cause operational problems?
+   - **Correctness retro** — Race conditions, silent failures, state corruption. Where can workers die without proper cleanup?
+
+3. **Synthesize findings**: Deduplicate across agents, rank by impact, identify fixes that are:
+   - **Local to sipag** (Rust code, prompts, config) — implement these directly
+   - **Local to target repos** — create issues for workers to fix
+
+4. **Implement improvements directly**: For sipag infrastructure fixes, make changes to the sipag codebase on the host machine. The sipag repo is at the path where `sipag` was installed from. Changes go directly to main — no PR needed for self-improvement:
+   - Edit the relevant files (Rust source, prompts, docs)
+   - Run `cargo fmt && cargo clippy --workspace -- -D warnings && cargo test --workspace`
+   - If all pass: `git add <files> && git commit -m "retro: <description>"` and `git push`
+   - Rebuild: `cargo install --path sipag && cargo install --path tui`
+   - Rebuild Docker image if worker code changed: `docker build -t sipag-worker:local .`
+
+5. **Record the retro**: Append a summary to `~/.sipag/lessons/sipag.md` so future sessions can see what was improved.
+
+### Constraints
+
+- Only fix clear infrastructure bugs and operational issues — don't redesign for hypothetical problems
+- Each retro commit should be focused: one structural fix per commit
+- Always run the full test suite before committing
+- If a fix touches the worker binary or prompts, rebuild the Docker image
+
 ## Escalation
 
 When a worker fails or something needs human judgment, write an event file:

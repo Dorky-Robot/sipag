@@ -169,11 +169,11 @@ impl App {
             return Ok(());
         }
 
-        if !task.container_id.is_empty() {
-            let _ = std::process::Command::new("docker")
-                .args(["kill", &task.container_id])
-                .output();
-        }
+        // Kill by deterministic container name.
+        let container_name = format!("sipag-worker-pr-{}", task.pr_num);
+        let _ = std::process::Command::new("docker")
+            .args(["kill", &container_name])
+            .output();
 
         let mut worker = state::read_state(&task.file_path)?;
         worker.phase = state::WorkerPhase::Failed;
@@ -187,19 +187,18 @@ impl App {
 
     /// Kill all active Docker containers.
     pub fn kill_all(&mut self) -> Result<()> {
-        let active: Vec<(String, PathBuf)> = self
+        let active: Vec<(u64, PathBuf)> = self
             .tasks
             .iter()
             .filter(|t| !t.phase.is_terminal())
-            .map(|t| (t.container_id.clone(), t.file_path.clone()))
+            .map(|t| (t.pr_num, t.file_path.clone()))
             .collect();
 
-        for (container_id, file_path) in &active {
-            if !container_id.is_empty() {
-                let _ = std::process::Command::new("docker")
-                    .args(["kill", container_id.as_str()])
-                    .output();
-            }
+        for (pr_num, file_path) in &active {
+            let container_name = format!("sipag-worker-pr-{pr_num}");
+            let _ = std::process::Command::new("docker")
+                .args(["kill", &container_name])
+                .output();
             if let Ok(mut worker) = state::read_state(file_path) {
                 worker.phase = state::WorkerPhase::Failed;
                 worker.ended = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
@@ -216,10 +215,10 @@ impl App {
 
     pub fn selected_container_name(&self) -> Option<String> {
         let task = self.tasks.get(self.selected)?;
-        if task.phase.is_terminal() || task.container_id.is_empty() {
+        if task.phase.is_terminal() {
             return None;
         }
-        Some(task.container_id.clone())
+        Some(format!("sipag-worker-pr-{}", task.pr_num))
     }
 
     // ── Key handling ──────────────────────────────────────────────────────────

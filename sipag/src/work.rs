@@ -59,7 +59,8 @@ pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
     let system_prompt = WORK_PROMPT
         .replace("{BOARD_STATE}", &board_state)
         .replace("{POLL_INTERVAL}", &cfg.poll_interval.to_string())
-        .replace("{WORK_LABEL}", &cfg.work_label);
+        .replace("{WORK_LABEL}", &cfg.work_label)
+        .replace("{MAX_OPEN_PRS}", &cfg.max_open_prs.to_string());
 
     // Exec into claude.
     eprintln!("Launching Claude session...\n");

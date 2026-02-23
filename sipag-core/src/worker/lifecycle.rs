@@ -7,8 +7,28 @@ use std::process::{Command, Stdio};
 use crate::state::{self, WorkerState};
 
 /// Read all worker state files and return current state of all workers.
+///
+/// For non-terminal workers, checks whether the Docker container is still alive.
+/// If the container is gone, the worker is marked as failed so `sipag ps` and
+/// back-pressure calculations reflect reality.
 pub fn scan_workers(sipag_dir: &Path) -> Vec<WorkerState> {
-    state::list_all(sipag_dir)
+    let mut workers = state::list_all(sipag_dir);
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    for w in &mut workers {
+        if w.phase.is_terminal() {
+            continue;
+        }
+        let container_name = format!("sipag-worker-pr-{}", w.pr_num);
+        if !check_container_alive(&container_name) {
+            w.phase = state::WorkerPhase::Failed;
+            w.ended = Some(now.clone());
+            w.error = Some("container exited without updating state".to_string());
+            let _ = state::write_state(w);
+        }
+    }
+
+    workers
 }
 
 /// Check whether a Docker container is still running by container name.
