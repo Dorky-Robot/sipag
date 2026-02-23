@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use sipag_core::state::{self, WorkerPhase};
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -130,12 +131,21 @@ fn run() -> Result<i32> {
     let pre_claude_sha =
         get_head_sha().context("failed to get HEAD SHA — git state may be corrupt")?;
 
+    // Check if a host session file was mounted for --resume.
+    let session_id = setup_session_resume();
+
     // Run Claude Code with full permissions from /work directory.
     // Pipe prompt via stdin to avoid ARG_MAX limits on the command line.
     use std::io::Write;
     use std::process::Stdio;
+    let mut claude_args = vec!["--dangerously-skip-permissions"];
+    if let Some(ref id) = session_id {
+        claude_args.extend(["--resume", id]);
+    }
+    claude_args.extend(["-p", "-"]);
+
     let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "-p", "-"])
+        .args(&claude_args)
         .current_dir("/work")
         .stdin(Stdio::piped())
         .spawn()
@@ -338,6 +348,26 @@ fn read_lessons_file(repo: &str) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Copy the host's session file into Claude's expected location so `--resume` works.
+///
+/// Returns the session ID if a session file was mounted, or None to fall back
+/// to a fresh session.
+fn setup_session_resume() -> Option<String> {
+    let session_id = env::var("SIPAG_SESSION_ID").ok()?;
+    let src = Path::new("/sipag-session/session.jsonl");
+    if !src.exists() {
+        return None;
+    }
+
+    let dest_dir = PathBuf::from("/home/sipag/.claude/projects/sipag-session");
+    fs::create_dir_all(&dest_dir).ok()?;
+    let dest = dest_dir.join(format!("{session_id}.jsonl"));
+    fs::copy(src, &dest).ok()?;
+
+    eprintln!("sipag-worker: resuming host session {session_id}");
+    Some(session_id)
 }
 
 /// Best-effort attempt to mark the state file as failed on error.

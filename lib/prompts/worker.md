@@ -37,12 +37,60 @@ If there are previous self-review summaries or review feedback comments:
 
 If the branch already has complete implementation and tests pass, and the only issue was merge conflicts (which you just resolved above), push the merge commit and stop. Do not re-run self-review on unchanged code.
 
+## Third: scan for related issues
+
+Before starting implementation, check if the structural fix you're about to make naturally addresses other open issues. This is the Raptor 1 → Raptor 3 principle: a well-designed fix to the underlying disease often cures multiple symptoms at once.
+
+### 1. List open issues
+
+```bash
+gh issue list --repo {REPO} --state open --json number,title --limit 100
+```
+
+### 2. Identify candidates
+
+Read the issue titles against your PR description. Look for issues that share the same:
+- Files or modules you're already modifying
+- Root cause or structural disease your PR addresses
+- Code paths your fix already touches
+
+Ignore issues that are clearly unrelated or would require work outside your PR's scope.
+
+### 3. Read candidate bodies
+
+For each promising title (typically 1-3, never more than 5):
+
+```bash
+gh issue view <N> --repo {REPO} --json body -q .body
+```
+
+### 4. Decide: in-scope or not
+
+An issue is in-scope **only if** your existing fix already addresses it or addressing it requires trivial additional work in code you're already changing. Concretely:
+- **Yes**: "Error handling missing in parser" — and your PR is restructuring that parser's error paths
+- **Yes**: "Config key X not documented" — and your PR is already modifying that config module
+- **No**: "Add retry logic to HTTP client" — even if related, this is a separate piece of work
+- **No**: Anything that would add a new dependency, a new module, or more than ~30 lines of code beyond what the PR already requires
+
+When in doubt, leave it out. A clean PR that closes 2 issues is better than a sprawling one that half-fixes 5.
+
+### 5. Bring in-scope issues into the PR
+
+For each issue you're absorbing:
+
+```bash
+gh pr edit {PR_NUM} --repo {REPO} --body "$(gh pr view {PR_NUM} --repo {REPO} --json body -q .body)
+
+Closes #<N>"
+```
+
+This appends `Closes #N` to the PR body so GitHub auto-closes the issue on merge. Note this in your implementation plan — the reviewer should see that you consciously expanded scope with justification.
+
 ## How to work
 
 - The PR description above is your complete briefing. Trust it.
 - Design for elegance — aim for Raptor 1 to Raptor 3 structural improvements, not incremental patches.
 - If removing code fixes the problem better than adding code, remove code.
-- If your changes accidentally resolve issues not in the plan, add `Closes #N` to the PR body.
 - Push commits as you go. Update the PR body with what you actually did.
 - Update issue labels as you resolve them (`gh issue edit --add-label needs-review --remove-label in-progress`).
 - Keep the original PR plan intact — add an **Implementation** section below it with what was done, any deviations, and why.

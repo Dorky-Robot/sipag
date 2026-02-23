@@ -60,7 +60,8 @@ COPY --from=builder /build/target/release/sipag-worker /usr/local/bin/sipag-work
 
 # Non-root user (claude refuses --dangerously-skip-permissions as root)
 RUN useradd -m -s /bin/bash sipag \
-    && mkdir -p /work && chown sipag:sipag /work
+    && mkdir -p /work /home/sipag/.claude/projects \
+    && chown -R sipag:sipag /work /home/sipag/.claude
 USER sipag
 
 WORKDIR /work
