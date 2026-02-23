@@ -48,6 +48,33 @@ fn run() -> Result<i32> {
             "/work",
         ],
     )?;
+    // Scrub the token from the stored remote URL so it's not visible in
+    // `git remote -v`, /proc/PID/cmdline, or Claude's output.
+    run_cmd(
+        "git",
+        &[
+            "-C",
+            "/work",
+            "remote",
+            "set-url",
+            "origin",
+            &format!("https://github.com/{repo}.git"),
+        ],
+    )?;
+    // Configure credential helper so push still works without the token in the URL.
+    let credential_helper = format!(
+        "!f() {{ echo \"protocol=https\nhost=github.com\nusername=x-access-token\npassword={gh_token}\"; }}; f"
+    );
+    run_cmd(
+        "git",
+        &[
+            "-C",
+            "/work",
+            "config",
+            "credential.helper",
+            &credential_helper,
+        ],
+    )?;
     run_cmd("git", &["-C", "/work", "config", "user.name", "sipag"])?;
     run_cmd(
         "git",
@@ -100,13 +127,8 @@ fn run() -> Result<i32> {
     );
 
     // Capture HEAD sha before Claude runs for push verification.
-    let pre_claude_sha = get_head_sha().unwrap_or_default();
-
-    // Write prompt to a file and pipe via stdin to avoid OS argument size limits.
-    // Passing large prompts via .arg() hits ARG_MAX (~128KB on Linux), causing
-    // silent E2BIG failures.
-    let prompt_path = "/tmp/sipag-prompt.txt";
-    std::fs::write(prompt_path, &prompt).context("failed to write prompt file")?;
+    let pre_claude_sha =
+        get_head_sha().context("failed to get HEAD SHA — git state may be corrupt")?;
 
     // Run Claude Code with full permissions from /work directory.
     // Pipe prompt via stdin to avoid ARG_MAX limits on the command line.
@@ -118,12 +140,19 @@ fn run() -> Result<i32> {
         .stdin(Stdio::piped())
         .spawn()
         .context("failed to spawn claude")?;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(prompt.as_bytes())
-        .context("failed to write prompt to claude stdin")?;
+
+    // Write prompt and explicitly close stdin before waiting.
+    // On write failure, kill the child to prevent zombie processes.
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e).context("failed to write prompt to claude stdin");
+        }
+        // stdin dropped here, closing the pipe — signals EOF to Claude.
+    }
+
     let status = child.wait().context("failed to wait for claude")?;
 
     let exit_code = status.code().unwrap_or(1);
@@ -178,6 +207,9 @@ fn finish_state(state_path: &Path, exit_code: i32) -> Result<()> {
     s.exit_code = Some(exit_code);
     s.ended = Some(now.clone());
     s.heartbeat = now;
+    if exit_code != 0 {
+        s.error = Some(format!("claude exited with code {exit_code}"));
+    }
     state::write_state(&s).context("failed to write state file")
 }
 
@@ -203,7 +235,11 @@ fn get_pr_body(repo: &str, pr_num: u64) -> Result<String> {
         bail!("gh pr view failed: {stderr}");
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if body.is_empty() {
+        bail!("PR #{pr_num} has an empty body — cannot proceed without an assignment");
+    }
+    Ok(body)
 }
 
 /// Run a command and bail on failure.
@@ -249,11 +285,6 @@ fn get_head_sha() -> Option<String> {
 /// Also checks for unpushed local commits — if Claude committed but didn't push,
 /// that's a failure we need to catch.
 fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
-    // If we couldn't get the pre-SHA, assume ok (don't block on verification failures).
-    if pre_sha.is_empty() {
-        return true;
-    }
-
     let post_sha = get_head_sha().unwrap_or_default();
     if post_sha.is_empty() || post_sha == pre_sha {
         // HEAD didn't change — Claude made no commits.
@@ -271,15 +302,21 @@ fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
         ])
         .output();
 
-    if let Ok(o) = unpushed {
-        let out = String::from_utf8_lossy(&o.stdout);
-        if !out.trim().is_empty() {
-            eprintln!("sipag-worker: found unpushed commits:\n{}", out.trim());
-            return false;
+    match unpushed {
+        Ok(o) if o.status.success() => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            if !out.trim().is_empty() {
+                eprintln!("sipag-worker: found unpushed commits:\n{}", out.trim());
+                return false;
+            }
+            true
+        }
+        _ => {
+            // Can't determine push status — fail safe rather than optimistic.
+            eprintln!("sipag-worker: could not verify push status for origin/{branch}");
+            false
         }
     }
-
-    true
 }
 
 /// Read the lessons file for a repo from the mounted lessons directory.

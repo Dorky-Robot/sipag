@@ -161,6 +161,7 @@ fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
 
 fn run_ps() -> Result<()> {
     let sipag_dir = default_sipag_dir();
+    lifecycle::cleanup_stale(&sipag_dir, 24);
     let workers = lifecycle::scan_workers(&sipag_dir);
 
     // Filter out terminal workers older than 24 hours from display.

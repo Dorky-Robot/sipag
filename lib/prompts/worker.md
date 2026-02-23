@@ -50,11 +50,13 @@ If the branch already has complete implementation and tests pass, and the only i
 - It's okay to do less. A clean PR addressing 2 issues well beats a sprawling one addressing 5 poorly.
 - Boy Scout Rule: when you touch a file, leave it better than you found it.
 
-## Self-review
+## Self-review (exactly once)
 
-After you finish implementation and all tests pass, run a self-review before declaring done. This catches issues while you can still fix them.
+After you finish implementation and all tests pass, run **one** self-review. This catches issues while you can still fix them.
 
-**Skip self-review if**: the PR already has a self-review comment and you made no new code changes (e.g., you only resolved merge conflicts or addressed existing feedback). Running a redundant review wastes time and clutters the PR with duplicate comments.
+**Hard rule**: self-review runs exactly once per worker session. After you fix any findings from the review, push the fixes and post the summary — do NOT run a second review to verify your fixes. The tests passing is sufficient verification. A review → fix → re-review loop wastes time and produces duplicate comments.
+
+**Skip self-review entirely if**: the PR already has a self-review comment and you made no new code changes (e.g., you only resolved merge conflicts or addressed existing feedback).
 
 ### 1. Get your diff
 
@@ -99,7 +101,7 @@ VERDICT: REQUEST_CHANGES
 
 Followed by a brief explanation (2-3 sentences max).
 
-### 3. Address findings
+### 3. Address findings, then stop
 
 For each agent that returned `REQUEST_CHANGES`:
 - Fix the issue in code
@@ -109,9 +111,11 @@ For each agent that returned `REQUEST_CHANGES`:
 For agents that returned `APPROVE_WITH_NOTES`:
 - Address the notes if they're actionable, otherwise note them for the PR comment
 
-### 4. Post review summary on the PR
+**Do NOT re-run the review after fixing.** Tests passing is sufficient. Proceed directly to step 4.
 
-After addressing all findings, post a comment on the PR summarizing what the self-review found and what was done about it:
+### 4. Post review summary and finish
+
+After addressing all findings, post a single comment on the PR summarizing what the self-review found and what was done about it. Then you are done — do not loop back.
 
 ```bash
 gh pr comment {PR_NUM} --repo {REPO} --body "## Self-review summary
