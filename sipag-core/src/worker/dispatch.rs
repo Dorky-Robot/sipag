@@ -23,7 +23,7 @@ pub fn dispatch_worker(
     creds: &Credentials,
 ) -> Result<String> {
     let repo_slug = repo.replace('/', "--");
-    let container_name = format!("sipag-worker-pr-{pr_num}");
+    let container_name = format!("sipag-{repo_slug}-pr-{pr_num}");
     let log_dir = cfg.sipag_dir.join("logs");
     fs::create_dir_all(&log_dir)?;
     let log_path = log_dir.join(format!("{repo_slug}--pr-{pr_num}.log"));
@@ -38,12 +38,15 @@ pub fn dispatch_worker(
     // Write initial state file.
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let state_path = state::state_file_path(&cfg.sipag_dir, repo, pr_num);
+    // Write container_id in the initial state (it's deterministic and known before
+    // spawn). This eliminates a race where the container could overwrite the state
+    // file between the host's initial write and the second write that sets container_id.
     let initial_state = WorkerState {
         repo: repo.to_string(),
         pr_num,
         issues: issues.to_vec(),
         branch: branch.to_string(),
-        container_id: String::new(), // filled after container starts
+        container_id: container_name.clone(),
         phase: WorkerPhase::Starting,
         heartbeat: now.clone(),
         started: now.clone(),
@@ -122,31 +125,9 @@ pub fn dispatch_worker(
     // Spawn the container.
     let _child = cmd.spawn().context("Failed to spawn Docker container")?;
 
-    // Store the container name (deterministic, known at dispatch time) rather than
-    // the OS PID of the docker-run process. The container name is what Docker uses
-    // for `docker logs`, `docker kill`, `docker ps --filter name=...`.
-    let mut updated = initial_state;
-    updated.container_id = container_name.clone();
-    state::write_state(&updated)?;
-
     println!("[PR #{pr_num}] Worker dispatched: {container_name}");
 
     Ok(container_name)
-}
-
-/// Check whether a Docker container with the given name is currently running.
-pub fn is_container_running(container_name: &str) -> bool {
-    Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            &format!("name=^{container_name}$"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
 }
 
 /// Extract a failure reason from the last 50 lines of a log file.
@@ -225,9 +206,10 @@ mod tests {
 
     #[test]
     fn container_name_format() {
-        // The naming convention in dispatch_worker is: sipag-worker-pr-{pr_num}
-        let name = format!("sipag-worker-pr-{}", 42);
-        assert_eq!(name, "sipag-worker-pr-42");
+        // The naming convention in dispatch_worker is: sipag-{repo_slug}-pr-{pr_num}
+        let repo_slug = "owner/repo".replace('/', "--");
+        let name = format!("sipag-{repo_slug}-pr-{}", 42);
+        assert_eq!(name, "sipag-owner--repo-pr-42");
         assert!(!name.contains('/'));
     }
 

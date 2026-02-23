@@ -34,6 +34,21 @@ pub fn preflight_docker_running() -> Result<()> {
     }
 }
 
+/// Check whether a Docker container with the given name is currently running.
+pub fn is_container_running(container_name: &str) -> bool {
+    Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            &format!("name=^{container_name}$"),
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
 /// Check that the required Docker image exists locally.
 pub fn preflight_docker_image(image: &str) -> Result<()> {
     let status = Command::new("docker")

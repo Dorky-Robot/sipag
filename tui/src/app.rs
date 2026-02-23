@@ -61,7 +61,9 @@ impl App {
     // ── Task list ─────────────────────────────────────────────────────────────
 
     pub fn refresh_tasks(&mut self) -> Result<()> {
-        let workers = state::list_all(&self.sipag_dir);
+        // Use scan_workers (not list_all) to detect dead containers and
+        // reconcile non-terminal workers against Docker liveness.
+        let workers = sipag_core::worker::lifecycle::scan_workers(&self.sipag_dir);
         let all_tasks: Vec<Task> = workers.into_iter().map(Task::from).collect();
 
         let now = Utc::now();
@@ -169,8 +171,8 @@ impl App {
             return Ok(());
         }
 
-        // Kill by deterministic container name.
-        let container_name = format!("sipag-worker-pr-{}", task.pr_num);
+        // Kill by stored container name.
+        let container_name = task.container_id.clone();
         let _ = std::process::Command::new("docker")
             .args(["kill", &container_name])
             .output();
@@ -187,15 +189,15 @@ impl App {
 
     /// Kill all active Docker containers.
     pub fn kill_all(&mut self) -> Result<()> {
-        let active: Vec<(u64, PathBuf)> = self
+        let active: Vec<(String, PathBuf)> = self
             .tasks
             .iter()
             .filter(|t| !t.phase.is_terminal())
-            .map(|t| (t.pr_num, t.file_path.clone()))
+            .map(|t| (t.container_id.clone(), t.file_path.clone()))
             .collect();
 
-        for (pr_num, file_path) in &active {
-            let container_name = format!("sipag-worker-pr-{pr_num}");
+        for (container_id, file_path) in &active {
+            let container_name = container_id.clone();
             let _ = std::process::Command::new("docker")
                 .args(["kill", &container_name])
                 .output();
@@ -218,7 +220,7 @@ impl App {
         if task.phase.is_terminal() {
             return None;
         }
-        Some(format!("sipag-worker-pr-{}", task.pr_num))
+        Some(task.container_id.clone())
     }
 
     // ── Key handling ──────────────────────────────────────────────────────────
@@ -353,17 +355,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("workers")).unwrap();
 
+        // Use a terminal phase because scan_workers reconciles non-terminal
+        // workers against Docker liveness (no Docker in tests → reconciled to failed).
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let s = state::WorkerState {
             repo: "test/repo".to_string(),
             pr_num: 42,
             issues: vec![1],
             branch: "sipag/pr-42".to_string(),
             container_id: "abc".to_string(),
-            phase: WorkerPhase::Working,
-            heartbeat: "2026-01-15T10:30:00Z".to_string(),
-            started: "2026-01-15T10:30:00Z".to_string(),
-            ended: None,
-            exit_code: None,
+            phase: WorkerPhase::Finished,
+            heartbeat: now.clone(),
+            started: now.clone(),
+            ended: Some(now),
+            exit_code: Some(0),
             error: None,
             file_path: state::state_file_path(dir.path(), "test/repo", 42),
         };
@@ -377,51 +382,56 @@ mod tests {
             log_lines: vec![],
             log_scroll: 0,
             attach_request: None,
-            list_mode: ListMode::Active,
+            list_mode: ListMode::Archive,
             archive_max_age_days: 7,
         };
         app.refresh_tasks().unwrap();
 
         assert_eq!(app.tasks.len(), 1);
         assert_eq!(app.tasks[0].pr_num, 42);
-        assert_eq!(app.tasks[0].phase, WorkerPhase::Working);
+        assert_eq!(app.tasks[0].phase, WorkerPhase::Finished);
     }
 
     #[test]
     fn active_mode_filters_terminal() {
+        // With scan_workers reconciliation (no Docker in tests), non-terminal
+        // workers get reconciled to failed. So active mode shows 0 tasks when
+        // all workers are terminal. We test that active mode correctly shows
+        // nothing and archive mode shows both terminal workers.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("workers")).unwrap();
 
-        let working = state::WorkerState {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let finished = state::WorkerState {
             repo: "test/repo".to_string(),
             pr_num: 1,
             issues: vec![],
             branch: "b".to_string(),
             container_id: "c".to_string(),
-            phase: WorkerPhase::Working,
-            heartbeat: String::new(),
-            started: String::new(),
-            ended: None,
-            exit_code: None,
+            phase: WorkerPhase::Finished,
+            heartbeat: now.clone(),
+            started: now.clone(),
+            ended: Some(now.clone()),
+            exit_code: Some(0),
             error: None,
             file_path: state::state_file_path(dir.path(), "test/repo", 1),
         };
-        let done = state::WorkerState {
+        let failed = state::WorkerState {
             repo: "test/repo".to_string(),
             pr_num: 2,
             issues: vec![],
             branch: "b".to_string(),
             container_id: "c".to_string(),
-            phase: WorkerPhase::Finished,
-            heartbeat: String::new(),
-            started: String::new(),
-            ended: None,
-            exit_code: None,
+            phase: WorkerPhase::Failed,
+            heartbeat: now.clone(),
+            started: now.clone(),
+            ended: Some(now),
+            exit_code: Some(1),
             error: None,
             file_path: state::state_file_path(dir.path(), "test/repo", 2),
         };
-        state::write_state(&working).unwrap();
-        state::write_state(&done).unwrap();
+        state::write_state(&finished).unwrap();
+        state::write_state(&failed).unwrap();
 
         let mut app = App {
             sipag_dir: dir.path().to_path_buf(),
@@ -436,45 +446,38 @@ mod tests {
         };
         app.refresh_tasks().unwrap();
 
-        assert_eq!(app.tasks.len(), 1);
-        assert_eq!(app.tasks[0].phase, WorkerPhase::Working);
+        // Active mode shows no terminal workers.
+        assert_eq!(app.tasks.len(), 0);
+
+        // Archive mode shows both.
+        app.list_mode = ListMode::Archive;
+        app.refresh_tasks().unwrap();
+        assert_eq!(app.tasks.len(), 2);
     }
 
     #[test]
     fn toggle_list_mode_switches_visible_tasks() {
+        // Use terminal phases since scan_workers reconciles non-terminal workers
+        // against Docker (no Docker in tests → reconciled to failed).
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("workers")).unwrap();
 
-        let working = state::WorkerState {
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let finished = state::WorkerState {
             repo: "test/repo".to_string(),
             pr_num: 1,
             issues: vec![],
             branch: "b".to_string(),
             container_id: "c".to_string(),
-            phase: WorkerPhase::Working,
-            heartbeat: String::new(),
-            started: "2026-01-15T10:00:00Z".to_string(),
-            ended: None,
-            exit_code: None,
+            phase: WorkerPhase::Finished,
+            heartbeat: now.clone(),
+            started: now.clone(),
+            ended: Some(now.clone()),
+            exit_code: Some(0),
             error: None,
             file_path: state::state_file_path(dir.path(), "test/repo", 1),
         };
-        let done = state::WorkerState {
-            repo: "test/repo".to_string(),
-            pr_num: 2,
-            issues: vec![],
-            branch: "b".to_string(),
-            container_id: "c".to_string(),
-            phase: WorkerPhase::Finished,
-            heartbeat: String::new(),
-            started: "2026-01-15T10:00:00Z".to_string(),
-            ended: Some("2026-01-15T10:05:00Z".to_string()),
-            exit_code: Some(0),
-            error: None,
-            file_path: state::state_file_path(dir.path(), "test/repo", 2),
-        };
-        state::write_state(&working).unwrap();
-        state::write_state(&done).unwrap();
+        state::write_state(&finished).unwrap();
 
         let mut app = App {
             sipag_dir: dir.path().to_path_buf(),
@@ -489,11 +492,12 @@ mod tests {
         };
         app.refresh_tasks().unwrap();
 
-        assert_eq!(app.tasks.len(), 1);
-        assert_eq!(app.tasks[0].phase, WorkerPhase::Working);
+        // Active mode: no terminal workers shown.
+        assert_eq!(app.tasks.len(), 0);
 
         app.toggle_list_mode();
 
+        // Archive mode: terminal workers shown.
         assert_eq!(app.list_mode, ListMode::Archive);
         assert_eq!(app.tasks.len(), 1);
         assert_eq!(app.tasks[0].phase, WorkerPhase::Finished);

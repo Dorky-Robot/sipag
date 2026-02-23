@@ -19,8 +19,25 @@ pub fn scan_workers(sipag_dir: &Path) -> Vec<WorkerState> {
         if w.phase.is_terminal() {
             continue;
         }
-        let container_name = format!("sipag-worker-pr-{}", w.pr_num);
-        if !check_container_alive(&container_name) {
+        // Use stored container_id when available; fall back to reconstructed name
+        // for legacy state files that stored PIDs instead of names.
+        let container_name =
+            if w.container_id.is_empty() || w.container_id.chars().all(|c| c.is_ascii_digit()) {
+                let repo_slug = w.repo.replace('/', "--");
+                format!("sipag-{repo_slug}-pr-{}", w.pr_num)
+            } else {
+                w.container_id.clone()
+            };
+        if !crate::docker::is_container_running(&container_name) {
+            // Re-read to avoid race: container may have written terminal state
+            // between our initial read and this check (e.g., finished just before
+            // --rm removed the container).
+            if let Ok(fresh) = state::read_state(&w.file_path) {
+                if fresh.phase.is_terminal() {
+                    *w = fresh;
+                    continue;
+                }
+            }
             w.phase = state::WorkerPhase::Failed;
             w.ended = Some(now.clone());
             w.error = Some("container exited without updating state".to_string());
@@ -29,21 +46,6 @@ pub fn scan_workers(sipag_dir: &Path) -> Vec<WorkerState> {
     }
 
     workers
-}
-
-/// Check whether a Docker container is still running by container name.
-pub fn check_container_alive(container_name: &str) -> bool {
-    Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            &format!("name=^{container_name}$"),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
 }
 
 /// Clean up a finished worker — remove state file and stop container if still running.

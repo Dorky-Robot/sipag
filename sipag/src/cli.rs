@@ -214,7 +214,30 @@ fn run_ps() -> Result<()> {
             "#{:<7} {:<30} {:<12} {:<8} {}",
             w.pr_num, w.repo, w.phase, age, container_short
         );
+        // Show truncated error for failed workers.
+        if let Some(ref err) = w.error {
+            let short = if err.len() > 60 { &err[..60] } else { err };
+            println!("         \x1b[31m↳ {short}\x1b[0m");
+        }
     }
+
+    // Summary counts.
+    let working = workers.iter().filter(|w| !w.phase.is_terminal()).count();
+    let finished = workers
+        .iter()
+        .filter(|w| w.phase == state::WorkerPhase::Finished)
+        .count();
+    let failed = workers
+        .iter()
+        .filter(|w| w.phase == state::WorkerPhase::Failed)
+        .count();
+    println!(
+        "\n{} active, {} finished, {} failed ({} total)",
+        working,
+        finished,
+        failed,
+        workers.len()
+    );
 
     Ok(())
 }
@@ -238,8 +261,8 @@ fn run_logs(id: &str) -> Result<()> {
                 return Ok(());
             }
 
-            // Fallback: try docker logs by container name.
-            let container_name = format!("sipag-worker-pr-{pr_num}");
+            // Fallback: try docker logs by stored container name.
+            let container_name = w.container_id.clone();
             let status = Command::new("docker")
                 .args(["logs", "--tail", "100", &container_name])
                 .status();
@@ -278,8 +301,8 @@ fn run_kill(id: &str) -> Result<()> {
                 return Ok(());
             }
 
-            // Kill the Docker container by name.
-            let container_name = format!("sipag-worker-pr-{pr_num}");
+            // Kill the Docker container by stored name.
+            let container_name = w.container_id.clone();
             let _ = Command::new("docker")
                 .args(["kill", &container_name])
                 .status();

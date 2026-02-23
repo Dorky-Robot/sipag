@@ -87,23 +87,38 @@ fn run() -> Result<i32> {
          {worker_prompt}"
     );
 
-    // Write prompt to a temp file to avoid argument size limits.
+    // Capture HEAD sha before Claude runs for push verification.
+    let pre_claude_sha = get_head_sha().unwrap_or_default();
+
+    // Write prompt to a file and pipe via stdin to avoid OS argument size limits.
+    // Passing large prompts via .arg() hits ARG_MAX (~128KB on Linux), causing
+    // silent E2BIG failures.
     let prompt_path = "/tmp/sipag-prompt.txt";
     std::fs::write(prompt_path, &prompt).context("failed to write prompt file")?;
 
     // Run Claude Code with full permissions from /work directory.
-    let status = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "-p"])
-        .arg(&prompt)
+    // Pipe prompt via stdin to avoid ARG_MAX limits on the command line.
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("claude")
+        .args(["--dangerously-skip-permissions", "-p", "-"])
         .current_dir("/work")
-        .status()
-        .context("failed to run claude")?;
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to spawn claude")?;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(prompt.as_bytes())
+        .context("failed to write prompt to claude stdin")?;
+    let status = child.wait().context("failed to wait for claude")?;
 
     let exit_code = status.code().unwrap_or(1);
 
     // Post-run verification: check if commits were actually pushed.
     if exit_code == 0 {
-        let pushed = verify_commits_pushed(&branch);
+        let pushed = verify_commits_pushed(&branch, &pre_claude_sha);
         if !pushed {
             eprintln!("sipag-worker: claude exited 0 but no commits were pushed to {branch}");
             let mut s = state::read_state(&state_path).context("failed to read state file")?;
@@ -192,22 +207,33 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Check whether the remote branch has commits beyond origin/main.
+/// Get the current HEAD SHA in /work.
+fn get_head_sha() -> Option<String> {
+    Command::new("git")
+        .args(["-C", "/work", "rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Check whether Claude made any commits by comparing HEAD before and after.
 ///
-/// After a successful push, local HEAD and origin/{branch} are identical,
-/// so we compare the remote branch against the base (origin/main) to detect
-/// whether any work was done. If git commands fail, assume success (don't
-/// block on verification failures).
-fn verify_commits_pushed(branch: &str) -> bool {
-    // Fetch latest remote state for both the branch and main.
-    let fetch = Command::new("git")
-        .args(["-C", "/work", "fetch", "origin", branch, "main"])
-        .output();
-    if fetch.is_err() {
-        return true; // can't verify, assume ok
+/// Also checks for unpushed local commits — if Claude committed but didn't push,
+/// that's a failure we need to catch.
+fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
+    // If we couldn't get the pre-SHA, assume ok (don't block on verification failures).
+    if pre_sha.is_empty() {
+        return true;
     }
 
-    // Check for unpushed local commits (made but not pushed).
+    let post_sha = get_head_sha().unwrap_or_default();
+    if post_sha.is_empty() || post_sha == pre_sha {
+        // HEAD didn't change — Claude made no commits.
+        return false;
+    }
+
+    // HEAD changed, but check if commits were actually pushed.
     let unpushed = Command::new("git")
         .args([
             "-C",
@@ -226,24 +252,7 @@ fn verify_commits_pushed(branch: &str) -> bool {
         }
     }
 
-    // Check if the remote branch diverges from origin/main (i.e., work was pushed).
-    let diff_output = Command::new("git")
-        .args([
-            "-C",
-            "/work",
-            "log",
-            &format!("origin/main..origin/{branch}"),
-            "--oneline",
-        ])
-        .output();
-
-    match diff_output {
-        Ok(d) => {
-            let commits = String::from_utf8_lossy(&d.stdout);
-            !commits.trim().is_empty()
-        }
-        Err(_) => true, // can't verify, assume ok
-    }
+    true
 }
 
 /// Read the lessons file for a repo from the mounted lessons directory.
