@@ -149,6 +149,16 @@ docker build -t sipag-worker:local .
 SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
 ```
 
+## Running sipag work
+
+**Never `unset CLAUDECODE`** to try to run `sipag work` from inside a Claude Code session. It causes nested session conflicts. Instead, ask the user to run it from a separate terminal, or have the main Claude Code session run it as a background Bash task:
+
+```bash
+SIPAG_IMAGE=sipag-worker:local sipag work ~/Projects/dorky_robot/katulong
+```
+
+`sipag work` launches its own Claude Code session — it cannot be nested inside another one.
+
 ## Working on sipag
 
 ### What changes most
