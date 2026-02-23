@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# sipag — PreToolUse safety gate hook
+# sipag — PreToolUse safety gate hook (deny-list-only)
 #
 # Receives JSON on stdin from Claude Code, outputs a JSON allow/deny decision.
 # Used as a PreToolUse hook to auto-approve safe actions and auto-deny dangerous ones.
 #
+# Architecture: deny known-dangerous operations, allow everything else.
+# There is no allow-list, no LLM tiebreaker, and no mode system.
+#
 # Environment:
-#   SIPAG_SAFETY_MODE  — strict (default) or balanced; config file can also set this
 #   CLAUDE_PROJECT_DIR — project directory (set by Claude Code)
-#   ANTHROPIC_API_KEY  — required for balanced mode LLM tiebreaker
 #   SIPAG_AUDIT_LOG    — path to audit log file (NDJSON format); unset = no logging
 #
 # Config file: $CLAUDE_PROJECT_DIR/.claude/hooks/safety-gate.toml (optional)
@@ -102,54 +103,22 @@ parse_toml_array() {
   ' "$file"
 }
 
-# Parse a single quoted string value from a TOML section.
-# Usage: parse_toml_string <file> <section> <key>
-parse_toml_string() {
-	local file="$1" section="$2" key="$3"
-	[[ -f "$file" ]] || return 0
-	awk -v section="[$section]" -v key="$key" '
-    /^\[/ { in_section = ($0 == section) }
-    in_section && $0 ~ "^" key " = " {
-      val = $0
-      gsub(/^[^=]+= "/, "", val)
-      gsub(/"[[:space:]]*$/, "", val)
-      print val
-      exit
-    }
-  ' "$file"
-}
+# --- Load config ---
 
-# --- Load config and set mode ---
-
-_mode_env="${SIPAG_SAFETY_MODE:-}"
 EXTRA_DENY_PATTERNS=()
-EXTRA_ALLOW_PATTERNS=()
 DENY_PATHS=()
 
 if [[ -f "$CONFIG_FILE" ]]; then
-	# Mode from config (env var takes precedence)
-	if [[ -z "$_mode_env" ]]; then
-		_mode_cfg=$(parse_toml_string "$CONFIG_FILE" "mode" "default")
-		_mode_env="${_mode_cfg:-}"
-	fi
-
 	# Extra deny patterns from config
 	while IFS= read -r pattern; do
 		[[ -n "$pattern" ]] && EXTRA_DENY_PATTERNS+=("$pattern")
 	done < <(parse_toml_array "$CONFIG_FILE" "deny" "patterns")
-
-	# Extra allow patterns from config
-	while IFS= read -r pattern; do
-		[[ -n "$pattern" ]] && EXTRA_ALLOW_PATTERNS+=("$pattern")
-	done < <(parse_toml_array "$CONFIG_FILE" "allow" "patterns")
 
 	# Path deny list from config
 	while IFS= read -r dpath; do
 		[[ -n "$dpath" ]] && DENY_PATHS+=("$dpath")
 	done < <(parse_toml_array "$CONFIG_FILE" "paths" "deny")
 fi
-
-SIPAG_SAFETY_MODE="${_mode_env:-strict}"
 
 # --- Path validation ---
 
@@ -198,52 +167,25 @@ is_path_denied() {
 # --- Bash command evaluation ---
 
 BASH_DENY_PATTERNS=(
-	'sudo|doas'
-	'rm -rf [/~]|rm -rf \*'
-	'git push.* --force( |$)|git push.* -f( |$)'
-	'git reset --hard|git clean -f'
-	'>(>)?\s*/etc/|>(>)?\s*/usr/|>(>)?\s*~/'
+	'^sudo |^doas '
+	'^rm -rf [/~]|^rm -rf \*'
+	'^git push.* --force|^git push.* -f( |$)'
+	'^git reset --hard|^git clean -f'
+	'>(>)?\s*/proc/|>(>)?\s*/sys/'
 	'chmod 777|chown '
-	'curl.*-X (POST|PUT|DELETE|PATCH)|curl.*--data|curl.*-d |wget '
-	'ssh |scp |rsync '
-	'(npm|pip|gem) install -g|npm i -g'
-	'eval |exec '
-	'\|.*sh$|\|.*bash$'
-	'/etc/|/usr/|\.ssh/|\.gnupg/|\.aws/'
+	'^curl.*-X (POST|PUT|DELETE|PATCH)|^curl.*--data|^curl.*-d |^wget '
+	'^ssh |^scp |^rsync '
+	'^(npm|pip|gem) install -g|^npm i -g'
+	'^eval |^exec '
+	'\|\s*(ba)?sh\s*$'
 	# Docker-specific dangerous operations
 	'docker run.*--privileged|docker run.*--cap-add'
 	'^mount |^umount '
 	'^iptables |^ip6tables |^ip route |^ip link '
-	'kill -9 |killall '
+	'^kill -9 |^killall '
 	'^dd if='
 	'^mkfs\.|^mkfs |^fdisk |^parted '
-	'>(>)?\s*/proc/|>(>)?\s*/sys/'
 	'^(apt|apt-get|yum|dnf|apk) (install|remove|purge|upgrade)'
-)
-
-BASH_ALLOW_PATTERNS=(
-	'^git (add|commit|status|diff|log|branch|checkout|switch|stash|show|rev-parse|rev-list|ls-files|merge|rebase|cherry-pick|tag|fetch|pull|remote)'
-	'^git push( |$)'
-	'^(npm|yarn|pnpm) (test|run|exec)'
-	'^(cargo|go|python|pytest|make|bundle|rake|mix|gradle|mvn) (test|build|check|lint|fmt|format|clippy|install)'
-	'^(ls|pwd|which|echo|cat|head|tail|wc|sort|uniq|diff|file|stat|date|env|printenv|true|false|sleep)( |$)'
-	'^mkdir '
-	'^(cp|mv) '
-	'^(npm|yarn|pnpm) install'
-	'^pip install'
-	'^chmod [0-7]{3} '
-	'^node |^python3? |^ruby '
-	# Shell control flow (for/while/if loops wrapping allowed commands)
-	'^for |^while |^if '
-	# Docker (non-privileged)
-	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|kill|pull|build|exec)'
-	# Development tools
-	'^shellcheck '
-	'^bats '
-	'^make (test|check|lint|fmt|dev|build|clean|install|all)( |$)'
-	'^gh (issue|pr|repo|release|workflow|run|auth|api)'
-	# sipag commands (bare or full path)
-	'sipag (work|start|merge|setup|doctor|ps|logs|status|version|help|dispatch|kill|tui)'
 )
 
 check_bash_deny() {
@@ -257,55 +199,23 @@ check_bash_deny() {
 	return 1
 }
 
-check_bash_allow() {
+# Check whether an rm command only targets paths within safe directories.
+check_rm_safe() {
 	local cmd="$1"
-	local pattern
-	for pattern in "${BASH_ALLOW_PATTERNS[@]}" "${EXTRA_ALLOW_PATTERNS[@]}"; do
-		if echo "$cmd" | grep -qE "$pattern"; then
-			return 0
+	local rm_ok=true
+	local arg
+	for arg in $cmd; do
+		[[ "$arg" == "rm" ]] && continue
+		[[ "$arg" == -* ]] && continue
+		if ! is_within_safe_dir "$arg"; then
+			rm_ok=false
+			break
 		fi
 	done
-	return 1
-}
-
-# --- LLM tiebreaker (balanced mode) ---
-
-llm_evaluate() {
-	local subject="$1"
-
-	if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
-		deny "Ambiguous command denied (no API key for LLM evaluation): $subject"
-	fi
-
-	local response
-	response=$(curl -s --max-time 10 \
-		-H "x-api-key: ${ANTHROPIC_API_KEY}" \
-		-H "anthropic-version: 2023-06-01" \
-		-H "content-type: application/json" \
-		-d "$(jq -n \
-			--arg cmd "$subject" \
-			--arg project "$PROJECT_DIR" \
-			'{
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 100,
-        system: "You are a security evaluator for an unattended coding agent. The agent is working on a GitHub issue in a cloned repo. Evaluate if this shell command is safe to run. Respond with only ALLOW or DENY followed by a one-sentence reason.",
-        messages: [{role: "user", content: ("Command: " + $cmd + "\nProject directory: " + $project)}]
-      }')" \
-		"https://api.anthropic.com/v1/messages" 2>/dev/null) || {
-		deny "Ambiguous command denied (LLM evaluation failed): $subject"
-	}
-
-	local text
-	text=$(echo "$response" | jq -r '.content[0].text // empty' 2>/dev/null)
-
-	if [[ -z "$text" ]]; then
-		deny "Ambiguous command denied (empty LLM response): $subject"
-	fi
-
-	if [[ "$text" == ALLOW* ]]; then
-		allow "LLM approved: $text"
+	if $rm_ok; then
+		allow "rm within safe directory"
 	else
-		deny "LLM denied: $text"
+		deny "rm targets path outside safe directories: $cmd"
 	fi
 }
 
@@ -326,10 +236,10 @@ Edit | Write)
 	if is_path_denied "$file_path"; then
 		deny "$tool_name targets denied path: $file_path"
 	fi
-	if is_within_project "$file_path"; then
-		allow "$tool_name within project directory"
+	if is_within_safe_dir "$file_path"; then
+		allow "$tool_name within safe directory"
 	else
-		deny "$tool_name targets path outside project: $file_path"
+		deny "$tool_name targets path outside safe directories: $file_path"
 	fi
 	;;
 
@@ -342,45 +252,19 @@ Bash)
 
 	# rm is allowed within the project directory, ~/.sipag, and ~/.claude.
 	if echo "$cmd" | grep -qE '^rm '; then
-		# Extract file paths from rm command (skip flags like -f, -r, -rf).
-		local rm_ok=true
-		local arg
-		for arg in $cmd; do
-			[[ "$arg" == "rm" ]] && continue
-			[[ "$arg" == -* ]] && continue
-			if ! is_within_safe_dir "$arg"; then
-				rm_ok=false
-				break
-			fi
-		done
-		if $rm_ok; then
-			allow "rm within safe directory"
-		else
-			deny "rm targets path outside safe directories: $cmd"
-		fi
+		check_rm_safe "$cmd"
 	fi
 
-	if check_bash_allow "$cmd"; then
-		allow "Command matches allow pattern"
-	fi
-
+	# Deny check is the only gate — if it matches, deny; otherwise allow.
 	if check_bash_deny "$cmd"; then
 		deny "Command matches deny pattern: $cmd"
 	fi
 
-	if [[ "$SIPAG_SAFETY_MODE" == "balanced" ]]; then
-		llm_evaluate "$cmd"
-	else
-		deny "Ambiguous command denied in strict mode: $cmd"
-	fi
+	allow "Command not on deny list"
 	;;
 
 *)
 	AUDIT_SUBJECT="$tool_input"
-	if [[ "$SIPAG_SAFETY_MODE" == "balanced" ]]; then
-		llm_evaluate "Tool: $tool_name, Input: $tool_input"
-	else
-		deny "Unknown tool denied in strict mode: $tool_name"
-	fi
+	allow "Tool allowed: $tool_name"
 	;;
 esac

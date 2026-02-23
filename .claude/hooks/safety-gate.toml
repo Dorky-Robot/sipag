@@ -1,14 +1,19 @@
 # sipag safety-gate configuration
 #
-# Extra allow/deny patterns and path deny lists loaded by safety-gate.sh.
+# Extra deny patterns and path deny lists loaded by safety-gate.sh.
 # Patterns are extended regular expressions matched against the full command string.
+#
+# There is no [allow] section — the gate uses a deny-list-only model.
+# Commands that don't match any deny pattern are allowed.
 
-[allow]
+[deny]
 patterns = [
-    "sipag (work|start|merge|setup|doctor|ps|logs|status|version|help|dispatch|kill|tui)",
-    "^tail ",
-    "^chmod [+][rwx]+ ",
-    "^(./)?scripts/release.sh",
-    "^make (install-hooks|fmt-check)",
-    "^cargo (check|deny|machete)",
+    "my-dangerous-command",
+]
+
+[paths]
+deny = [
+    "/etc",
+    "/usr",
+    "/var/run",
 ]

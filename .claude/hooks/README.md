@@ -14,9 +14,9 @@ This directory contains Claude Code hook scripts registered in
 ## safety-gate.sh — PreToolUse safety gate
 
 The safety gate intercepts every tool call Claude Code would make and
-issues an `allow` or `deny` decision before the tool runs.  It is designed
-for **unattended Docker worker** environments where Claude operates
-autonomously on a GitHub issue.
+issues an `allow` or `deny` decision before the tool runs. It uses a
+**deny-list-only** model: known-dangerous operations are denied,
+everything else is allowed.
 
 ### How it is registered
 
@@ -40,103 +40,60 @@ An empty `matcher` causes the hook to run for every tool.
 ### Decision logic
 
 ```
-Read / Glob / Grep / Task / WebSearch / WebFetch
-  → always allow (read-only, no side effects)
-
-Edit / Write
-  → check config [paths] deny list  → deny if matched
-  → check path is inside $CLAUDE_PROJECT_DIR → allow if yes, deny if no
-
-Bash
-  → check built-in + config deny patterns → deny if matched
-  → check built-in + config allow patterns → allow if matched
-  → strict mode  → deny ("ambiguous command")
-  → balanced mode → ask LLM (claude-haiku) → allow or deny
-
-Any other tool
-  → strict mode  → deny
-  → balanced mode → ask LLM
-```
-
-### Modes
-
-| Mode | Behaviour for ambiguous commands |
-|---|---|
-| `strict` (default) | Deny anything not in the explicit allow list |
-| `balanced` | Call the Anthropic API (claude-haiku) for a second opinion |
-
-Set the mode via the environment variable **or** the config file (env var
-takes precedence):
-
-```bash
-export SIPAG_SAFETY_MODE=balanced
+Any tool:
+  1. Read-only tools (Read, Glob, Grep, Task, etc.)  → allow
+  2. Edit / Write:
+       → deny if path on config [paths] deny list
+       → deny if path outside safe dirs (project, ~/.sipag, ~/.claude)
+       → allow
+  3. Bash:
+       → deny if empty command
+       → rm: deny if any target outside safe dirs, allow otherwise
+       → deny if matches deny patterns
+       → allow
+  4. Unknown tools → allow
 ```
 
 ### Built-in deny patterns
 
 | Pattern | Rationale |
 |---|---|
-| `sudo` / `doas` | privilege escalation |
+| `^sudo` / `^doas` | privilege escalation |
 | `rm -rf /` / `rm -rf ~` | recursive host deletion |
 | `git push --force` / `-f` | destructive remote history rewrite |
 | `git reset --hard` | destructive local state change |
-| Writes to `/etc/`, `/usr/`, `~/.ssh/` … | host system modification |
+| Redirects to `/proc/` or `/sys/` | kernel interface manipulation |
 | `chmod 777` / `chown` | overly permissive permission change |
-| `curl -X POST/PUT/DELETE` / `wget` | outbound write requests |
-| `ssh` / `scp` / `rsync` | lateral movement / data exfiltration |
-| `(npm\|pip\|gem) install -g` | global package mutation |
-| `eval` / `exec` | arbitrary code execution |
+| `^curl -X POST/PUT/DELETE` / `^wget` | outbound write requests |
+| `^ssh` / `^scp` / `^rsync` | lateral movement / data exfiltration |
+| `^(npm\|pip\|gem) install -g` | global package mutation |
+| `^eval` / `^exec` | arbitrary code execution |
 | Pipes into `sh` / `bash` | shell injection |
 | `docker run --privileged` / `--cap-add` | container escape |
-| `mount` / `umount` | filesystem manipulation |
-| `iptables` / `ip route` / `ip link` | network rule manipulation |
-| `kill -9` / `killall` | uncontrolled process termination |
-| `dd if=` | raw disk write |
-| `mkfs.*` / `fdisk` / `parted` | filesystem creation/destruction |
-| Writes to `/proc/` or `/sys/` | kernel interface manipulation |
-| `apt`/`yum`/`apk` install/remove | package manager mutation (image should be immutable) |
+| `^mount` / `^umount` | filesystem manipulation |
+| `^iptables` / `^ip route` / `^ip link` | network rule manipulation |
+| `^kill -9` / `^killall` | uncontrolled process termination |
+| `^dd if=` | raw disk write |
+| `^mkfs.*` / `^fdisk` / `^parted` | filesystem creation/destruction |
+| `^apt`/`^yum`/`^apk` install/remove | package manager mutation |
 
-### Built-in allow patterns
-
-| Pattern | Rationale |
-|---|---|
-| `git add/commit/status/diff/log/…` | routine VCS operations |
-| `git push` (non-force) | publish commits |
-| `npm/yarn/pnpm test/run/exec` | test runners |
-| `cargo/go/python/pytest/make/…` test/build/lint | standard build tooling |
-| `ls/pwd/which/echo/cat/head/tail/…` | read-only Unix utilities |
-| `mkdir` / `cp` / `mv` | filesystem organisation |
-| `npm/yarn/pnpm install` / `pip install` | project dependency install |
-| `chmod NNN` (3-digit octal) | safe permission change |
-| `node/python/ruby` | script execution |
-| `bats` | BATS test runner |
-| `make test/check/lint/fmt/dev/build/clean/…` | standard Makefile targets |
-| `gh issue/pr/repo/release/…` | GitHub CLI read+write ops |
+Patterns are anchored to command start (`^`) where possible to avoid
+false positives when keywords appear in string arguments (e.g.,
+`gh issue create --body "use ssh keys"` is allowed).
 
 ### Optional config file
 
-Create `.claude/hooks/safety-gate.toml` in the project root to extend or
-override the built-in behaviour.  All fields are optional.
+Create `.claude/hooks/safety-gate.toml` in the project root to extend
+the built-in deny list or add path restrictions. All fields are optional.
 
 ```toml
 # .claude/hooks/safety-gate.toml
-
-[mode]
-# "strict" (default) or "balanced"
-default = "strict"
 
 [deny]
 # Extra patterns appended to the built-in deny list (ERE syntax)
 patterns = [
   "docker run --network host",
   "nc -l",
-]
-
-[allow]
-# Extra patterns appended to the built-in allow list (ERE syntax)
-patterns = [
-  "^my-internal-tool ",
-  "^./scripts/",
 ]
 
 [paths]
@@ -155,7 +112,7 @@ accepted by `grep -E`.
 ### Audit logging
 
 Set `$SIPAG_AUDIT_LOG` to a file path to enable NDJSON audit logging.
-Each tool call appended one JSON object per line:
+Each tool call appends one JSON object per line:
 
 ```bash
 export SIPAG_AUDIT_LOG=/var/log/sipag/audit.ndjson
@@ -191,9 +148,7 @@ jq -r '.tool_name' /var/log/sipag/audit.ndjson | sort | uniq -c
 
 | Variable | Default | Description |
 |---|---|---|
-| `SIPAG_SAFETY_MODE` | `strict` | `strict` or `balanced` |
 | `CLAUDE_PROJECT_DIR` | `$(pwd)` | Project root (set by Claude Code) |
-| `ANTHROPIC_API_KEY` | — | Required for balanced mode LLM evaluation |
 | `SIPAG_AUDIT_LOG` | — | Path to NDJSON audit log; unset = no logging |
 
 ### Testing
