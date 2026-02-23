@@ -60,16 +60,113 @@ Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
    d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
    e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
 5. **Check finished workers** (via `sipag ps`):
-   a. **Success** (finished phase): Auto-merge via `gh pr merge <N> --repo <repo> --squash --delete-branch`
+   a. **Success** (finished phase): Run the **review gate** (see below)
    b. **Failed**: Escalate (see below) or log the failure and move on
+
+### Review gate
+
+When a worker finishes successfully, run a multi-agent review before merging. Never auto-merge without review.
+
+#### Gather context
+
+```bash
+gh pr diff <N> --repo <repo>
+gh pr view <N> --repo <repo> --json title,body
+# For each linked issue:
+gh issue view <ISSUE_NUM> --repo <repo> --json title,body
+```
+
+#### Launch 5 review agents in parallel
+
+Send a **single message** with 5 Task tool calls so they run concurrently. Each agent receives the same context block:
+
+```
+PR: <title>
+
+<issue-bodies>
+<issue number=N>
+<title and body>
+</issue>
+</issue-bodies>
+
+<pr-diff>
+<full diff output>
+</pr-diff>
+```
+
+The 5 agents and their instructions:
+
+1. **Scope reviewer** — Does the diff address exactly the issues listed? Flag: unrelated file changes, missing fixes for stated goals, over-engineering beyond what the issues require, scope creep. Verdict: does this PR do what was asked, nothing more, nothing less?
+
+2. **Security reviewer** — Scan the diff for: secrets or tokens, injection risks (SQL, command, path traversal), unsafe deserialization, hardcoded credentials, new dependencies with known CVEs, permission/auth changes. Only flag issues actually present in the diff.
+
+3. **Architecture reviewer** — Check: crate/module boundary violations, increased coupling between components, broken abstraction layers, API surface changes without migration path, pattern breaks vs. established conventions in the codebase.
+
+4. **Correctness reviewer** — Check: logic errors, off-by-one bugs, unhandled error cases, race conditions, null/None handling, integer overflow, resource leaks, incorrect state transitions.
+
+5. **Test adequacy reviewer** — Check: new code has corresponding tests, changed behavior has updated tests, edge cases are covered, test assertions are meaningful (not just "it doesn't crash"), integration paths are tested.
+
+Each agent must end its response with exactly one verdict line:
+
+```
+VERDICT: APPROVE
+VERDICT: APPROVE_WITH_NOTES
+VERDICT: REQUEST_CHANGES
+```
+
+Followed by a brief explanation (2-3 sentences max).
+
+#### Synthesize verdicts
+
+After all 5 agents return:
+
+- **All APPROVE or APPROVE_WITH_NOTES**: Merge the PR via `gh pr merge <N> --repo <repo> --squash --delete-branch`. If any agent returned notes, post them as a PR comment for the record.
+- **Any REQUEST_CHANGES**: Do NOT merge. Instead:
+
+  1. Collect all findings into a single PR comment:
+     ```
+     ## sipag review gate — changes requested
+
+     ### Scope
+     <scope findings or "No issues">
+
+     ### Security
+     <security findings or "No issues">
+
+     ### Architecture
+     <architecture findings or "No issues">
+
+     ### Correctness
+     <correctness findings or "No issues">
+
+     ### Test adequacy
+     <test findings or "No issues">
+     ```
+
+  2. **Append a `## Review Feedback` section to the PR body** via `gh pr edit <N> --repo <repo> --body "<original body + review feedback>"`. This is critical — the worker reads the PR body as its complete assignment, so it must see the feedback.
+
+  3. Re-dispatch: `sipag dispatch --repo <repo> --pr <N>`
+
+  4. The new worker sees the original assignment + review feedback, addresses it, pushes. The review gate runs again on the next finished state.
+
+#### Retry limit
+
+Before running the review gate, count previous `## sipag review gate` comments on the PR:
+
+```bash
+gh pr view <N> --repo <repo> --json comments --jq '[.comments[] | select(.body | startswith("## sipag review gate"))] | length'
+```
+
+If the count is >= 2: do NOT re-dispatch. Instead, escalate (write event file to `~/.sipag/events/`) and leave the PR open for human review. Two re-dispatches is the maximum — after that, the problem needs human judgment.
 
 ### Step 4: Continuous operation
 
 The poller runs indefinitely. Each cycle:
 - Picks up new `{WORK_LABEL}` issues
 - Monitors in-flight workers
-- Merges successful PRs
-- Escalates failures
+- Reviews finished PRs via the review gate (5 parallel agents)
+- Merges approved PRs, re-dispatches rejected ones
+- Escalates failures and retry-exhausted PRs
 - Repeats
 
 Design PRs for elegance — structural improvements, not patches. A clean PR addressing 2 issues beats a sprawling one addressing 5 poorly. If removing code fixes the problem better than adding code, remove code.

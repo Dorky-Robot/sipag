@@ -149,9 +149,23 @@ Claude dispatches a Docker worker in the background. The container spins up, sta
 
 The container is the safety boundary — Claude runs `--dangerously-skip-permissions` inside it without risking your machine.
 
-### Review and merge
+### Review gate
 
-When a worker finishes successfully, Claude auto-merges the PR via squash merge. If a worker fails, Claude writes an event file to `~/.sipag/events/` and appends a lesson to `~/.sipag/lessons/` so the next worker doesn't repeat the same mistake. The issues return to the backlog for a different approach next cycle.
+When a worker finishes successfully, Claude runs a **multi-agent review gate** before merging. Five parallel review agents examine the PR diff simultaneously:
+
+1. **Scope reviewer** — Does the PR match the originating issues? Any unrelated changes or missing fixes?
+2. **Security reviewer** — Secrets in diff, injection risks, unsafe patterns, dependency risks
+3. **Architecture reviewer** — Boundary violations, coupling increases, pattern breaks
+4. **Correctness reviewer** — Logic errors, edge cases, error handling gaps, race conditions
+5. **Test adequacy reviewer** — Coverage for new code, updated tests for changed behavior
+
+Each agent returns a verdict: `APPROVE`, `APPROVE_WITH_NOTES`, or `REQUEST_CHANGES`.
+
+- **All approve**: Claude merges the PR via squash merge.
+- **Any request changes**: Claude posts structured feedback on the PR, appends the feedback to the PR body, and re-dispatches a new worker to address the issues. The review gate runs again when the new worker finishes.
+- **After 2 re-dispatches**: Claude escalates to human review instead of re-dispatching again.
+
+If a worker fails outright, Claude writes an event file to `~/.sipag/events/` and appends a lesson to `~/.sipag/lessons/` so the next worker doesn't repeat the same mistake. The issues return to the backlog for a different approach next cycle.
 
 The cycle repeats continuously. The backlog changes, the codebase gets healthier, and the next analysis starts from a different place because the project is different.
 
