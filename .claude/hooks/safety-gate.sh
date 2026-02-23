@@ -236,14 +236,14 @@ BASH_ALLOW_PATTERNS=(
 	# Shell control flow (for/while/if loops wrapping allowed commands)
 	'^for |^while |^if '
 	# Docker (non-privileged)
-	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|kill|pull|build)'
+	'^docker (ps|images|logs|inspect|info|run --rm|rm|stop|kill|pull|build|exec)'
 	# Development tools
 	'^shellcheck '
 	'^bats '
 	'^make (test|check|lint|fmt|dev|build|clean|install|all)( |$)'
 	'^gh (issue|pr|repo|release|workflow|run|auth|api)'
 	# sipag commands (bare or full path)
-	'sipag (work|start|merge|setup|doctor|ps|logs|status|version|help)'
+	'sipag (work|start|merge|setup|doctor|ps|logs|status|version|help|dispatch|kill|tui)'
 )
 
 check_bash_deny() {

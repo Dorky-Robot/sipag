@@ -44,20 +44,12 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
     Ok(issues)
 }
 
-/// Count open PRs created by sipag (branches matching `sipag/*`).
+/// Count open PRs created by sipag (labeled `sipag`).
 pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
     let output = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--json",
-            "headRefName",
-            "--jq",
-            r#"[.[] | select(.headRefName | startswith("sipag/"))] | length"#,
+            "pr", "list", "--repo", repo, "--state", "open", "--label", "sipag", "--json",
+            "number", "--jq", "length",
         ])
         .output()
         .ok()?;
@@ -67,6 +59,35 @@ pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
     }
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim().parse::<usize>().ok()
+}
+
+/// Ensure the `sipag` label exists on a repo (idempotent).
+pub fn ensure_sipag_label(repo: &str) {
+    let _ = Command::new("gh")
+        .args([
+            "label",
+            "create",
+            "sipag",
+            "--repo",
+            repo,
+            "--color",
+            "8B5CF6",
+            "--description",
+            "PR managed by sipag",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Add the `sipag` label to a PR.
+pub fn label_pr_sipag(repo: &str, pr_num: u64) {
+    let n = pr_num.to_string();
+    let _ = Command::new("gh")
+        .args(["pr", "edit", &n, "--repo", repo, "--add-label", "sipag"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Check whether `gh` is authenticated.

@@ -1410,6 +1410,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "libc",
  "predicates",
  "serde_json",
  "sipag-core",

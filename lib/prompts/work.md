@@ -40,9 +40,22 @@ After all agents return, synthesize their findings:
 
 This seeds the issue backlog with high-quality, structurally-informed work items that the poller will pick up and dispatch to workers.
 
-### Step 3: Launch background poller
+### Step 3: Recover orphaned PRs
 
-After the analysis agents finish and issues are created, launch a background task that runs the monitoring loop. Use a bash background task that polls every {POLL_INTERVAL} seconds:
+Before launching the poller, check for sipag PRs from previous sessions that were left orphaned:
+
+1. List open sipag PRs: `gh pr list --repo <repo> --label sipag --state open --json number,title,headRefName,comments`
+2. Cross-reference with `sipag ps` — any sipag PR with no active worker is orphaned
+3. For each orphaned PR:
+   - If the PR has a self-review comment (search comments for "Self-review summary"): treat it as finished and review it yourself (merge or close)
+   - If the PR has commits beyond the placeholder but no self-review: re-dispatch a worker to complete it — `sipag dispatch --repo <repo> --pr <N>`
+   - If the PR has no real commits (only `.sipag-marker`): leave it for now, a worker will be dispatched for it
+
+This recovers work from crashed or killed sessions instead of starting over.
+
+### Step 4: Launch background poller
+
+After orphan recovery and analysis, launch a background task that runs the monitoring loop. Use a bash background task that polls every {POLL_INTERVAL} seconds:
 
 ```bash
 while true; do sleep {POLL_INTERVAL}; echo "SIPAG_POLL_TICK"; done &
@@ -52,11 +65,11 @@ Each time you see SIPAG_POLL_TICK in your output, run one poll cycle:
 
 1. **Fetch ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
 2. **Skip active work**: Check `sipag ps` — skip issues that already have a running worker
-3. **Check back-pressure**: If open sipag PRs >= max, wait for next tick
+3. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate.
 4. **For each new ready issue**:
    a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
    b. Create a branch: `git checkout -b sipag/issue-<N>`
-   c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N>`
+   c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
    d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
    e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
 5. **Check finished workers** (via `sipag ps`):
@@ -74,9 +87,9 @@ Your job as the host session is to make the final call:
 3. Check that the PR addresses the originating issues — does it fix the disease, not just the symptoms?
 4. **Merge or close.** Binary decision:
    - If the PR makes the codebase structurally healthier → `gh pr merge <N> --repo <repo> --squash --delete-branch`
-   - If it doesn't (wrong approach, incomplete, introduces new problems) → close it. The issues return to `ready` for a different approach next cycle. Don't re-dispatch — if the approach was wrong, a fresh analysis will find a better one.
+   - If it doesn't (wrong approach, incomplete, introduces new problems) → `gh pr close <N> --repo <repo>` (do NOT use `--delete-branch` — preserve the branch for recovery). The issues return to `ready` for a different approach next cycle.
 
-### Step 4: Continuous operation
+### Step 5: Continuous operation
 
 The poller runs indefinitely. Each cycle:
 - Picks up new `{WORK_LABEL}` issues

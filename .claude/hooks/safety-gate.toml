@@ -5,7 +5,7 @@
 
 [allow]
 patterns = [
-    "sipag (work|start|merge|setup|doctor|ps|logs|status|version|help)",
+    "sipag (work|start|merge|setup|doctor|ps|logs|status|version|help|dispatch|kill|tui)",
     "^tail ",
     "^chmod [+][rwx]+ ",
     "^(./)?scripts/release.sh",

@@ -7,7 +7,7 @@ use std::path::Path;
 pub fn init_dirs(sipag_dir: &Path) -> Result<()> {
     let mut created = false;
 
-    for subdir in &["workers", "logs", "events", "lessons"] {
+    for subdir in &["workers", "logs", "events", "lessons", "locks"] {
         let path = sipag_dir.join(subdir);
         if !path.exists() {
             std::fs::create_dir_all(&path)?;

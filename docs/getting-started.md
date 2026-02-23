@@ -229,7 +229,8 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 ├── workers/        # PR-keyed state JSON files
 ├── logs/           # Worker log files
 ├── events/         # Lifecycle event files (worker failures, escalations)
-└── lessons/        # Per-repo lessons from failed workers
+├── lessons/        # Per-repo lessons from failed workers
+└── locks/          # Per-repo session locks (flock-based, prevent concurrent sessions)
 ```
 
 ## Quick reference

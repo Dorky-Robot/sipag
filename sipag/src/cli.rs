@@ -108,6 +108,10 @@ fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
         }
     }
 
+    // Ensure the sipag label exists and is on this PR.
+    github::ensure_sipag_label(repo);
+    github::label_pr_sipag(repo, pr_num);
+
     // Check for existing worker for this PR.
     let existing = state::list_all(&sipag_dir);
     if existing
