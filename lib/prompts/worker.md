@@ -21,6 +21,22 @@ git merge origin/main
 
 If there are conflicts, resolve them manually — read the conflicting files, understand both sides, keep the correct combination, then commit the merge. Push the merge commit before proceeding to implementation. This ensures the PR stays mergeable.
 
+## Second: address existing review feedback
+
+Before starting new work, check for existing review comments on this PR:
+
+```bash
+gh pr view {PR_NUM} --repo {REPO} --json comments --jq '.comments[].body'
+```
+
+If there are previous self-review summaries or review feedback comments:
+1. Read each one carefully — these are findings from prior review cycles
+2. Address any `REQUEST_CHANGES` items or actionable notes **before** doing anything else
+3. Push fixes for each addressed finding
+4. Do NOT run a new self-review just to repeat what was already found — only run self-review after you've made new changes
+
+If the branch already has complete implementation and tests pass, and the only issue was merge conflicts (which you just resolved above), push the merge commit and stop. Do not re-run self-review on unchanged code.
+
 ## How to work
 
 - The PR description above is your complete briefing. Trust it.
@@ -37,6 +53,8 @@ If there are conflicts, resolve them manually — read the conflicting files, un
 ## Self-review
 
 After you finish implementation and all tests pass, run a self-review before declaring done. This catches issues while you can still fix them.
+
+**Skip self-review if**: the PR already has a self-review comment and you made no new code changes (e.g., you only resolved merge conflicts or addressed existing feedback). Running a redundant review wastes time and clutters the PR with duplicate comments.
 
 ### 1. Get your diff
 
