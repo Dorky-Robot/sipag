@@ -151,7 +151,7 @@ The container is the safety boundary — Claude runs `--dangerously-skip-permiss
 
 ### Review and merge
 
-When a worker finishes successfully, Claude auto-merges the PR via squash merge. If a worker fails, Claude writes an event file to `~/.sipag/events/` and moves on — external systems can observe that directory for notifications. The issues return to the backlog for a different approach next cycle.
+When a worker finishes successfully, Claude auto-merges the PR via squash merge. If a worker fails, Claude writes an event file to `~/.sipag/events/` and appends a lesson to `~/.sipag/lessons/` so the next worker doesn't repeat the same mistake. The issues return to the backlog for a different approach next cycle.
 
 The cycle repeats continuously. The backlog changes, the codebase gets healthier, and the next analysis starts from a different place because the project is different.
 
@@ -224,7 +224,8 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 ├── token           # Claude OAuth token (chmod 600)
 ├── workers/        # PR-keyed state JSON files
 ├── logs/           # Worker log files
-└── events/         # Lifecycle event files (worker failures, escalations)
+├── events/         # Lifecycle event files (worker failures, escalations)
+└── lessons/        # Per-repo lessons from failed workers
 ```
 
 ## Quick reference

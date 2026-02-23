@@ -83,6 +83,12 @@ pub fn dispatch_worker(
         // Mount state directory for heartbeats
         .arg("-v")
         .arg(format!("{}:/sipag-state", workers_dir.display()))
+        // Mount lessons directory (read-only) for cross-worker learning
+        .arg("-v")
+        .arg(format!(
+            "{}:/sipag-lessons:ro",
+            cfg.sipag_dir.join("lessons").display()
+        ))
         .arg("-e")
         .arg(format!("STATE_FILE=/sipag-state/{state_filename}"))
         // Environment

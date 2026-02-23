@@ -59,10 +59,13 @@ fn run() -> Result<i32> {
     // Read PR description as the assignment.
     let pr_body = get_pr_body(&repo, pr_num)?;
 
+    // Read lessons from previous workers (if any).
+    let lessons_section = read_lessons_file(&repo);
+
     // Phase: working.
     update_phase(&state_path, WorkerPhase::Working)?;
 
-    // Build the prompt: PR description + worker disposition.
+    // Build the prompt: PR description + lessons + worker disposition.
     let prompt = format!(
         "You are a sipag worker implementing a PR. The PR description below is your\n\
          complete assignment — it contains the architectural insight, approach, affected\n\
@@ -74,6 +77,7 @@ fn run() -> Result<i32> {
          \n\
          --- END PR DESCRIPTION ---\n\
          \n\
+         {lessons_section}\
          {WORKER_PROMPT}"
     );
 
@@ -162,6 +166,27 @@ fn run_cmd(program: &str, args: &[&str]) -> Result<()> {
         bail!("{program} exited with code {}", status.code().unwrap_or(-1));
     }
     Ok(())
+}
+
+/// Read the lessons file for a repo from the mounted lessons directory.
+///
+/// Returns a formatted section to include in the prompt, or an empty string
+/// if no lessons exist.
+fn read_lessons_file(repo: &str) -> String {
+    let repo_slug = repo.replace('/', "--");
+    let path = format!("/sipag-lessons/{repo_slug}.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => {
+            format!(
+                "## Lessons from previous workers\n\n\
+                 Previous workers for this repo recorded the following lessons.\n\
+                 Avoid repeating their mistakes:\n\n\
+                 {}\n\n",
+                content.trim()
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 /// Best-effort attempt to mark the state file as failed on error.

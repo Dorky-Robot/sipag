@@ -107,6 +107,7 @@ Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPA
 workers/     # PR-keyed state JSON files
 logs/        # Worker log files ({owner}--{repo}--pr-{N}.log)
 events/      # Lifecycle event files (worker failures, escalations)
+lessons/     # Per-repo lessons from failed workers ({owner}--{repo}.md)
 config       # optional config file
 ```
 

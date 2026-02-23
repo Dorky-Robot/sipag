@@ -89,6 +89,23 @@ EOF
 This creates a text file that external systems can observe and act on.
 Don't block the polling loop — write the file and move on.
 
+## Lessons
+
+When a worker fails, append a lesson so future workers for that repo learn from it:
+
+```bash
+cat >> ~/.sipag/lessons/{repo_slug}.md << 'EOF'
+
+## $(date -u +%Y-%m-%dT%H:%M:%SZ) — PR #N failed
+
+<What went wrong and what the next worker should do differently.
+Be specific: name the approach that failed, the files involved,
+and the better strategy.>
+EOF
+```
+
+Keep lessons concise — one paragraph per failure. Focus on what to do differently, not what went wrong. The next worker for this repo will see these lessons in its prompt automatically.
+
 ## Multi-project sessions
 
 In a multi-project session, manage the cycle independently per repo. Workers for different repos can run in parallel since they don't conflict.
