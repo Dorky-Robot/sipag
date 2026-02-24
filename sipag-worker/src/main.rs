@@ -7,16 +7,32 @@
 use anyhow::{bail, Context, Result};
 use sipag_core::state::{self, WorkerPhase};
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Worker disposition prompt (embedded at compile time).
 const WORKER_PROMPT: &str = include_str!("../../lib/prompts/worker.md");
+
+/// How often the supervision loop ticks (seconds).
+const TICK_SECS: u64 = 10;
+
+/// How often to check PR state on GitHub (seconds).
+const PR_CHECK_INTERVAL_SECS: u64 = 300;
+
+/// Grace period after PR is merged/closed before killing Claude (seconds).
+const GRACE_PERIOD_SECS: u64 = 120;
+
+/// PR state as reported by GitHub.
+#[derive(Debug, PartialEq)]
+enum PrState {
+    Open,
+    Merged,
+    Closed,
+    Unknown,
+}
 
 fn main() {
     let code = match run() {
@@ -48,13 +64,13 @@ fn emit_event(event_type: &str, repo: &str, pr_num: u64, detail: &str) {
 /// Write a heartbeat file alongside the state file.
 ///
 /// The file's mtime is the primary liveness signal. Contents are JSON for debugging.
-fn write_heartbeat(state_path: &Path, repo: &str, pr_num: u64) {
+fn write_heartbeat(state_path: &Path, repo: &str, pr_num: u64, sub_phase: &str) {
     let heartbeat_path = state_path.with_extension("heartbeat");
     let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let content = serde_json::json!({
         "repo": repo,
         "pr_num": pr_num,
-        "sub_phase": "working",
+        "sub_phase": sub_phase,
         "timestamp": timestamp,
         "pid": std::process::id(),
     });
@@ -67,32 +83,34 @@ fn remove_heartbeat(state_path: &Path) {
     let _ = fs::remove_file(&heartbeat_path);
 }
 
-/// Spawn a background thread that writes the heartbeat file at a fixed interval.
-///
-/// Returns the shutdown flag — set it to `true` to stop the thread.
-fn spawn_heartbeat_thread(
-    state_path: PathBuf,
-    repo: String,
-    pr_num: u64,
-    interval_secs: u64,
-) -> Arc<AtomicBool> {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
+/// Check the PR state on GitHub via `gh pr view`.
+fn check_pr_state(repo: &str, pr_num: u64) -> PrState {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_num.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state",
+            "-q",
+            ".state",
+        ])
+        .output();
 
-    thread::spawn(move || {
-        while !shutdown_clone.load(Ordering::Relaxed) {
-            write_heartbeat(&state_path, &repo, pr_num);
-            // Sleep in small increments so we notice shutdown quickly.
-            for _ in 0..interval_secs {
-                if shutdown_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                thread::sleep(Duration::from_secs(1));
+    match output {
+        Ok(o) if o.status.success() => {
+            let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            match state.as_str() {
+                "OPEN" => PrState::Open,
+                "MERGED" => PrState::Merged,
+                "CLOSED" => PrState::Closed,
+                _ => PrState::Unknown,
             }
         }
-    });
-
-    shutdown
+        _ => PrState::Unknown,
+    }
 }
 
 fn run() -> Result<i32> {
@@ -180,14 +198,12 @@ fn run() -> Result<i32> {
         "Worker entered working phase",
     );
 
-    // Start heartbeat thread.
+    // Heartbeat configuration.
     let heartbeat_interval: u64 = env::var("SIPAG_HEARTBEAT_INTERVAL")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
-    write_heartbeat(&state_path, &repo, pr_num); // immediate first heartbeat
-    let heartbeat_shutdown =
-        spawn_heartbeat_thread(state_path.clone(), repo.clone(), pr_num, heartbeat_interval);
+    write_heartbeat(&state_path, &repo, pr_num, "working"); // immediate first heartbeat
 
     // Build the prompt: PR description + lessons + worker disposition.
     // Replace placeholders in the worker prompt with actual values.
@@ -215,22 +231,16 @@ fn run() -> Result<i32> {
     let pre_claude_sha =
         get_head_sha().context("failed to get HEAD SHA — git state may be corrupt")?;
 
-    // Check if a host session file was mounted for --resume.
-    let session_id = setup_session_resume();
+    // Start Claude Code with full permissions from /work directory.
+    let child = start_claude(&prompt)?;
 
-    // Run Claude Code with full permissions from /work directory.
-    let exit_code = spawn_claude(&session_id, &prompt)?;
+    // Supervise Claude: heartbeats, PR state checks, grace period on merge/close.
+    let exit_code = supervise_claude(child, &state_path, &repo, pr_num, heartbeat_interval)?;
 
-    // If --resume failed, fall back to a fresh session.
-    let exit_code = if exit_code != 0 && session_id.is_some() {
-        eprintln!("sipag-worker: --resume failed (exit {exit_code}), retrying without resume");
-        spawn_claude(&None, &prompt)?
-    } else {
-        exit_code
-    };
-
-    // Stop heartbeat thread before writing final state.
-    heartbeat_shutdown.store(true, Ordering::Relaxed);
+    // Dump Claude's output log to stderr so it flows to the host log file.
+    if let Ok(content) = fs::read_to_string("/tmp/claude-output.log") {
+        eprint!("{content}");
+    }
 
     // Post-run verification: check if commits were actually pushed.
     // If the worker self-merged the PR, the branch is deleted on remote,
@@ -399,7 +409,7 @@ fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
     // Without this, origin/{branch} may be stale from the initial clone.
     let _ = Command::new("git")
         .args(["-C", "/work", "fetch", "origin", branch])
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .output();
 
     // HEAD changed, but check if commits were actually pushed.
@@ -432,32 +442,11 @@ fn verify_commits_pushed(branch: &str, pre_sha: &str) -> bool {
 
 /// Check if a PR has been merged on GitHub.
 fn is_pr_merged(repo: &str, pr_num: u64) -> bool {
-    Command::new("gh")
-        .args([
-            "pr",
-            "view",
-            &pr_num.to_string(),
-            "--repo",
-            repo,
-            "--json",
-            "state",
-            "-q",
-            ".state",
-        ])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        })
-        .is_some_and(|state| state == "MERGED")
+    check_pr_state(repo, pr_num) == PrState::Merged
 }
 
 /// Max bytes of lessons to include in the worker prompt.
-/// Matches sipag_core::lessons::DEFAULT_MAX_BYTES (8KB ≈ 20 lessons).
+/// Matches sipag_core::lessons::DEFAULT_MAX_BYTES (8KB ~ 20 lessons).
 const LESSONS_MAX_BYTES: usize = 8 * 1024;
 
 /// Read the lessons file for a repo from the mounted lessons directory.
@@ -493,23 +482,23 @@ fn read_lessons_file(repo: &str) -> String {
     }
 }
 
-/// Spawn Claude Code with the given args and pipe the prompt via stdin.
+/// Spawn Claude Code and return the Child handle without waiting.
 ///
-/// Returns the exit code.
-fn spawn_claude(session_id: &Option<String>, prompt: &str) -> Result<i32> {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let mut claude_args = vec!["--dangerously-skip-permissions"];
-    if let Some(ref id) = session_id {
-        claude_args.extend(["--resume", id]);
-    }
-    claude_args.extend(["-p", "-"]);
+/// Redirects Claude's stdout and stderr to `/tmp/claude-output.log` inside the
+/// container so the output can be dumped to the host log after Claude exits.
+fn start_claude(prompt: &str) -> Result<Child> {
+    let log_file =
+        File::create("/tmp/claude-output.log").context("failed to create claude output log")?;
+    let log_err = log_file
+        .try_clone()
+        .context("failed to clone log file handle")?;
 
     let mut child = Command::new("claude")
-        .args(&claude_args)
+        .args(["--dangerously-skip-permissions", "-p", "-"])
         .current_dir("/work")
         .stdin(Stdio::piped())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_err))
         .spawn()
         .context("failed to spawn claude")?;
 
@@ -522,28 +511,91 @@ fn spawn_claude(session_id: &Option<String>, prompt: &str) -> Result<i32> {
         }
     }
 
-    let status = child.wait().context("failed to wait for claude")?;
-    Ok(status.code().unwrap_or(1))
+    Ok(child)
 }
 
-/// Copy the host's session file into Claude's expected location so `--resume` works.
+/// Supervise a running Claude process.
 ///
-/// Returns the session ID if a session file was mounted, or None to fall back
-/// to a fresh session.
-fn setup_session_resume() -> Option<String> {
-    let session_id = env::var("SIPAG_SESSION_ID").ok()?;
-    let src = Path::new("/sipag-session/session.jsonl");
-    if !src.exists() {
-        return None;
+/// Single loop with 10-second ticks that:
+/// - Calls `child.try_wait()` each tick to detect natural exit
+/// - Writes heartbeat every `heartbeat_interval` seconds
+/// - Checks PR state on GitHub every 5 minutes
+/// - On Merged/Closed: starts a 120-second grace period, then kills Claude
+///
+/// Returns the exit code.
+fn supervise_claude(
+    mut child: Child,
+    state_path: &Path,
+    repo: &str,
+    pr_num: u64,
+    heartbeat_interval: u64,
+) -> Result<i32> {
+    let start = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    let mut last_pr_check = Instant::now();
+    let mut grace_deadline: Option<Instant> = None;
+
+    loop {
+        std::thread::sleep(Duration::from_secs(TICK_SECS));
+
+        // Check if Claude exited naturally.
+        if let Some(status) = child.try_wait().context("failed to check claude status")? {
+            return Ok(status.code().unwrap_or(1));
+        }
+
+        let now = Instant::now();
+
+        // Write heartbeat at the configured interval.
+        if now.duration_since(last_heartbeat).as_secs() >= heartbeat_interval {
+            let sub_phase = if grace_deadline.is_some() {
+                "grace_period"
+            } else {
+                "working"
+            };
+            write_heartbeat(state_path, repo, pr_num, sub_phase);
+            last_heartbeat = now;
+        }
+
+        // Check if we're past the grace deadline.
+        if let Some(deadline) = grace_deadline {
+            if now >= deadline {
+                eprintln!(
+                    "sipag-worker: grace period expired after {}s, killing claude",
+                    GRACE_PERIOD_SECS
+                );
+                let _ = child.kill();
+                let status = child.wait().context("failed to reap claude after kill")?;
+                return Ok(status.code().unwrap_or(0));
+            }
+            // During grace period, skip PR state checks (already decided to wind down).
+            continue;
+        }
+
+        // Check PR state periodically.
+        if now.duration_since(last_pr_check).as_secs() >= PR_CHECK_INTERVAL_SECS {
+            last_pr_check = now;
+            let pr_state = check_pr_state(repo, pr_num);
+            match pr_state {
+                PrState::Merged => {
+                    eprintln!(
+                        "sipag-worker: PR #{pr_num} merged, starting {GRACE_PERIOD_SECS}s grace period (running {}s)",
+                        start.elapsed().as_secs()
+                    );
+                    write_heartbeat(state_path, repo, pr_num, "pr_merged");
+                    grace_deadline = Some(now + Duration::from_secs(GRACE_PERIOD_SECS));
+                }
+                PrState::Closed => {
+                    eprintln!(
+                        "sipag-worker: PR #{pr_num} closed, starting {GRACE_PERIOD_SECS}s grace period (running {}s)",
+                        start.elapsed().as_secs()
+                    );
+                    write_heartbeat(state_path, repo, pr_num, "pr_closed");
+                    grace_deadline = Some(now + Duration::from_secs(GRACE_PERIOD_SECS));
+                }
+                PrState::Open | PrState::Unknown => {}
+            }
+        }
     }
-
-    let dest_dir = PathBuf::from("/home/sipag/.claude/projects/sipag-session");
-    fs::create_dir_all(&dest_dir).ok()?;
-    let dest = dest_dir.join(format!("{session_id}.jsonl"));
-    fs::copy(src, &dest).ok()?;
-
-    eprintln!("sipag-worker: resuming host session {session_id}");
-    Some(session_id)
 }
 
 /// Best-effort attempt to mark the state file as failed on error.

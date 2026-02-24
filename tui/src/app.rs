@@ -34,6 +34,7 @@ pub struct App {
     pub attach_request: Option<String>,
     pub list_mode: ListMode,
     pub archive_max_age_days: u64,
+    pub total_state_files: usize,
 }
 
 impl App {
@@ -53,6 +54,7 @@ impl App {
             attach_request: None,
             list_mode: ListMode::Active,
             archive_max_age_days,
+            total_state_files: 0,
         };
         app.refresh_tasks()?;
         Ok(app)
@@ -64,6 +66,7 @@ impl App {
         // Use scan_workers (not list_all) to detect dead containers and
         // reconcile non-terminal workers against Docker liveness.
         let workers = sipag_core::worker::lifecycle::scan_workers(&self.sipag_dir);
+        self.total_state_files = workers.len();
         let all_tasks: Vec<Task> = workers.into_iter().map(Task::from).collect();
 
         let now = Utc::now();
@@ -161,6 +164,31 @@ impl App {
         Ok(())
     }
 
+    /// Archive the selected active task as Finished (graceful "done").
+    pub fn archive_selected(&mut self) -> Result<()> {
+        if self.tasks.is_empty() {
+            return Ok(());
+        }
+        let task = &self.tasks[self.selected];
+        if task.phase.is_terminal() {
+            return Ok(());
+        }
+
+        // Best-effort container kill (may already be stopped).
+        let container_name = task.container_id.clone();
+        let _ = std::process::Command::new("docker")
+            .args(["kill", &container_name])
+            .output();
+
+        let mut worker = state::read_state(&task.file_path)?;
+        worker.phase = state::WorkerPhase::Finished;
+        worker.ended = Some(Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        state::write_state(&worker)?;
+
+        self.refresh_tasks()?;
+        Ok(())
+    }
+
     /// Kill the Docker container for the currently selected active task.
     pub fn kill_selected(&mut self) -> Result<()> {
         if self.tasks.is_empty() {
@@ -250,6 +278,7 @@ impl App {
                 }
             }
             KeyCode::Char('x') | KeyCode::Delete => self.dismiss_selected()?,
+            KeyCode::Char('d') => self.archive_selected()?,
             KeyCode::Char('k') => self.kill_selected()?,
             KeyCode::Char('K') => self.kill_all()?,
             _ => {}
@@ -305,6 +334,7 @@ mod tests {
     }
 
     fn make_app_with_tasks(tasks: Vec<Task>) -> App {
+        let total = tasks.len();
         App {
             sipag_dir: PathBuf::new(),
             tasks,
@@ -315,6 +345,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Active,
             archive_max_age_days: 7,
+            total_state_files: total,
         }
     }
 
@@ -384,6 +415,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Archive,
             archive_max_age_days: 7,
+            total_state_files: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -443,6 +475,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Active,
             archive_max_age_days: 7,
+            total_state_files: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -489,6 +522,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Active,
             archive_max_age_days: 99999,
+            total_state_files: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -534,6 +568,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Archive,
             archive_max_age_days: 7,
+            total_state_files: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -572,6 +607,7 @@ mod tests {
             attach_request: None,
             list_mode: ListMode::Archive,
             archive_max_age_days: 99999,
+            total_state_files: 0,
         };
         app.refresh_tasks().unwrap();
         assert_eq!(app.tasks.len(), 1);

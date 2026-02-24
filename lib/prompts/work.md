@@ -18,9 +18,15 @@ Before anything else, build a deep mental model of each project:
 
 This happens first because disease clustering is meaningless without understanding the patient.
 
-### Step 2: Parallel deep analysis
+### Step 2: Find the diseases
 
-After building a mental model, spin up **parallel analysis agents** using the Task tool to examine each repo from multiple angles simultaneously. Launch these agents in a single message so they run concurrently:
+After building a mental model, read **every open issue** for each repo — not just the ready ones. The full issue list is the collective voice of the team about what needs to change. You need the complete picture to see the patterns.
+
+```bash
+gh issue list --repo <repo> --state open --json number,title,body,labels --limit 100
+```
+
+Then spin up **parallel analysis agents** using the Task tool to examine each repo. Launch them in a single message so they run concurrently. Each agent receives the full issue list plus the codebase:
 
 1. **Security reviewer** — OWASP top 10, secrets in code, auth/authz gaps, input validation, dependency CVEs
 2. **Architecture reviewer** — module boundaries, coupling, abstraction leaks, separation of concerns, dependency direction
@@ -29,20 +35,18 @@ After building a mental model, spin up **parallel analysis agents** using the Ta
 
 Each agent should:
 - Explore the codebase deeply (read files, search patterns, trace call chains)
-- Identify **diseases, not symptoms** — three issues about different error messages means there's no unified error handling
-- Cluster related problems into single actionable findings
-- Return a structured list of findings, each with: disease name, affected files, severity (critical/high/medium/low), and a brief architectural description
+- **Find the disease, not the symptoms.** Multiple issues often point at the same architectural weakness — a missing abstraction, a leaky boundary, an implicit contract that should be explicit. If 3 issues complain about different error messages, the disease is "no unified error handling." Fix that, and you fix all three — plus prevent future issues nobody has filed yet.
+- A good disease finding subsumes 2-5 existing issues. If your finding maps 1-to-1 with an existing issue, you've just restated the symptom — dig deeper.
+- Return a structured list of findings, each with: disease name, which existing issues it subsumes, affected files, and an architectural brief describing the root cause and the fix approach (what the code *should* look like)
 
-After all agents return, synthesize their findings:
+After all agents return, synthesize:
 - Deduplicate across reviewers (security and architecture may flag the same boundary problem)
-- Rank by impact — what fixes would make the codebase structurally healthier?
-- Create GitHub issues for the top findings: `gh issue create --repo <repo> --title "<disease name>" --body "<architectural brief>" --label {WORK_LABEL}`
-
-This seeds the issue backlog with high-quality, structurally-informed work items that the poller will pick up and dispatch to workers.
+- Rank by impact — what fixes would make the codebase structurally healthier? Think Raptor 1 → Raptor 3, not v1.0.1 → v1.0.2.
+- Do NOT create new issues for diseases that already have open issues covering the symptoms. Instead, note which existing issues each disease subsumes — those will be clustered into PRs in the poll cycle.
 
 ### Step 3: Recover and finish in-flight work
 
-Before launching the poller or picking up new issues, recover and prioritize all in-flight work. **Finishing started work always takes priority over starting new work** — per flow theory, reducing work-in-progress increases throughput more than adding new items.
+Before launching the poller or picking up new issues, recover and prioritize all in-flight work. **Finishing started work always takes priority over starting new work** — per flow theory, reducing work-in-progress increases throughput more than adding new items. This step is mandatory even when resuming a previous session — always check for open PRs first.
 
 1. List open sipag PRs: `gh pr list --repo <repo> --label sipag --state open --json number,title,headRefName,comments`
 2. Cross-reference with `sipag ps` — any sipag PR with no active worker is orphaned
@@ -75,15 +79,25 @@ This watches `~/.sipag/workers/` for state file changes (sub-second latency via 
 
 - **`SIPAG_GITHUB_POLL`** — Periodic GitHub check. Run the full poll cycle:
   1. **Re-dispatch orphaned in-flight PRs**: Check for open sipag PRs with no active worker (`sipag ps` cross-referenced with `gh pr list --label sipag`). These are closer to done than new issues — dispatch workers for them before picking up new work. Prioritize PRs with real commits over placeholder-only PRs.
-  2. **Check back-pressure**: Count workers currently in `starting` or `working` phase via `sipag ps`. If active workers >= {MAX_OPEN_PRS}, wait for next tick. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
+  2. **Check back-pressure**: Count **open sipag PRs** via `gh pr list --repo <repo> --label sipag --state open`. Open PRs are work-in-progress regardless of whether their worker is still running — a finished worker with an unreviewed PR is still WIP that must be reviewed before starting new work. If open sipag PRs >= {MAX_OPEN_PRS}, review/merge existing PRs first (run the review gate) before picking up new issues. **NEVER close a sipag PR to relieve back-pressure** — the PR description contains refined analysis that is expensive to recreate. Even placeholder-only PRs have value: the architectural brief in the description is work product.
   3. **Only then, pick up new ready issues**: `gh issue list --repo <repo> --label {WORK_LABEL} --state open --json number,title,body,labels`
      - Skip issues that already have an open sipag PR or running worker
-     - For each new ready issue:
-       a. Analyze the issue against the codebase — identify the structural disease, not just the symptom. For complex issues, spin up a focused Task agent to explore the relevant code paths before crafting the PR.
-       b. Create a branch: `git checkout -b sipag/issue-<N>`
-       c. Create a PR: `gh pr create --repo <repo> --title "<disease name>" --body "<architectural brief>" --head sipag/issue-<N> --label sipag`
-       d. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
-       e. Label transition: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
+     - **Read ALL ready issues before creating any PR.** Do NOT create one PR per issue — that's a faster horse. Look at the full set and ask: what are the concern clusters? Group issues by their underlying structural disease:
+       - Issues touching the same module or file set → same cluster
+       - Issues about the same pattern (error handling, config, auth) → same cluster
+       - Issues that would be fixed by the same architectural change → same cluster
+       - A good PR closes 2-5 issues. A PR that restates a single issue is shallow analysis.
+     - For each **disease cluster**:
+       a. Spin up a focused Task agent to explore the relevant code paths — what should the code look like after the fix? Design for elegance, not patches.
+       b. Create a branch: `git checkout -b sipag/issue-<N>` (use the lowest issue number in the cluster)
+       c. Create a PR. The title names the disease, not the symptom. The body is the worker's complete assignment — an architectural brief explaining the root cause, the fix approach, and referencing all issues:
+          - `Closes #N` for issues fully resolved by this change
+          - `Partially addresses #M` for issues where this PR makes progress
+          - `Related to #K` for issues where this PR lays groundwork
+       d. `gh pr create --repo <repo> --title "<disease name>" --body "<brief>" --head sipag/issue-<N> --label sipag`
+       e. Dispatch worker: `sipag dispatch --repo <repo> --pr <PR_NUM>`
+       f. Label transition for all clustered issues: `gh issue edit <N> --repo <repo> --add-label in-progress --remove-label {WORK_LABEL}`
+     - **It's okay to do less.** One beautiful PR that fully addresses 2 issues, partially addresses 1, and lays groundwork for 2 more — that's a great cycle. Quality over quantity.
 
 Worker finish/fail events are handled immediately (sub-second latency). GitHub polling for new issues still happens on a timer but is no longer the mechanism for detecting worker completion.
 
@@ -205,7 +219,7 @@ The poller runs indefinitely. Each cycle follows the priority order: **finish �
 
 This priority order minimizes work-in-progress and maximizes throughput. A cycle that merges 2 finished PRs and re-dispatches 1 orphan is more productive than a cycle that starts 3 new PRs.
 
-Design PRs for elegance — structural improvements, not patches. A clean PR addressing 2 issues beats a sprawling one addressing 5 poorly. If removing code fixes the problem better than adding code, remove code.
+Design PRs for elegance — each should be a step function improvement to the codebase. A clean PR addressing 2 issues with a unified architectural fix beats a sprawling one addressing 5 with isolated patches. If removing code fixes the problem better than adding code, remove code. The best PRs make reviewers say "obviously, yes" — they feel inevitable.
 
 ## Self-improvement retro
 

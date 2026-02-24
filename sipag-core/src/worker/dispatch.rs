@@ -21,7 +21,6 @@ pub fn dispatch_worker(
     issues: &[u64],
     cfg: &WorkerConfig,
     creds: &Credentials,
-    session_file: Option<&Path>,
 ) -> Result<String> {
     let repo_slug = repo.replace('/', "--");
     let container_name = format!("sipag-{repo_slug}-pr-{pr_num}");
@@ -123,21 +122,6 @@ pub fn dispatch_worker(
         .arg("ANTHROPIC_API_KEY")
         .arg("-e")
         .arg("GH_TOKEN");
-
-    // Mount host session file for --resume (if available).
-    if let Some(path) = session_file {
-        let session_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        cmd.arg("-v")
-            .arg(format!(
-                "{}:/sipag-session/session.jsonl:ro",
-                path.display()
-            ))
-            .arg("-e")
-            .arg(format!("SIPAG_SESSION_ID={session_id}"));
-    }
 
     // Image and entrypoint
     cmd.arg(&cfg.image)

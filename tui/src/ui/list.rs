@@ -37,7 +37,11 @@ pub fn render_list(f: &mut Frame, app: &App) {
     let header_base = if is_archive {
         format!(" sipag {mode_label}  finished: {finished_count}  failed: {failed_count}")
     } else {
-        format!(" sipag {mode_label}  workers: {active_count}")
+        format!(
+            " sipag {mode_label}  workers: {active_count} ({} state files in {})",
+            app.total_state_files,
+            app.sipag_dir.display()
+        )
     };
     let header_style = Style::default()
         .fg(Color::White)
@@ -134,9 +138,9 @@ pub fn render_list(f: &mut Frame, app: &App) {
             .get(app.selected)
             .is_some_and(|t| !t.phase.is_terminal() && !t.container_id.is_empty());
         if has_attachable {
-            " [Tab] archive  [j/k] nav  [Enter] details  [a] attach  [k] kill  [K] kill all  [q] quit"
+            " [Tab] archive  [j/↑↓] nav  [⏎] details  [a] attach  [d] done  [k] kill  [K] all  [q] quit"
         } else {
-            " [Tab/a] archive  [j/k] nav  [Enter] details  [k] kill  [K] kill all  [q] quit"
+            " [Tab/a] archive  [j/↑↓] nav  [⏎] details  [d] done  [k] kill  [K] all  [q] quit"
         }
     };
 

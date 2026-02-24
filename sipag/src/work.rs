@@ -17,7 +17,7 @@ const WORK_PROMPT: &str = include_str!("../../lib/prompts/work.md");
 ///
 /// Resolves each directory to a GitHub repo, fetches board state, builds a
 /// system prompt, and execs into an interactive Claude session.
-pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
+pub fn run_work(dirs: &[PathBuf], resume: Option<&str>) -> Result<()> {
     let dirs = if dirs.is_empty() {
         vec![std::env::current_dir().context("failed to get current directory")?]
     } else {
@@ -64,7 +64,7 @@ pub fn run_work(dirs: &[PathBuf]) -> Result<()> {
 
     // Exec into claude.
     eprintln!("Launching Claude session...\n");
-    exec_claude(&system_prompt, &creds)
+    exec_claude(&system_prompt, &creds, resume)
 }
 
 /// Fetch and format board state for all repos.
@@ -115,11 +115,15 @@ fn format_board_state(repos: &[ResolvedRepo]) -> Result<String> {
 ///
 /// Sets auth credentials in the environment and passes an initial message
 /// so Claude starts the disease identification cycle immediately.
-fn exec_claude(system_prompt: &str, creds: &Credentials) -> Result<()> {
+fn exec_claude(system_prompt: &str, creds: &Credentials, resume: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("claude");
-    cmd.arg("--append-system-prompt")
-        .arg(system_prompt)
-        .arg("Begin the sipag autonomous cycle. Study the codebase first, then launch the background poller to continuously monitor and resolve issues.");
+    cmd.arg("--append-system-prompt").arg(system_prompt);
+
+    if let Some(session_id) = resume {
+        cmd.arg("--resume").arg(session_id);
+    }
+
+    cmd.arg("Begin the sipag autonomous cycle. Study the codebase first, then launch the background poller to continuously monitor and resolve issues.");
 
     // Pass auth credentials so Claude picks them up.
     if let Some(ref token) = creds.oauth_token {

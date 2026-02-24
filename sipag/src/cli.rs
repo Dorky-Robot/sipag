@@ -6,7 +6,7 @@ use sipag_core::{
     state::{self, format_duration},
     worker::{dispatch, github, lifecycle},
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -30,6 +30,10 @@ pub enum Commands {
     Work {
         /// Local project directories (defaults to current directory)
         dirs: Vec<PathBuf>,
+
+        /// Resume a previous Claude session by ID
+        #[arg(long)]
+        resume: Option<String>,
     },
 
     /// Dispatch a Docker worker for a PR
@@ -41,11 +45,6 @@ pub enum Commands {
         /// PR number to implement
         #[arg(long)]
         pr: u64,
-
-        /// Path to a Claude session file (.jsonl) to resume in the worker.
-        /// If not provided, auto-detects the most recent session from ~/.claude/projects/.
-        #[arg(long)]
-        session_file: Option<PathBuf>,
     },
 
     /// List active and recent workers
@@ -83,7 +82,7 @@ pub enum Commands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
-        Some(Commands::Work { dirs }) => crate::work::run_work(&dirs),
+        Some(Commands::Work { dirs, resume }) => crate::work::run_work(&dirs, resume.as_deref()),
         Some(Commands::Watch) => {
             let cfg = WorkerConfig::load(&default_sipag_dir())?;
             crate::watch::run_watch(
@@ -93,11 +92,7 @@ pub fn run(cli: Cli) -> Result<()> {
             )
         }
         Some(Commands::Tui) => run_tui(),
-        Some(Commands::Dispatch {
-            repo,
-            pr,
-            session_file,
-        }) => run_dispatch(&repo, pr, session_file.as_deref()),
+        Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
         Some(Commands::Ps { all }) => run_ps(all),
         Some(Commands::Logs { id }) => run_logs(&id),
         Some(Commands::Kill { id }) => run_kill(&id),
@@ -106,7 +101,7 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn run_dispatch(repo: &str, pr_num: u64, session_file: Option<&Path>) -> Result<()> {
+fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
     let sipag_dir = default_sipag_dir();
     init::init_dirs(&sipag_dir)?;
 
@@ -180,21 +175,7 @@ fn run_dispatch(repo: &str, pr_num: u64, session_file: Option<&Path>) -> Result<
     // Load credentials.
     let creds = sipag_core::config::Credentials::load(&sipag_dir)?;
 
-    // Resolve session file: use explicit --session-file, or auto-detect.
-    let resolved_session = session_file.map(PathBuf::from).or_else(find_latest_session);
-    if let Some(ref p) = resolved_session {
-        println!("[PR #{pr_num}] Resuming host session: {}", p.display());
-    }
-
-    dispatch::dispatch_worker(
-        repo,
-        pr_num,
-        &branch,
-        &issues,
-        &cfg,
-        &creds,
-        resolved_session.as_deref(),
-    )?;
+    dispatch::dispatch_worker(repo, pr_num, &branch, &issues, &cfg, &creds)?;
     Ok(())
 }
 
@@ -469,44 +450,6 @@ fn run_tui() -> Result<()> {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
         Err(e) => anyhow::bail!("Failed to launch sipag-tui: {e}"),
     }
-}
-
-/// Find the most recently modified `.jsonl` session file in `~/.claude/projects/`.
-///
-/// Returns `None` if no session files exist or the directory can't be read.
-fn find_latest_session() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let projects_dir = PathBuf::from(home).join(".claude").join("projects");
-    if !projects_dir.is_dir() {
-        return None;
-    }
-
-    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-
-    for entry in std::fs::read_dir(&projects_dir).ok()? {
-        let entry = entry.ok()?;
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // Look for .jsonl files in each project subdirectory.
-        if let Ok(files) = std::fs::read_dir(&path) {
-            for file in files.flatten() {
-                let fpath = file.path();
-                if fpath.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    if let Ok(meta) = fpath.metadata() {
-                        if let Ok(modified) = meta.modified() {
-                            if best.as_ref().is_none_or(|(_, t)| modified > *t) {
-                                best = Some((fpath, modified));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    best.map(|(p, _)| p)
 }
 
 /// Extract issue numbers from "Closes/Fixes/Resolves #N" in text.
