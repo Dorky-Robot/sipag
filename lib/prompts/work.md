@@ -26,7 +26,33 @@ After building a mental model, read **every open issue** for each repo — not j
 gh issue list --repo <repo> --state open --json number,title,body,labels --limit 100
 ```
 
-Then spin up **parallel analysis agents** using the Task tool to examine each repo. Launch them in a single message so they run concurrently. Each agent receives the full issue list plus the codebase:
+#### Prune stale issues first
+
+Before any analysis, cross-reference every open issue against the actual codebase. Issues rot — code gets rewritten, modules get deleted, patterns get replaced. An issue filed against `lib/setup.sh` is worthless if `lib/setup.sh` no longer exists.
+
+For each open issue, check: do the files, functions, modules, or patterns it references still exist? Use Glob and Grep to verify. An issue is stale if:
+- It references files or directories that no longer exist
+- It references functions, types, or modules that were removed or renamed
+- It describes behavior in code that has been rewritten (e.g., a shell script bug when the code is now Rust)
+- The architectural pattern it complains about has already been replaced
+
+Close stale issues with a brief comment explaining what changed:
+
+```bash
+gh issue close <N> --repo <repo> --comment "Closing: <file/module> was removed/replaced by <what replaced it>. The code this issue describes no longer exists."
+```
+
+Remove any labels from closed stale issues so they don't pollute filters:
+
+```bash
+gh issue edit <N> --repo <repo> --remove-label ready --remove-label in-progress --remove-label needs-review
+```
+
+This is not optional cleanup — it's critical hygiene. Stale issues waste worker cycles, pollute disease clustering, and create PRs that fix ghosts. Prune aggressively.
+
+#### Launch parallel analysis
+
+Then spin up **parallel analysis agents** using the Task tool to examine each repo. Launch them in a single message so they run concurrently. Each agent receives the **pruned** issue list plus the codebase:
 
 1. **Security reviewer** — OWASP top 10, secrets in code, auth/authz gaps, input validation, dependency CVEs
 2. **Architecture reviewer** — module boundaries, coupling, abstraction leaks, separation of concerns, dependency direction
