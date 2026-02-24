@@ -1,4 +1,5 @@
 mod cli;
+mod orchestrator;
 mod watch;
 mod work;
 

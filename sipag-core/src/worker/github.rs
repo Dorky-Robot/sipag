@@ -235,6 +235,146 @@ pub fn fetch_open_prs(repo: &str) -> Result<Vec<PrSummary>> {
     Ok(prs)
 }
 
+/// Full PR details for review and orchestration.
+pub struct PrDetails {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub head_ref: String,
+}
+
+/// Merge a PR via squash merge and delete the branch.
+pub fn merge_pr(repo: &str, pr_num: u64) -> Result<()> {
+    let n = pr_num.to_string();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "merge",
+            &n,
+            "--repo",
+            repo,
+            "--squash",
+            "--delete-branch",
+        ])
+        .output()
+        .context("Failed to run gh pr merge")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to merge PR #{pr_num} in {repo}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Post a comment on a PR.
+pub fn post_pr_comment(repo: &str, pr_num: u64, body: &str) -> Result<()> {
+    let n = pr_num.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "comment", &n, "--repo", repo, "--body", body])
+        .output()
+        .context("Failed to run gh pr comment")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to comment on PR #{pr_num} in {repo}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Replace the body of a PR.
+pub fn edit_pr_body(repo: &str, pr_num: u64, body: &str) -> Result<()> {
+    let n = pr_num.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "edit", &n, "--repo", repo, "--body", body])
+        .output()
+        .context("Failed to run gh pr edit")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to edit PR #{pr_num} body in {repo}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Close a GitHub issue with a comment.
+pub fn close_issue(repo: &str, issue_num: u64, comment: &str) -> Result<()> {
+    let n = issue_num.to_string();
+    let output = Command::new("gh")
+        .args(["issue", "close", &n, "--repo", repo, "--comment", comment])
+        .output()
+        .context("Failed to run gh issue close")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to close issue #{issue_num} in {repo}: {stderr}");
+    }
+    Ok(())
+}
+
+/// Get the diff for a PR.
+pub fn get_pr_diff(repo: &str, pr_num: u64) -> Result<String> {
+    let n = pr_num.to_string();
+    let output = Command::new("gh")
+        .args(["pr", "diff", &n, "--repo", repo])
+        .output()
+        .context("Failed to run gh pr diff")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to get diff for PR #{pr_num} in {repo}: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Get full details for a PR (title, body, state, head ref).
+pub fn get_pr_details(repo: &str, pr_num: u64) -> Result<PrDetails> {
+    let n = pr_num.to_string();
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &n,
+            "--repo",
+            repo,
+            "--json",
+            "number,title,body,state,headRefName",
+        ])
+        .output()
+        .context("Failed to run gh pr view")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to get PR #{pr_num} details in {repo}: {stderr}");
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(PrDetails {
+        number: v["number"].as_u64().unwrap_or(pr_num),
+        title: v["title"].as_str().unwrap_or("").to_string(),
+        body: v["body"].as_str().unwrap_or("").to_string(),
+        state: v["state"].as_str().unwrap_or("OPEN").to_string(),
+        head_ref: v["headRefName"].as_str().unwrap_or("").to_string(),
+    })
+}
+
+/// Get the body text of a GitHub issue.
+pub fn get_issue_body(repo: &str, issue_num: u64) -> Result<String> {
+    let n = issue_num.to_string();
+    let output = Command::new("gh")
+        .args(["issue", "view", &n, "--repo", repo, "--json", "body"])
+        .output()
+        .context("Failed to run gh issue view")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to get issue #{issue_num} body in {repo}: {stderr}");
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    Ok(v["body"].as_str().unwrap_or("").to_string())
+}
+
 /// Transition labels on a batch of GitHub issues.
 ///
 /// Removes `remove_label` and adds `add_label` on each issue.

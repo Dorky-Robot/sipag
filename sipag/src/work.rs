@@ -6,18 +6,17 @@ use sipag_core::{
     repo::{self, ResolvedRepo},
     worker::github,
 };
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
 
-/// System prompt template (embedded at compile time).
-const WORK_PROMPT: &str = include_str!("../../lib/prompts/work.md");
+use crate::orchestrator::{self, find_resumable_session, OrchestratorContext, SessionState};
 
-/// Run an interactive sipag work session.
+/// Run a sipag work session using the Rust orchestrator.
 ///
-/// Resolves each directory to a GitHub repo, fetches board state, builds a
-/// system prompt, and execs into an interactive Claude session.
-pub fn run_work(dirs: &[PathBuf], resume: Option<&str>) -> Result<()> {
+/// Resolves each directory to a GitHub repo, runs preflight checks, then
+/// launches the orchestrator state machine which drives the full autonomous
+/// cycle: prune stale issues, analyze diseases, recover in-flight work,
+/// and enter the event loop for continuous operation.
+pub fn run_work(dirs: &[PathBuf], _resume: Option<&str>) -> Result<()> {
     let dirs = if dirs.is_empty() {
         vec![std::env::current_dir().context("failed to get current directory")?]
     } else {
@@ -51,98 +50,29 @@ pub fn run_work(dirs: &[PathBuf], resume: Option<&str>) -> Result<()> {
         github::ensure_sipag_label(&repo.full_name);
     }
 
-    // Fetch board state per repo.
-    eprintln!("Fetching board state...");
-    let board_state = format_board_state(&repos)?;
-
-    // Build system prompt.
-    let system_prompt = WORK_PROMPT
-        .replace("{BOARD_STATE}", &board_state)
-        .replace("{POLL_INTERVAL}", &cfg.poll_interval.to_string())
-        .replace("{WORK_LABEL}", &cfg.work_label)
-        .replace("{MAX_OPEN_PRS}", &cfg.max_open_prs.to_string());
-
-    // Exec into claude.
-    eprintln!("Launching Claude session...\n");
-    exec_claude(&system_prompt, &creds, resume)
-}
-
-/// Fetch and format board state for all repos.
-fn format_board_state(repos: &[ResolvedRepo]) -> Result<String> {
-    let mut sections = Vec::new();
-
-    for repo in repos {
-        let mut section = format!("### {} ({})\n", repo.full_name, repo.local_path.display());
-
-        let issues = github::fetch_open_issues(&repo.full_name).unwrap_or_default();
-        let prs = github::fetch_open_prs(&repo.full_name).unwrap_or_default();
-
-        if issues.is_empty() && prs.is_empty() {
-            section.push_str("\nNo open issues or PRs.\n");
-        } else {
-            if !issues.is_empty() {
-                section.push_str("\n**Open issues:**\n");
-                for issue in &issues {
-                    let labels = if issue.labels.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", issue.labels.join(", "))
-                    };
-                    section.push_str(&format!("- #{} {}{}\n", issue.number, issue.title, labels));
-                }
-            }
-
-            if !prs.is_empty() {
-                section.push_str("\n**Open PRs:**\n");
-                for pr in &prs {
-                    let labels = if pr.labels.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", pr.labels.join(", "))
-                    };
-                    section.push_str(&format!("- PR #{} {}{}\n", pr.number, pr.title, labels));
-                }
-            }
+    // Load or create session.
+    let session = match find_resumable_session(&sipag_dir) {
+        Some(path) => {
+            eprintln!("sipag: resuming session from {}", path.display());
+            SessionState::load(&path)?
         }
+        None => SessionState::new(&repos),
+    };
 
-        sections.push(section);
-    }
+    let ctx = OrchestratorContext {
+        sipag_dir,
+        cfg,
+        creds,
+        repos,
+    };
 
-    Ok(sections.join("\n"))
-}
-
-/// Replace the current process with an interactive Claude session.
-///
-/// Sets auth credentials in the environment and passes an initial message
-/// so Claude starts the disease identification cycle immediately.
-fn exec_claude(system_prompt: &str, creds: &Credentials, resume: Option<&str>) -> Result<()> {
-    let mut cmd = Command::new("claude");
-    cmd.arg("--append-system-prompt").arg(system_prompt);
-
-    if let Some(session_id) = resume {
-        cmd.arg("--resume").arg(session_id);
-    }
-
-    cmd.arg("Begin the sipag autonomous cycle. Study the codebase first, then launch the background poller to continuously monitor and resolve issues.");
-
-    // Pass auth credentials so Claude picks them up.
-    if let Some(ref token) = creds.oauth_token {
-        cmd.env("CLAUDE_CODE_OAUTH_TOKEN", token);
-    }
-    if let Some(ref key) = creds.api_key {
-        cmd.env("ANTHROPIC_API_KEY", key);
-    }
-
-    let err = cmd.exec();
-
-    // exec() only returns on error.
-    bail!("failed to exec claude: {err}")
+    eprintln!("sipag: launching orchestrator\n");
+    orchestrator::run(session, ctx)
 }
 
 /// Acquire exclusive file locks for each repo to prevent concurrent sessions.
 ///
-/// Returns the lock file handles — the OS releases the locks when the process
-/// exits (including after exec() replaces it with claude).
+/// Returns the lock file handles — the OS releases the locks when the process exits.
 fn acquire_repo_locks(
     sipag_dir: &std::path::Path,
     repos: &[ResolvedRepo],

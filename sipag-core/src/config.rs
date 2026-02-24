@@ -383,7 +383,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 }
 
 /// Credentials required by worker containers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Credentials {
     pub oauth_token: Option<String>,
     pub api_key: Option<String>,
