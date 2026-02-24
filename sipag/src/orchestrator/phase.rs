@@ -2,36 +2,22 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Orchestrator phase — the current step in the sipag work cycle.
+/// Orchestrator phase — only tracks lifecycle, not individual event handlers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkPhase {
-    Init,
-    PruneStaleIssues {
-        repo_index: usize,
-    },
-    AnalyzeDiseases {
-        repo_index: usize,
-    },
-    RecoverInFlight {
-        repo_index: usize,
-    },
-    EventLoop,
-    ReviewPr {
-        repo: String,
-        pr_num: u64,
-        attempt: u8,
-    },
-    HandleFailed {
-        repo: String,
-        pr_num: u64,
-    },
-    HandleStale {
-        repo: String,
-        pr_num: u64,
-    },
-    PollCycle,
-    Retro,
+    Startup,
+    Running,
     Done,
+}
+
+/// Outcome of a PR review — returned by the review handler.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum ReviewOutcome {
+    Merged,
+    NeedsRedispatch,
+    Escalate,
+    Skipped,
 }
 
 /// A disease cluster identified during analysis — groups related issues by root cause.
@@ -51,13 +37,11 @@ pub struct RepoSnapshot {
     pub local_path: String,
 }
 
-/// Persistent session state — saved after every phase transition for crash recovery.
+/// Persistent session state — saved only on phase transitions (Startup → Running → Done).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionState {
     pub phase: WorkPhase,
     pub repos: Vec<RepoSnapshot>,
-    pub diseases: Vec<DiseaseCluster>,
-    pub workers_completed_since_retro: u32,
     pub started: String,
     pub last_transition: String,
 }
@@ -66,7 +50,7 @@ impl SessionState {
     pub fn new(repos: &[sipag_core::repo::ResolvedRepo]) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: repos
                 .iter()
                 .map(|r| RepoSnapshot {
@@ -74,8 +58,6 @@ impl SessionState {
                     local_path: r.local_path.display().to_string(),
                 })
                 .collect(),
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: now.clone(),
             last_transition: now,
         }
@@ -112,6 +94,29 @@ pub fn find_resumable_session(sipag_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Save disease clusters to `{sipag_dir}/diseases/{owner}--{repo}.json`.
+pub fn save_diseases(sipag_dir: &Path, repo: &str, clusters: &[DiseaseCluster]) -> Result<()> {
+    let diseases_dir = sipag_dir.join("diseases");
+    std::fs::create_dir_all(&diseases_dir)?;
+    let slug = repo.replace('/', "--");
+    let path = diseases_dir.join(format!("{slug}.json"));
+    let json = serde_json::to_string_pretty(clusters)?;
+    std::fs::write(&path, json)?;
+    Ok(())
+}
+
+/// Load disease clusters from `{sipag_dir}/diseases/{owner}--{repo}.json`.
+///
+/// Returns empty vec if the file doesn't exist — poll works fine without diseases.
+pub fn load_diseases(sipag_dir: &Path, repo: &str) -> Vec<DiseaseCluster> {
+    let slug = repo.replace('/', "--");
+    let path = sipag_dir.join("diseases").join(format!("{slug}.json"));
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,13 +126,11 @@ mod tests {
     fn session_state_save_and_load() {
         let dir = TempDir::new().unwrap();
         let session = SessionState {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: vec![RepoSnapshot {
                 full_name: "owner/repo".to_string(),
                 local_path: "/tmp/repo".to_string(),
             }],
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -137,23 +140,21 @@ mod tests {
         let loaded = SessionState::load(&dir.path().join("session.json")).unwrap();
         assert_eq!(loaded.repos.len(), 1);
         assert_eq!(loaded.repos[0].full_name, "owner/repo");
-        assert!(matches!(loaded.phase, WorkPhase::Init));
+        assert!(matches!(loaded.phase, WorkPhase::Startup));
     }
 
     #[test]
     fn session_state_transition_updates_timestamp() {
         let mut session = SessionState {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: Vec::new(),
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
 
         let before = session.last_transition.clone();
-        session.transition(WorkPhase::EventLoop);
-        assert!(matches!(session.phase, WorkPhase::EventLoop));
+        session.transition(WorkPhase::Running);
+        assert!(matches!(session.phase, WorkPhase::Running));
         assert_ne!(session.last_transition, before);
     }
 
@@ -172,23 +173,12 @@ mod tests {
 
     #[test]
     fn work_phase_serialization_round_trip() {
-        let phases = vec![
-            WorkPhase::Init,
-            WorkPhase::PruneStaleIssues { repo_index: 2 },
-            WorkPhase::ReviewPr {
-                repo: "o/r".to_string(),
-                pr_num: 42,
-                attempt: 1,
-            },
-            WorkPhase::EventLoop,
-            WorkPhase::Done,
-        ];
+        let phases = vec![WorkPhase::Startup, WorkPhase::Running, WorkPhase::Done];
 
         for phase in phases {
             let json = serde_json::to_string(&phase).unwrap();
             let loaded: WorkPhase = serde_json::from_str(&json).unwrap();
-            // Just verify it round-trips without panic.
-            let _ = format!("{:?}", loaded);
+            assert_eq!(format!("{:?}", phase), format!("{:?}", loaded));
         }
     }
 
@@ -209,48 +199,11 @@ mod tests {
     }
 
     #[test]
-    fn all_work_phase_variants_serialize() {
-        let phases = vec![
-            WorkPhase::Init,
-            WorkPhase::PruneStaleIssues { repo_index: 0 },
-            WorkPhase::PruneStaleIssues { repo_index: 99 },
-            WorkPhase::AnalyzeDiseases { repo_index: 0 },
-            WorkPhase::RecoverInFlight { repo_index: 0 },
-            WorkPhase::EventLoop,
-            WorkPhase::ReviewPr {
-                repo: "owner/repo".to_string(),
-                pr_num: 1,
-                attempt: 0,
-            },
-            WorkPhase::HandleFailed {
-                repo: "o/r".to_string(),
-                pr_num: 2,
-            },
-            WorkPhase::HandleStale {
-                repo: "o/r".to_string(),
-                pr_num: 3,
-            },
-            WorkPhase::PollCycle,
-            WorkPhase::Retro,
-            WorkPhase::Done,
-        ];
-
-        for phase in &phases {
-            let json = serde_json::to_string(phase).unwrap();
-            let loaded: WorkPhase = serde_json::from_str(&json).unwrap();
-            // Verify debug output matches (proxy for equality since we don't have PartialEq).
-            assert_eq!(format!("{:?}", phase), format!("{:?}", loaded));
-        }
-    }
-
-    #[test]
     fn session_state_save_creates_file() {
         let dir = TempDir::new().unwrap();
         let session = SessionState {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: Vec::new(),
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -263,30 +216,17 @@ mod tests {
     fn session_state_save_is_valid_json() {
         let dir = TempDir::new().unwrap();
         let session = SessionState {
-            phase: WorkPhase::ReviewPr {
-                repo: "owner/repo".to_string(),
-                pr_num: 42,
-                attempt: 1,
-            },
+            phase: WorkPhase::Running,
             repos: vec![RepoSnapshot {
                 full_name: "owner/repo".to_string(),
                 local_path: "/path/to/repo".to_string(),
             }],
-            diseases: vec![DiseaseCluster {
-                name: "test".to_string(),
-                description: "desc".to_string(),
-                issues: vec![1],
-                affected_files: vec!["a.rs".to_string()],
-                fix_approach: "fix".to_string(),
-            }],
-            workers_completed_since_retro: 5,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-15T12:00:00Z".to_string(),
         };
 
         session.save(dir.path()).unwrap();
 
-        // Verify it's valid JSON.
         let content = std::fs::read_to_string(dir.path().join("session.json")).unwrap();
         let _: serde_json::Value = serde_json::from_str(&content).unwrap();
     }
@@ -295,7 +235,7 @@ mod tests {
     fn session_state_multiple_repos_round_trip() {
         let dir = TempDir::new().unwrap();
         let session = SessionState {
-            phase: WorkPhase::PruneStaleIssues { repo_index: 1 },
+            phase: WorkPhase::Running,
             repos: vec![
                 RepoSnapshot {
                     full_name: "owner/repo-a".to_string(),
@@ -306,8 +246,6 @@ mod tests {
                     local_path: "/b".to_string(),
                 },
             ],
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
@@ -324,49 +262,80 @@ mod tests {
         let dir = TempDir::new().unwrap();
 
         let mut session = SessionState {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: Vec::new(),
-            diseases: Vec::new(),
-            workers_completed_since_retro: 0,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
         session.save(dir.path()).unwrap();
 
-        session.transition(WorkPhase::EventLoop);
-        session.workers_completed_since_retro = 3;
+        session.transition(WorkPhase::Running);
         session.save(dir.path()).unwrap();
 
         let loaded = SessionState::load(&dir.path().join("session.json")).unwrap();
-        assert!(matches!(loaded.phase, WorkPhase::EventLoop));
-        assert_eq!(loaded.workers_completed_since_retro, 3);
+        assert!(matches!(loaded.phase, WorkPhase::Running));
     }
 
     #[test]
     fn transition_preserves_other_fields() {
         let mut session = SessionState {
-            phase: WorkPhase::Init,
+            phase: WorkPhase::Startup,
             repos: vec![RepoSnapshot {
                 full_name: "o/r".to_string(),
                 local_path: "/p".to_string(),
             }],
-            diseases: vec![DiseaseCluster {
-                name: "d".to_string(),
-                description: "d".to_string(),
-                issues: vec![1],
-                affected_files: Vec::new(),
-                fix_approach: "f".to_string(),
-            }],
-            workers_completed_since_retro: 7,
             started: "2026-01-01T00:00:00Z".to_string(),
             last_transition: "2026-01-01T00:00:00Z".to_string(),
         };
 
-        session.transition(WorkPhase::PollCycle);
+        session.transition(WorkPhase::Running);
 
         assert_eq!(session.repos.len(), 1);
-        assert_eq!(session.diseases.len(), 1);
-        assert_eq!(session.workers_completed_since_retro, 7);
         assert_eq!(session.started, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn session_load_malformed_json_returns_error() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("session.json"), "not json{{{").unwrap();
+        assert!(SessionState::load(&dir.path().join("session.json")).is_err());
+    }
+
+    #[test]
+    fn session_load_missing_file_returns_error() {
+        let dir = TempDir::new().unwrap();
+        assert!(SessionState::load(&dir.path().join("nonexistent.json")).is_err());
+    }
+
+    #[test]
+    fn save_and_load_diseases() {
+        let dir = TempDir::new().unwrap();
+        let clusters = vec![DiseaseCluster {
+            name: "test disease".to_string(),
+            description: "desc".to_string(),
+            issues: vec![1, 2],
+            affected_files: vec!["a.rs".to_string()],
+            fix_approach: "fix it".to_string(),
+        }];
+
+        save_diseases(dir.path(), "owner/repo", &clusters).unwrap();
+        let loaded = load_diseases(dir.path(), "owner/repo");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "test disease");
+        assert_eq!(loaded[0].issues, vec![1, 2]);
+    }
+
+    #[test]
+    fn load_diseases_returns_empty_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let loaded = load_diseases(dir.path(), "owner/repo");
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn save_diseases_creates_dir() {
+        let dir = TempDir::new().unwrap();
+        save_diseases(dir.path(), "owner/repo", &[]).unwrap();
+        assert!(dir.path().join("diseases").exists());
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sipag_core::worker::github;
 
-use super::phase::{SessionState, WorkPhase};
+use super::phase::ReviewOutcome;
 use super::OrchestratorContext;
 
 /// Maximum review gate attempts before escalating to human review.
@@ -17,9 +17,8 @@ pub fn run_review(
     repo: &str,
     pr_num: u64,
     attempt: u8,
-    session: &mut SessionState,
-    ctx: &OrchestratorContext,
-) -> Result<WorkPhase> {
+    _ctx: &OrchestratorContext,
+) -> Result<ReviewOutcome> {
     eprintln!(
         "sipag: reviewing PR #{pr_num} in {repo} (attempt {}/{})",
         attempt + 1,
@@ -30,12 +29,12 @@ pub fn run_review(
     let details = github::get_pr_details(repo, pr_num)?;
     if details.state == "MERGED" {
         eprintln!("sipag: PR #{pr_num} already merged, skipping review");
-        return Ok(WorkPhase::EventLoop);
+        return Ok(ReviewOutcome::Skipped);
     }
 
     if details.state == "CLOSED" {
         eprintln!("sipag: PR #{pr_num} is closed, skipping review");
-        return Ok(WorkPhase::EventLoop);
+        return Ok(ReviewOutcome::Skipped);
     }
 
     // TODO Phase 5: Implement multi-agent review
@@ -49,20 +48,19 @@ pub fn run_review(
     //    - Post structured feedback as PR comment
     //    - Append feedback to PR body
     //    - Re-dispatch worker
-    //    - Return ReviewPr with attempt + 1
-    // 8. If still REQUEST_CHANGES after max attempts: escalate
+    //    - Return NeedsRedispatch
+    // 8. If still REQUEST_CHANGES after max attempts: return Escalate
 
     // Stub: attempt to merge
     eprintln!("sipag: review complete for PR #{pr_num} — attempting merge");
     match github::merge_pr(repo, pr_num) {
         Ok(()) => {
             eprintln!("sipag: PR #{pr_num} merged successfully");
+            Ok(ReviewOutcome::Merged)
         }
         Err(e) => {
             eprintln!("sipag: failed to merge PR #{pr_num}: {e}");
+            Ok(ReviewOutcome::Escalate)
         }
     }
-
-    let _ = (session, ctx); // suppress unused warnings
-    Ok(WorkPhase::EventLoop)
 }

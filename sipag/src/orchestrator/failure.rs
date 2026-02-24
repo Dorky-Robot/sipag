@@ -1,16 +1,10 @@
 use anyhow::Result;
 use sipag_core::worker::{dispatch, github, lifecycle};
 
-use super::phase::SessionState;
 use super::OrchestratorContext;
 
 /// Handle a failed worker: check logs, triage, possibly re-dispatch.
-pub fn handle_failed(
-    repo: &str,
-    pr_num: u64,
-    _session: &mut SessionState,
-    ctx: &OrchestratorContext,
-) -> Result<()> {
+pub fn handle_failed(repo: &str, pr_num: u64, ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: handling failed worker for PR #{pr_num} in {repo}");
 
     // Check logs for failure reason.
@@ -42,12 +36,7 @@ pub fn handle_failed(
 }
 
 /// Handle a stale worker: kill container, check PR state, possibly re-dispatch.
-pub fn handle_stale(
-    repo: &str,
-    pr_num: u64,
-    _session: &mut SessionState,
-    ctx: &OrchestratorContext,
-) -> Result<()> {
+pub fn handle_stale(repo: &str, pr_num: u64, ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: handling stale worker for PR #{pr_num} in {repo}");
 
     // Kill the stale container.

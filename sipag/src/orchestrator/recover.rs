@@ -1,7 +1,7 @@
 use anyhow::Result;
+use sipag_core::repo::ResolvedRepo;
 use sipag_core::worker::{github, lifecycle};
 
-use super::phase::SessionState;
 use super::OrchestratorContext;
 
 /// Recover in-flight work for a single repo.
@@ -9,12 +9,7 @@ use super::OrchestratorContext;
 /// Lists open sipag PRs, cross-references with active workers from `sipag ps`,
 /// and re-dispatches orphaned PRs. Prioritizes by progress: self-reviewed PRs
 /// first, then PRs with real commits, then placeholder-only PRs.
-pub fn run_recover(
-    repo_index: usize,
-    _session: &mut SessionState,
-    ctx: &OrchestratorContext,
-) -> Result<()> {
-    let repo = &ctx.repos[repo_index];
+pub fn run_recover(repo: &ResolvedRepo, ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: recovering in-flight work for {}", repo.full_name);
 
     // List open sipag PRs.

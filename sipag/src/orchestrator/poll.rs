@@ -1,7 +1,6 @@
 use anyhow::Result;
 use sipag_core::worker::github;
 
-use super::phase::SessionState;
 use super::OrchestratorContext;
 
 /// Run a full poll cycle: orphan redispatch, back-pressure check, issue clustering, dispatch.
@@ -10,10 +9,10 @@ use super::OrchestratorContext;
 /// 1. Re-dispatch orphaned in-flight PRs (most-progressed first)
 /// 2. Check back-pressure (open sipag PRs vs max_open_prs)
 /// 3. Pick up new ready issues, cluster by disease, create PRs, dispatch workers
-pub fn run_poll(_session: &mut SessionState, ctx: &OrchestratorContext) -> Result<()> {
+pub fn run_poll(ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: poll cycle starting");
 
-    for (i, repo) in ctx.repos.iter().enumerate() {
+    for repo in &ctx.repos {
         eprintln!("sipag: polling {}", repo.full_name);
 
         // 1. Check back-pressure.
@@ -42,12 +41,14 @@ pub fn run_poll(_session: &mut SessionState, ctx: &OrchestratorContext) -> Resul
             ready_issues
         );
 
+        // Load disease clusters for context-aware clustering.
+        let _diseases = super::phase::load_diseases(&ctx.sipag_dir, &repo.full_name);
+
         // TODO Phase 5: Implement issue clustering and PR creation
         // 1. Read all ready issue bodies
         // 2. Invoke Claude to cluster by disease
         // 3. For each cluster: create branch, create PR, dispatch worker
         // 4. Label transition: ready → in-progress
-        let _ = i; // suppress unused warning
     }
 
     eprintln!("sipag: poll cycle complete");

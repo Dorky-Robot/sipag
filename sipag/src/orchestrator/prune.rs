@@ -1,6 +1,6 @@
 use anyhow::Result;
+use sipag_core::repo::ResolvedRepo;
 
-use super::phase::SessionState;
 use super::OrchestratorContext;
 
 /// Prune stale issues for a single repo.
@@ -11,12 +11,7 @@ use super::OrchestratorContext;
 ///
 /// Mechanical checks (file existence) are pure code. Ambiguous cases are
 /// delegated to Claude via `invoke_claude()`.
-pub fn run_prune(
-    repo_index: usize,
-    _session: &mut SessionState,
-    ctx: &OrchestratorContext,
-) -> Result<()> {
-    let repo = &ctx.repos[repo_index];
+pub fn run_prune(repo: &ResolvedRepo, _ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: pruning stale issues for {}", repo.full_name);
 
     // TODO Phase 5: Implement stale issue detection

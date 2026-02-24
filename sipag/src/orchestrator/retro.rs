@@ -1,13 +1,12 @@
 use anyhow::Result;
 
-use super::phase::SessionState;
 use super::OrchestratorContext;
 
 /// Run a self-improvement retrospective using 3 parallel Claude agents.
 ///
 /// Agents: operator retro, design retro, correctness retro.
 /// Results are synthesized, deduplicated, and recorded as lessons.
-pub fn run_retro(_session: &mut SessionState, ctx: &OrchestratorContext) -> Result<()> {
+pub fn run_retro(ctx: &OrchestratorContext) -> Result<()> {
     eprintln!("sipag: running retrospective");
 
     // TODO Phase 5: Implement retro
