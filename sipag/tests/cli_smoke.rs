@@ -1,7 +1,7 @@
 //! Binary smoke tests for the `sipag` CLI.
 //!
 //! These tests use `assert_cmd` to run the actual compiled binary and verify
-//! basic behavior for the v3 CLI (7 commands: dispatch, ps, logs, kill,
+//! basic behavior for the CLI (8 commands: init, dispatch, ps, logs, kill,
 //! tui, doctor, version).
 
 use assert_cmd::Command;
@@ -69,7 +69,7 @@ fn help_lists_subcommands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for cmd in &[
-        "work", "dispatch", "ps", "logs", "kill", "tui", "doctor", "version",
+        "init", "dispatch", "ps", "logs", "kill", "tui", "doctor", "version",
     ] {
         assert!(
             stdout.contains(cmd),
@@ -284,17 +284,6 @@ fn logs_falls_back_to_log_file() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Worker output line 1"));
-}
-
-// ── Work ───────────────────────────────────────────────────────────────────
-
-#[test]
-fn work_requires_valid_directory() {
-    sipag()
-        .args(["work", "/nonexistent/path/that/does/not/exist"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("does not exist"));
 }
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────

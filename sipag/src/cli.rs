@@ -9,6 +9,8 @@ use sipag_core::{
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::init_project;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_HASH: &str = env!("CARGO_GIT_SHA");
 
@@ -26,14 +28,15 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Start an interactive work session
-    Work {
-        /// Local project directories (defaults to current directory)
-        dirs: Vec<PathBuf>,
+    /// Install agents, commands, and hooks into a project
+    Init {
+        /// Project directory (defaults to current directory)
+        #[arg(default_value = ".")]
+        dir: PathBuf,
 
-        /// Resume a previous Claude session by ID
-        #[arg(long)]
-        resume: Option<String>,
+        /// Overwrite existing files
+        #[arg(long, default_value_t = false)]
+        force: bool,
     },
 
     /// Dispatch a Docker worker for a PR
@@ -66,9 +69,6 @@ pub enum Commands {
         id: String,
     },
 
-    /// Watch for worker state changes and emit event markers
-    Watch,
-
     /// Launch interactive TUI
     Tui,
 
@@ -82,15 +82,7 @@ pub enum Commands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
-        Some(Commands::Work { dirs, resume }) => crate::work::run_work(&dirs, resume.as_deref()),
-        Some(Commands::Watch) => {
-            let cfg = WorkerConfig::load(&default_sipag_dir())?;
-            crate::watch::run_watch(
-                &default_sipag_dir(),
-                cfg.poll_interval,
-                cfg.heartbeat_stale_secs,
-            )
-        }
+        Some(Commands::Init { dir, force }) => init_project::run_init(&dir, force),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
         Some(Commands::Ps { all }) => run_ps(all),

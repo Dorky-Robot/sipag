@@ -4,12 +4,13 @@ This file primes Claude Code sessions working **on sipag itself**.
 
 ## Project overview
 
-sipag is a sandbox launcher for Claude Code. It spins up isolated Docker containers, runs `claude --dangerously-skip-permissions` inside them, and implements GitHub PRs. sipag is pure infrastructure — containers, state files, lifecycle tracking. Claude Code is intelligence — analysis, implementation, review.
+sipag is a template installer and sandbox launcher for Claude Code. It does three things:
 
-The three-phase flow:
-1. **Analysis** (main Claude Code) — Cluster issues, craft a refined PR with architectural context
-2. **Implementation** (Docker worker) — Read PR description as assignment, implement, test, push
-3. **Review** (main Claude Code) — Review PR diff, merge or close, loop
+1. **`sipag init`** — Install review agents, custom commands, and safety hooks into any project's `.claude/` directory
+2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
+3. **`sipag tui`** — Dashboard for all Docker workers across the host
+
+sipag is pure infrastructure — containers, state files, lifecycle tracking, templates. Claude Code provides the intelligence.
 
 ## Architecture
 
@@ -17,11 +18,13 @@ The three-phase flow:
 
 ```
 sipag-core/src/
-├── lib.rs              # pub mod: auth, config, docker, init, repo, state, worker
+├── lib.rs              # pub mod: auth, config, docker, events, init, lessons, repo, state, worker
 ├── auth.rs             # Token resolution (OAuth, API key, GH token)
 ├── config.rs           # WorkerConfig (7 fields), Credentials, default_sipag_dir()
 ├── docker.rs           # Preflight checks (daemon running, image available)
+├── events.rs           # Append-only lifecycle event bus
 ├── init.rs             # Create ~/.sipag/{workers,logs}
+├── lessons.rs          # Per-repo learning from failures
 ├── repo.rs             # Git remote resolution (local dir → GitHub owner/repo)
 ├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files (atomic writes)
 └── worker/
@@ -32,8 +35,9 @@ sipag-core/src/
 
 sipag/src/
 ├── main.rs             # Entry point
-├── cli.rs              # 8 commands: work, dispatch, ps, logs, kill, tui, doctor, version
-└── work.rs             # sipag work: resolve repos, fetch board state, exec claude
+├── cli.rs              # 7 commands: init, dispatch, ps, logs, kill, tui, doctor, version
+├── init_project.rs     # sipag init: write templates to .claude/
+└── templates.rs        # Embedded template files (include_str!)
 
 sipag-worker/src/
 └── main.rs             # Container-side binary: clone, fetch PR, run Claude Code
@@ -45,14 +49,25 @@ tui/src/
 └── ui/                 # list.rs (table view), detail.rs (metadata + log)
 ```
 
+### Templates
+
+```
+lib/templates/
+├── agents/             # Review agents (security, architecture, correctness, backlog, issue)
+├── commands/           # Custom commands (dispatch, review)
+├── hooks/              # Safety gate hook (deny-list-only PreToolUse)
+└── settings.local.json # Hook registration
+```
+
+Installed by `sipag init` into a project's `.claude/` directory.
+
 ### Prompts
 
 ```
-lib/prompts/work.md           # sipag work system prompt (embedded via include_str!)
 lib/prompts/worker.md         # Worker disposition prompt (embedded via include_str!)
 ```
 
-The PR description is the complete assignment. `sipag-worker` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`. Both host and container use `sipag-core::state` for state I/O, ensuring field names are always consistent.
+The PR description is the complete assignment. `sipag-worker` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`.
 
 ### State model
 
@@ -76,7 +91,7 @@ Phases: `starting` → `working` → `finished` | `failed`
 ## Commands
 
 ```
-sipag work [<dirs>...]        Start an interactive work session (main entry point)
+sipag init [dir] [--force]    Install agents, commands, and hooks into .claude/
 sipag dispatch --repo <owner/repo> --pr <N>
                               Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
@@ -149,16 +164,6 @@ docker build -t sipag-worker:local .
 SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
 ```
 
-## Running sipag work
-
-**Never `unset CLAUDECODE`** to try to run `sipag work` from inside a Claude Code session. It causes nested session conflicts. Instead, ask the user to run it from a separate terminal, or have the main Claude Code session run it as a background Bash task:
-
-```bash
-SIPAG_IMAGE=sipag-worker:local sipag work ~/Projects/dorky_robot/katulong
-```
-
-`sipag work` launches its own Claude Code session — it cannot be nested inside another one.
-
 ## Working on sipag
 
 ### What changes most
@@ -166,6 +171,8 @@ SIPAG_IMAGE=sipag-worker:local sipag work ~/Projects/dorky_robot/katulong
 - `sipag-core/src/worker/` — dispatch, lifecycle, GitHub operations
 - `sipag-core/src/state.rs` — state file format and management
 - `sipag/src/cli.rs` — CLI commands
+- `sipag/src/init_project.rs` — template installer
+- `lib/templates/` — agents, commands, hooks
 - `tui/src/` — TUI views and task model
 
 ### PR-only workflow

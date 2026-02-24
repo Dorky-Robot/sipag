@@ -1,0 +1,20 @@
+# Safety gate configuration
+#
+# Extra deny patterns and path deny lists loaded by safety-gate.sh.
+# Patterns are extended regular expressions matched against the full command string.
+#
+# There is no [allow] section — the gate uses a deny-list-only model.
+# Commands that don't match any deny pattern are allowed.
+
+[deny]
+patterns = [
+    # Add project-specific deny patterns here, e.g.:
+    # "my-dangerous-command",
+]
+
+[paths]
+deny = [
+    "/etc",
+    "/usr",
+    "/var/run",
+]

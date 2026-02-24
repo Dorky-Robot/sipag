@@ -1,7 +1,6 @@
 mod cli;
-mod orchestrator;
-mod watch;
-mod work;
+mod init_project;
+mod templates;
 
 use clap::Parser;
 

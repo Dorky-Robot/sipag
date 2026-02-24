@@ -10,5 +10,8 @@ kubo    = "kubo"      # chain-of-thought planner in the dorky robot stack
 tao     = "tao"       # decision layer in the dorky robot stack
 ratatui = "ratatui"   # TUI framework crate (not "ratatouille")
 
+# Regex fragments in shell scripts (e.g., (ba)?sh matches bash/sh)
+ba = "ba"
+
 # Intentional misspellings in test fixtures (Levenshtein distance tests)
 imge = "imge"
