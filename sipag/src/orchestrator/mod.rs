@@ -72,34 +72,43 @@ pub fn run(mut session: SessionState, ctx: OrchestratorContext) -> Result<()> {
                         .get(&(repo.clone(), pr_num))
                         .copied()
                         .unwrap_or(0);
-                    match review::run_review(&repo, pr_num, attempt, &ctx)? {
-                        ReviewOutcome::Merged | ReviewOutcome::Skipped => {
+                    match review::run_review(&repo, pr_num, attempt, &ctx) {
+                        Ok(ReviewOutcome::Merged | ReviewOutcome::Skipped) => {
                             review_attempts.remove(&(repo, pr_num));
                         }
-                        ReviewOutcome::NeedsRedispatch => {
+                        Ok(ReviewOutcome::NeedsRedispatch) => {
                             *review_attempts.entry((repo, pr_num)).or_insert(0) += 1;
                         }
-                        ReviewOutcome::Escalate => {
+                        Ok(ReviewOutcome::Escalate) => {
                             review_attempts.remove(&(repo, pr_num));
                             eprintln!("sipag: PR #{pr_num} escalated to human review");
+                        }
+                        Err(e) => {
+                            eprintln!("sipag: review error for PR #{pr_num} in {repo}: {e:#}");
                         }
                     }
                 }
                 WorkEvent::WorkerFailed { repo, pr_num } => {
                     eprintln!("sipag: worker failed for PR #{pr_num} in {repo}");
                     completed_count += 1;
-                    failure::handle_failed(&repo, pr_num, &ctx)?;
+                    if let Err(e) = failure::handle_failed(&repo, pr_num, &ctx) {
+                        eprintln!("sipag: handle_failed error for PR #{pr_num} in {repo}: {e:#}");
+                    }
                 }
                 WorkEvent::WorkerStale { repo, pr_num } => {
                     eprintln!("sipag: worker stale for PR #{pr_num} in {repo}");
-                    failure::handle_stale(&repo, pr_num, &ctx)?;
+                    if let Err(e) = failure::handle_stale(&repo, pr_num, &ctx) {
+                        eprintln!("sipag: handle_stale error for PR #{pr_num} in {repo}: {e:#}");
+                    }
                 }
                 WorkEvent::WorkerStarted { repo, pr_num } => {
                     eprintln!("sipag: worker started for PR #{pr_num} in {repo}");
                 }
                 WorkEvent::GithubPoll => {
                     eprintln!("sipag: GitHub poll tick");
-                    poll::run_poll(&ctx)?;
+                    if let Err(e) = poll::run_poll(&ctx) {
+                        eprintln!("sipag: poll error: {e:#}");
+                    }
                 }
                 WorkEvent::Shutdown => {
                     eprintln!("sipag: shutdown requested");
@@ -113,7 +122,9 @@ pub fn run(mut session: SessionState, ctx: OrchestratorContext) -> Result<()> {
         }
 
         if completed_count >= RETRO_TRIGGER_COUNT {
-            retro::run_retro(&ctx)?;
+            if let Err(e) = retro::run_retro(&ctx) {
+                eprintln!("sipag: retro error: {e:#}");
+            }
             completed_count = 0;
         }
     }

@@ -138,8 +138,11 @@ pub fn dispatch_worker(
     }
     cmd.env("GH_TOKEN", &creds.gh_token);
 
-    // Spawn the container.
-    let _child = cmd.spawn().context("Failed to spawn Docker container")?;
+    // Spawn the container and reap it in a background thread to prevent zombies.
+    let mut child = cmd.spawn().context("Failed to spawn Docker container")?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     println!("[PR #{pr_num}] Worker dispatched: {container_name}");
 

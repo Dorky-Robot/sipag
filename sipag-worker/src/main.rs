@@ -126,42 +126,33 @@ fn run() -> Result<i32> {
     // Phase: starting (state file already created by host dispatch).
     update_phase(&state_path, WorkerPhase::Starting)?;
 
-    // Clone the repo and check out the PR branch.
+    // Clone the repo using a credential file so the token never appears in
+    // process args (visible in `ps aux`, /proc/PID/cmdline).
     let gh_token = env::var("GH_TOKEN").unwrap_or_default();
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open("/tmp/.git-credentials")
+            .context("failed to create /tmp/.git-credentials")?;
+        writeln!(f, "https://x-access-token:{gh_token}@github.com")
+            .context("failed to write git credentials")?;
+    }
     run_cmd(
         "git",
         &[
-            "clone",
-            &format!("https://x-access-token:{gh_token}@github.com/{repo}.git"),
-            "/work",
-        ],
-    )?;
-    // Scrub the token from the stored remote URL so it's not visible in
-    // `git remote -v`, /proc/PID/cmdline, or Claude's output.
-    run_cmd(
-        "git",
-        &[
-            "-C",
-            "/work",
-            "remote",
-            "set-url",
-            "origin",
-            &format!("https://github.com/{repo}.git"),
-        ],
-    )?;
-    // Configure credential helper so push still works without the token in the URL.
-    let credential_helper = format!(
-        "!f() {{ echo \"protocol=https\nhost=github.com\nusername=x-access-token\npassword={gh_token}\"; }}; f"
-    );
-    run_cmd(
-        "git",
-        &[
-            "-C",
-            "/work",
             "config",
+            "--global",
             "credential.helper",
-            &credential_helper,
+            "store --file /tmp/.git-credentials",
         ],
+    )?;
+    run_cmd(
+        "git",
+        &["clone", &format!("https://github.com/{repo}.git"), "/work"],
     )?;
     run_cmd("git", &["-C", "/work", "config", "user.name", "sipag"])?;
     run_cmd(

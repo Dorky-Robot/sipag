@@ -1,6 +1,6 @@
 //! GitHub operations via the `gh` CLI.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::process::{Command, Stdio};
 
 /// List open issues with the given label, sorted by number ascending.
@@ -23,7 +23,8 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
         .context("Failed to run gh issue list")?;
 
     if !output.status.success() {
-        return Ok(vec![]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh issue list failed for {repo}: {stderr}");
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
@@ -45,20 +46,23 @@ pub fn list_labeled_issues(repo: &str, label: &str) -> Result<Vec<u64>> {
 }
 
 /// Count open PRs created by sipag (labeled `sipag`).
-pub fn count_open_sipag_prs(repo: &str) -> Option<usize> {
+pub fn count_open_sipag_prs(repo: &str) -> Result<usize> {
     let output = Command::new("gh")
         .args([
             "pr", "list", "--repo", repo, "--state", "open", "--label", "sipag", "--json",
             "number", "--jq", "length",
         ])
         .output()
-        .ok()?;
+        .context("failed to run gh pr list")?;
 
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh pr list failed for {repo}: {stderr}");
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    text.trim().parse::<usize>().ok()
+    text.trim()
+        .parse::<usize>()
+        .context("failed to parse sipag PR count")
 }
 
 /// Ensure the `sipag` label exists on a repo (idempotent).
@@ -388,18 +392,46 @@ pub fn label_issues(
         let n = num.to_string();
 
         if let Some(label) = remove_label {
-            let _ = Command::new("gh")
+            match Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--remove-label", label])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(o) if !o.status.success() => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "sipag warning: failed to remove label '{label}' from issue #{num} on {repo}: {stderr}"
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "sipag warning: failed to remove label '{label}' from issue #{num} on {repo}: {e}"
+                    );
+                }
+                _ => {}
+            }
         }
         if let Some(label) = add_label {
-            let _ = Command::new("gh")
+            match Command::new("gh")
                 .args(["issue", "edit", &n, "--repo", repo, "--add-label", label])
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(o) if !o.status.success() => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    eprintln!(
+                        "sipag warning: failed to add label '{label}' to issue #{num} on {repo}: {stderr}"
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "sipag warning: failed to add label '{label}' to issue #{num} on {repo}: {e}"
+                    );
+                }
+                _ => {}
+            }
         }
     }
     Ok(())

@@ -16,7 +16,16 @@ pub fn run_poll(ctx: &OrchestratorContext) -> Result<()> {
         eprintln!("sipag: polling {}", repo.full_name);
 
         // 1. Check back-pressure.
-        let open_sipag_count = github::count_open_sipag_prs(&repo.full_name).unwrap_or(0);
+        let open_sipag_count = match github::count_open_sipag_prs(&repo.full_name) {
+            Ok(count) => count,
+            Err(e) => {
+                eprintln!(
+                    "sipag: failed to count open PRs for {}, skipping (fail closed): {e:#}",
+                    repo.full_name
+                );
+                continue;
+            }
+        };
         if ctx.cfg.max_open_prs > 0 && open_sipag_count >= ctx.cfg.max_open_prs {
             eprintln!(
                 "sipag: back-pressure for {} ({} open PRs, max {})",
@@ -26,8 +35,16 @@ pub fn run_poll(ctx: &OrchestratorContext) -> Result<()> {
         }
 
         // 2. Fetch ready issues.
-        let ready_issues =
-            github::list_labeled_issues(&repo.full_name, &ctx.cfg.work_label).unwrap_or_default();
+        let ready_issues = match github::list_labeled_issues(&repo.full_name, &ctx.cfg.work_label) {
+            Ok(issues) => issues,
+            Err(e) => {
+                eprintln!(
+                    "sipag: failed to list issues for {}, skipping (fail closed): {e:#}",
+                    repo.full_name
+                );
+                continue;
+            }
+        };
 
         if ready_issues.is_empty() {
             eprintln!("sipag: no ready issues for {}", repo.full_name);
