@@ -286,6 +286,66 @@ fn logs_falls_back_to_log_file() {
         .stdout(predicate::str::contains("Worker output line 1"));
 }
 
+// ── Init ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn init_static_creates_all_templates() {
+    let dir = TempDir::new().unwrap();
+    // Create a .git dir so the warning doesn't fire.
+    fs::create_dir(dir.path().join(".git")).unwrap();
+
+    sipag()
+        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed"));
+
+    let claude_dir = dir.path().join(".claude");
+    // Agents
+    assert!(claude_dir.join("agents/security-reviewer.md").exists());
+    assert!(claude_dir.join("agents/architecture-reviewer.md").exists());
+    assert!(claude_dir.join("agents/correctness-reviewer.md").exists());
+    // Commands
+    assert!(claude_dir.join("commands/dispatch.md").exists());
+    assert!(claude_dir.join("commands/review.md").exists());
+    assert!(claude_dir.join("commands/triage.md").exists());
+    // Hooks
+    assert!(claude_dir.join("hooks/safety-gate.sh").exists());
+    assert!(claude_dir.join("hooks/safety-gate.toml").exists());
+    assert!(claude_dir.join("hooks/README.md").exists());
+    // Settings
+    assert!(claude_dir.join("settings.local.json").exists());
+}
+
+#[test]
+fn init_static_skips_existing_without_force() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+
+    // First run — creates files.
+    sipag()
+        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Second run — skips existing.
+    sipag()
+        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skip:"))
+        .stdout(predicate::str::contains("Skipped"));
+}
+
+#[test]
+fn init_help_shows_static_flag() {
+    sipag()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--static"));
+}
+
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
 #[test]

@@ -13,6 +13,27 @@ struct TemplateFile {
     executable: bool,
 }
 
+/// Infrastructure files that are project-agnostic and installed unconditionally
+/// (both static and generative paths).
+const INFRA_TEMPLATES: &[TemplateFile] = &[
+    TemplateFile {
+        relative_path: "hooks/safety-gate.sh",
+        content: templates::HOOK_SAFETY_GATE_SH,
+        executable: true,
+    },
+    TemplateFile {
+        relative_path: "hooks/README.md",
+        content: templates::HOOK_README,
+        executable: false,
+    },
+    TemplateFile {
+        relative_path: "settings.local.json",
+        content: templates::SETTINGS_LOCAL_JSON,
+        executable: false,
+    },
+];
+
+/// All templates (infrastructure + project-specific) for the --static path.
 const TEMPLATES: &[TemplateFile] = &[
     TemplateFile {
         relative_path: "agents/security-reviewer.md",
@@ -111,7 +132,9 @@ pub fn run_init(dir: &Path, force: bool, static_only: bool) -> Result<()> {
         return install_static_templates(&claude_dir, force);
     }
 
-    // Generative: launch Claude to explore project and write customized files.
+    // Generative: install infrastructure files first (project-agnostic), then
+    // launch Claude to explore the project and write customized agents/commands.
+    install_templates(&claude_dir, INFRA_TEMPLATES, force)?;
     let prompt = build_init_prompt(force);
     eprintln!("Launching Claude to set up agents and commands for this project...\n");
     exec_claude(&dir, &prompt)
@@ -127,7 +150,9 @@ fn claude_available() -> bool {
         .unwrap_or(false)
 }
 
-fn build_init_prompt(force: bool) -> String {
+/// Build the system prompt for the generative init session.
+/// Replaces placeholder tokens in the init template with reference template content.
+pub(crate) fn build_init_prompt(force: bool) -> String {
     let force_instruction = if force {
         "Overwrite any existing files in .claude/."
     } else {
@@ -166,37 +191,7 @@ fn exec_claude(project_dir: &Path, prompt: &str) -> Result<()> {
 }
 
 fn install_static_templates(claude_dir: &Path, force: bool) -> Result<()> {
-    let mut installed = 0u32;
-    let mut skipped = 0u32;
-
-    for template in TEMPLATES {
-        let dest = claude_dir.join(template.relative_path);
-
-        if dest.exists() && !force {
-            println!(
-                "  skip: .claude/{} (already exists)",
-                template.relative_path
-            );
-            skipped += 1;
-            continue;
-        }
-
-        fs::write(&dest, template.content)?;
-
-        if template.executable {
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-        }
-
-        let action = if force && dest.exists() {
-            "overwrite"
-        } else {
-            "create"
-        };
-        println!("  {action}: .claude/{}", template.relative_path);
-        installed += 1;
-    }
+    let (installed, skipped) = install_templates(claude_dir, TEMPLATES, force)?;
 
     // Categorize for summary.
     let agents = TEMPLATES
@@ -220,4 +215,85 @@ fn install_static_templates(claude_dir: &Path, force: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn install_templates(
+    claude_dir: &Path,
+    templates: &[TemplateFile],
+    force: bool,
+) -> Result<(u32, u32)> {
+    let mut installed = 0u32;
+    let mut skipped = 0u32;
+
+    for template in templates {
+        let dest = claude_dir.join(template.relative_path);
+
+        if dest.exists() && !force {
+            println!(
+                "  skip: .claude/{} (already exists)",
+                template.relative_path
+            );
+            skipped += 1;
+            continue;
+        }
+
+        let action = if dest.exists() { "overwrite" } else { "create" };
+
+        fs::write(&dest, template.content)?;
+
+        if template.executable {
+            let mut perms = fs::metadata(&dest)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms)?;
+        }
+
+        println!("  {action}: .claude/{}", template.relative_path);
+        installed += 1;
+    }
+
+    Ok((installed, skipped))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_init_prompt_replaces_all_placeholders() {
+        let prompt = build_init_prompt(false);
+        assert!(
+            !prompt.contains("{AGENT_"),
+            "prompt should not contain unreplaced {{AGENT_*}} placeholders"
+        );
+        assert!(
+            !prompt.contains("{COMMAND_"),
+            "prompt should not contain unreplaced {{COMMAND_*}} placeholders"
+        );
+        assert!(
+            !prompt.contains("{HOOK_"),
+            "prompt should not contain unreplaced {{HOOK_*}} placeholders"
+        );
+        assert!(
+            !prompt.contains("{FORCE_INSTRUCTION}"),
+            "prompt should not contain unreplaced {{FORCE_INSTRUCTION}}"
+        );
+    }
+
+    #[test]
+    fn build_init_prompt_force_instruction() {
+        let prompt_no_force = build_init_prompt(false);
+        assert!(prompt_no_force.contains("ask before overwriting"));
+
+        let prompt_force = build_init_prompt(true);
+        assert!(prompt_force.contains("Overwrite any existing files"));
+    }
+
+    #[test]
+    fn build_init_prompt_contains_template_content() {
+        let prompt = build_init_prompt(false);
+        // Should contain content from at least one reference template.
+        assert!(prompt.contains("security"));
+        assert!(prompt.contains("architecture"));
+        assert!(prompt.contains("correctness"));
+    }
 }
