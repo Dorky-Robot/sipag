@@ -4,177 +4,98 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Conversational agile for Claude Code. You talk; workers ship PRs.*
+*Template installer and sandbox launcher for Claude Code.*
 
 </div>
 
 ## What is sipag?
 
-sipag turns your Claude Code session into a product team. You open a conversation, type `sipag start <repo>`, and Claude reads your GitHub board — issues, PRs, labels — and starts working with you on priorities. When work is approved, Claude spins up Docker workers that build PRs autonomously. You make the calls; Claude and the workers do the work.
+sipag does three things:
 
-The two commands you type as a human:
+1. **`sipag init`** — Install review agents, custom commands, and safety hooks into any project's `.claude/` directory
+2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
+3. **`sipag tui`** — Dashboard for all Docker workers across the host
 
-- **`sipag start <repo>`** — begin a sipag session inside Claude Code
-- **`sipag merge <repo>`** — begin a merge review conversation
-
-Everything else (`sipag work`, `sipag run`, `sipag next`) is Claude's domain.
+sipag is pure infrastructure — containers, state files, lifecycle tracking, templates. Claude Code provides the intelligence.
 
 ## Quick start
 
-1. Install sipag and run the setup wizard:
+1. Install sipag:
 
    ```bash
-   sipag setup
+   brew tap Dorky-Robot/sipag
+   brew install sipag
    ```
 
-2. Start a Claude Code session and kick off sipag:
+2. Install review agents and safety hooks into your project:
 
    ```bash
-   claude
+   cd ~/Projects/my-app
+   sipag init
    ```
 
-   Then inside Claude Code, type:
+3. Create a branch and PR on GitHub describing what needs to happen.
 
-   ```
-   sipag start Dorky-Robot/my-project
-   ```
+4. Dispatch a Docker worker to implement the PR:
 
-3. Have a conversation. Claude reads the board, asks product questions, and handles triaging issues, refining specs, spinning up workers, and reviewing PRs. You make the decisions, Claude does the work.
-
-4. When PRs are ready to merge:
-
-   ```
-   sipag merge Dorky-Robot/my-project
+   ```bash
+   sipag dispatch --repo owner/my-app --pr 42
    ```
 
-   Claude walks through open PRs with you, you decide what ships.
+5. Monitor workers:
+
+   ```bash
+   sipag tui
+   ```
 
 ## How it works
 
 ```
-you type: sipag start <repo>
+sipag init                    Install agents + hooks into .claude/
           ↓
-Claude reads GitHub board (issues, PRs, labels)
+create branch + PR            Describe the work in the PR body
           ↓
-conversation: priorities, triage, refinement
+sipag dispatch --repo --pr    Launch a Docker worker
           ↓
-Claude creates/approves issues via gh
+Docker container              clone → read PR body → claude → push → done
           ↓
-Claude runs: sipag work <repo>  (in background)
+sipag tui / sipag ps          Monitor progress
           ↓
-Docker workers → clone → claude --dangerously-skip-permissions → PR
-          ↓
-you type: sipag merge <repo>
-          ↓
-conversation: review, decide, merge
+review + merge                You decide what ships
 ```
 
-### What `sipag start` does
+### sipag init
 
-`sipag start <repo>` dumps the current GitHub board state to stdout — open issues, open PRs, labels, recent activity. This primes Claude Code with full context so it can immediately engage on product questions: what's approved, what needs refinement, what's blocked, what should ship next.
+Installs five review agents, two custom commands, and a safety hook into `.claude/`:
 
-Claude then adapts the conversation to what the board needs. If there's a backlog of approved issues, it starts workers. If issues need specs, it asks you product questions and opens refined issues. If PRs are stacking up, it suggests a merge session.
+| Category | Files |
+|----------|-------|
+| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `backlog-triager`, `issue-analyst` |
+| Commands | `dispatch`, `review` |
+| Hooks | `safety-gate.sh` + `safety-gate.toml` + `settings.local.json` |
 
-### What workers do
+These are templates — once installed, they're part of your project and can be customized.
 
-When Claude decides work is ready, it runs `sipag work <repo>` in the background. Workers:
+### sipag dispatch
 
-1. Poll GitHub for issues labeled `approved`
-2. Spin up an isolated Docker container per issue
-3. Clone the repo, inject credentials
-4. Run `claude --dangerously-skip-permissions` — Claude plans, codes, tests, commits, pushes, opens a PR
-5. Label the issue `in-progress`; on failure return it to `approved`
+Launches an isolated Docker container that:
+
+1. Clones the repo and checks out the PR branch
+2. Reads the PR body as its complete assignment
+3. Reads lessons from past failures for this repo
+4. Runs `claude --dangerously-skip-permissions` to implement the work
+5. Pushes commits to the PR branch
+6. Writes state and lifecycle events to `~/.sipag/`
 
 The container is the safety boundary. Workers have full autonomy inside it.
 
-## Lifecycle hooks
+### sipag tui
 
-sipag emits events at key worker milestones via hook scripts — the same pattern as git hooks. External tools subscribe by dropping executable scripts into `~/.sipag/hooks/`.
+Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI:
 
-sipag itself has no notification logic. It emits events; you decide what to do with them.
-
-```
-sipag (orchestrate) → lifecycle hook → tao (email)
-sipag (orchestrate) → lifecycle hook → slack-notify (Slack)
-sipag (orchestrate) → lifecycle hook → osascript (desktop)
-sipag (orchestrate) → lifecycle hook → your-custom-thing
-```
-
-### Hook scripts
-
-Place executable files in `~/.sipag/hooks/` named after the event:
-
-| Hook | When it fires |
-|---|---|
-| `on-worker-started` | Worker picked up an issue |
-| `on-worker-completed` | Worker finished, PR opened |
-| `on-worker-failed` | Worker exited non-zero |
-| `on-pr-iteration-started` | Worker iterating on PR feedback |
-| `on-pr-iteration-done` | PR iteration complete |
-
-Hooks run asynchronously — they never block the worker. Missing or non-executable hooks are silently skipped.
-
-### Event data
-
-Passed as environment variables:
-
-**on-worker-started**
-```
-SIPAG_EVENT=worker.started
-SIPAG_REPO=Dorky-Robot/sipag
-SIPAG_ISSUE=42
-SIPAG_ISSUE_TITLE="Fix auth middleware"
-SIPAG_TASK_ID=20260220-fix-auth-middleware
-```
-
-**on-worker-completed**
-```
-SIPAG_EVENT=worker.completed
-SIPAG_REPO=Dorky-Robot/sipag
-SIPAG_ISSUE=42
-SIPAG_ISSUE_TITLE="Fix auth middleware"
-SIPAG_PR_NUM=47
-SIPAG_PR_URL=https://github.com/Dorky-Robot/sipag/pull/47
-SIPAG_DURATION=503
-SIPAG_TASK_ID=20260220-fix-auth-middleware
-```
-
-**on-worker-failed**
-```
-SIPAG_EVENT=worker.failed
-SIPAG_REPO=Dorky-Robot/sipag
-SIPAG_ISSUE=42
-SIPAG_ISSUE_TITLE="Fix auth middleware"
-SIPAG_EXIT_CODE=1
-SIPAG_LOG_PATH=/tmp/sipag-backlog/issue-42.log
-SIPAG_TASK_ID=20260220-fix-auth-middleware
-```
-
-### Example hooks
-
-**Desktop notification (macOS)**
-```bash
-#!/usr/bin/env bash
-# ~/.sipag/hooks/on-worker-completed
-osascript -e "display notification \"PR opened for #${SIPAG_ISSUE}\" with title \"sipag\""
-```
-
-**Log to file**
-```bash
-#!/usr/bin/env bash
-# ~/.sipag/hooks/on-worker-completed
-echo "$(date) ${SIPAG_EVENT} ${SIPAG_REPO}#${SIPAG_ISSUE} ${SIPAG_PR_URL}" >> ~/.sipag/events.log
-```
-
-**Email via tao**
-```bash
-#!/usr/bin/env bash
-# ~/.sipag/hooks/on-worker-completed
-echo "PR ${SIPAG_PR_URL} opened for #${SIPAG_ISSUE} in ${SIPAG_REPO}" \
-    | tao notify developer felix@example.com --detach
-```
-
-`sipag setup` creates `~/.sipag/hooks/` for you.
+- Scrollable task list across all states (starting, working, finished, failed)
+- Color-coded by status: yellow=starting, cyan=working, green=finished, red=failed
+- Keyboard navigation: `↑`/`k` up, `↓`/`j` down, `Enter` detail view, `a` attach, `q` quit
 
 ## Installation
 
@@ -186,12 +107,6 @@ brew install sipag
 ```
 
 This installs the pre-built binary — no Rust toolchain required.
-
-To also use the bash helper commands (`sipag start`, `sipag work`, `sipag merge`, `sipag setup`), add to your shell profile:
-
-```bash
-export PATH="$(brew --prefix sipag)/libexec/bin:$PATH"
-```
 
 ### One-line install (macOS and Linux)
 
@@ -222,141 +137,45 @@ make build
 # Binary at: target/release/sipag
 ```
 
-## TUI
+## Configuration
 
-Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI to observe worker activity:
+Create `~/.sipag/config` to override defaults (key=value format):
 
-- Scrollable task list across all states (queue, running, done, failed)
-- Color-coded by status: yellow=queued, cyan=running, green=done, red=failed
-- Keyboard navigation: `↑`/`k` up, `↓`/`j` down, `r` refresh, `q`/`Esc` quit
+| Key | Default | Description |
+|-----|---------|-------------|
+| `image` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker image for workers |
+| `timeout` | `7200` | Worker timeout in seconds (2 hours) |
+| `work_label` | `ready` | Issue label that marks work ready for dispatch |
+| `max_open_prs` | `3` | Max active workers before dispatch is paused |
+| `poll_interval` | `120` | Seconds between polling cycles |
+| `heartbeat_interval` | `30` | Seconds between heartbeat writes |
+| `heartbeat_stale` | `90` | Seconds before a heartbeat is considered stale |
+
+Environment variable overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`, `SIPAG_HEARTBEAT_INTERVAL`, `SIPAG_HEARTBEAT_STALE`.
 
 ## File layout
 
 ```
 ~/.sipag/
-  queue/                     # pending items
-    001-password-reset.md
-  running/                   # currently executing (tracking files + logs)
-    20240101120000-fix-bug.md
-    20240101120000-fix-bug.log
-  done/                      # completed
-    20240101120000-fix-bug.md
-    20240101120000-fix-bug.log
-  failed/                    # needs attention
-  repos.conf                 # registered repos (name → URL)
+├── config          # Optional key=value config
+├── workers/        # PR-keyed state JSON files + heartbeat files
+├── events/         # Append-only lifecycle events
+├── logs/           # Worker stdout/stderr
+└── lessons/        # Per-repo learning from failures
 ```
 
-Tracking files use YAML frontmatter:
-
-```yaml
----
-repo: https://github.com/org/repo
-issue: 21
-started: 2024-01-01T12:00:00Z
-container: sipag-20240101120000-fix-bug
-ended: 2024-01-01T13:15:00Z
----
-Simplify sipag to sandbox launcher
-```
-
-## Configuration
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `SIPAG_DIR` | `~/.sipag` | Data directory |
-| `SIPAG_IMAGE` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker base image |
-| `SIPAG_TIMEOUT` | `1800` | Per-container timeout (seconds) |
-| `SIPAG_MODEL` | _(claude default)_ | Model override |
-| `ANTHROPIC_API_KEY` | _(required)_ | Passed into container |
-| `GH_TOKEN` | _(required)_ | Passed into container |
-
-## Customizing behavior with CLAUDE.md
-
-Repos can control how Claude behaves inside the sandbox by adding a `CLAUDE.md` file. Claude Code reads it automatically when it starts in the repo directory.
-
-Common uses:
-
-- **Coding conventions** — preferred style, naming rules, patterns to avoid
-- **Test commands** — how to run tests for this repo (e.g. `make test`, `pytest`, `npm test`)
-- **Architecture notes** — module layout, important constraints, areas to avoid touching
-- **Commit message format** — conventional commits, ticket prefixes, etc.
-
-**Where to put it:**
+## CLI reference
 
 ```
-CLAUDE.md            # repo root (most common)
-.claude/CLAUDE.md    # alternative location Claude also reads
-```
-
-sipag's executor prompt explicitly instructs Claude to read and follow `CLAUDE.md` before writing any code. No configuration is needed — just add the file to your repo.
-
-### What to include in your CLAUDE.md
-
-A good `CLAUDE.md` for a sipag-managed repo answers four questions for Claude before it reads a single line of code:
-
-| Section | What to write |
-|---|---|
-| **Project** | One paragraph: what the repo does and who uses it |
-| **Priorities** | What matters right now — stability, a specific feature area, a migration in progress |
-| **Architecture** | Tech stack, key modules, patterns Claude must follow or avoid |
-| **Testing** | Exact commands to run tests; what "passing" looks like |
-
-Keep it short. Claude reads CLAUDE.md before writing code, so dense prose slows it down. Bullet points and short paragraphs work best.
-
-### Example CLAUDE.md for a sipag-managed repo
-
-```markdown
-## Project
-dorky_robot is a personal mesh network for self-hosted services.
-Rust/Axum backend, HTMX frontend, SQLite database. Passkey auth, no passwords.
-
-## Priorities
-Stability > features. Hardening auth before adding new mesh capabilities.
-Do not change the passkey flow without a green test suite first.
-
-## Architecture
-- src/auth/     — passkey registration and assertion
-- src/api/      — Axum route handlers (thin — business logic lives in src/domain/)
-- src/domain/   — pure Rust, no async, no framework dependencies
-- migrations/   — SQLite migrations via sqlx (never edit existing migrations)
-
-## Testing
-cargo test                   # unit + integration
-npx playwright test          # E2E (requires running dev server)
-make ci                      # full suite used in CI
-
-All tests must pass before opening a PR. If a test is flaky, note it in the PR body.
-```
-
-### Labels and conventions
-
-sipag workers only pick up issues labeled **`approved`**. Add any project-specific label conventions to CLAUDE.md so Claude can apply them correctly when opening PRs:
-
-```markdown
-## Labels
-- `approved` — ready for a sipag worker to implement
-- `needs-spec` — issue needs more detail before approval
-- `blocked` — waiting on external dependency
-```
-
-## Project structure
-
-```
-sipag-core/    # Library: task parsing, repo registry, Docker executor
-sipag/         # Binary: CLI (clap) + TUI (ratatui)
-extras/        # safety-gate.sh: PreToolUse hook for Claude Code
-```
-
-## Development
-
-```bash
-# Requirements: Rust toolchain (rustup)
-cargo build          # debug build
-make build           # release build
-make test            # cargo test
-make lint            # cargo clippy -D warnings
-make fmt             # cargo fmt
-make dev             # lint + fmt-check + test
+sipag init [dir] [--force]              Install agents, commands, and hooks into .claude/
+sipag dispatch --repo <owner/repo> --pr <N>
+                                        Launch a Docker worker for a PR
+sipag ps [--all]                        List active and recent workers
+sipag logs <id>                         Show logs for a worker (PR number or container name)
+sipag kill <id>                         Kill a running worker
+sipag tui                               Launch interactive TUI (same as no args)
+sipag doctor                            Check system prerequisites
+sipag version                           Print version
 ```
 
 ## Part of the dorky robot stack
@@ -371,55 +190,18 @@ tao (decide)  ─────┘
 - [tao](https://github.com/Dorky-Robot/tao) — decision ledger, surfaces suspended actions
 - **sipag** — autonomous executor, turns backlog into PRs
 
+## Development
+
+```bash
+# Requirements: Rust toolchain (rustup)
+cargo build          # debug build
+make build           # release build
+make test            # cargo test
+make lint            # cargo clippy -D warnings
+make fmt             # cargo fmt
+make dev             # lint + fmt-check + test
+```
+
 ## Status
 
-sipag v2 is in active development. See [VISION.md](VISION.md) for the full product vision.
-
----
-
-## Appendix: Full CLI reference
-
-Most of these commands are invoked by Claude, not the human directly.
-
-### Human-facing
-
-```
-sipag start <owner/repo>      Prime a Claude Code session with board state
-sipag merge <owner/repo>      Start a merge review conversation
-sipag setup                   Run the interactive setup wizard
-sipag tui                     Launch interactive TUI (same as no args)
-sipag version                 Print version
-sipag help                    Show help
-```
-
-### Worker commands (Claude's domain)
-
-```
-sipag work <owner/repo>       Poll GitHub for approved issues, spin up Docker workers
-sipag run --repo <url> [--issue <n>] [-b] "<task>"
-                              Launch a Docker sandbox for a task
-sipag ps                      List running and recent tasks with status
-sipag logs <id>               Print the log for a task
-sipag kill <id>               Kill a running container, move task to failed/
-```
-
-### Queue commands (Claude's domain)
-
-```
-sipag add <title> --repo <name> [--priority <level>]
-                              Add a task to queue/
-sipag status                  Show queue state across all directories
-sipag show <name>             Print task file and log
-sipag retry <name>            Re-queue a failed task
-sipag repo add <name> <url>   Register a repo name → URL mapping
-sipag repo list               List registered repos
-sipag init                    Create ~/.sipag/{queue,running,done,failed}
-```
-
-### Legacy checklist commands
-
-```
-sipag next [-c] [-n] [-f]     Run claude on the next pending checklist task
-sipag list [-f <file>]        List tasks from a markdown checklist file
-sipag add "<title>"           Append task to ./tasks.md (no --repo)
-```
+sipag is in active development. See [VISION.md](VISION.md) for the full product vision.

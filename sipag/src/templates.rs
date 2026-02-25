@@ -14,6 +14,7 @@ pub const AGENT_ISSUE_ANALYST: &str = include_str!("../../lib/templates/agents/i
 // Commands
 pub const COMMAND_DISPATCH: &str = include_str!("../../lib/templates/commands/dispatch.md");
 pub const COMMAND_REVIEW: &str = include_str!("../../lib/templates/commands/review.md");
+pub const COMMAND_TRIAGE: &str = include_str!("../../lib/templates/commands/triage.md");
 
 // Hooks
 pub const HOOK_SAFETY_GATE_SH: &str = include_str!("../../lib/templates/hooks/safety-gate.sh");
