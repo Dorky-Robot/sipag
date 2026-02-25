@@ -89,15 +89,15 @@ External consumers (tao, Slack hooks, monitoring scripts) watch this directory. 
 
 State files (`*.json`) remain the authoritative source of truth. Heartbeats and events are supplementary signals. If events are missed (e.g., filesystem watcher lag), the state files tell you exactly what happened.
 
-## Why sipag doesn't shell out to `claude`
+## Why sipag dispatch is one-shot
 
-sipag runs inside a Claude Code session (`sipag work` is typically invoked by Claude Code itself). Shelling out to `claude --print` from within a Claude Code session causes nesting errors. More fundamentally, analysis belongs in the prompt — it's Claude Code's job, not sipag's.
+`sipag dispatch` is a one-shot command, not a long-running session. It launches a Docker container and exits. The container runs independently — writing heartbeats, state files, and events to `~/.sipag/` — while the host reads those files to display status.
 
-The worker prompt carries the full analysis procedure. Claude Code follows it because the instructions are explicit, step-by-step, and structured with clear outputs expected at each stage.
+This means sipag never needs to shell out to `claude`. Analysis belongs in the prompt (the PR body + worker disposition from `worker.md`), not in sipag's Rust code. The worker prompt carries the full procedure. Claude Code follows it because the instructions are explicit, step-by-step, and structured with clear outputs expected at each stage.
 
 ## Sub-agents
 
-The `.claude/agents/` directory contains specialized agents for the **host** Claude Code session (the one running `sipag work`):
+The `.claude/agents/` directory contains specialized review agents installed by `sipag init`. They're usable in any project via Claude Code's Task tool:
 
 | Agent | Purpose |
 |-------|---------|
@@ -107,7 +107,7 @@ The `.claude/agents/` directory contains specialized agents for the **host** Cla
 | `security-reviewer` | STRIDE threat modeling, OWASP checks, token handling |
 | `correctness-reviewer` | Worker lifecycle edge cases, race conditions, state machine transitions |
 
-These agents are **advisory** — they guide analysis but don't make changes. The host session invokes them via Claude Code's Task tool when it needs structured analysis.
+These agents are **advisory** — they guide analysis but don't make changes. Claude Code invokes them via the Task tool when it needs structured analysis.
 
 ## Data flow
 

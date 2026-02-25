@@ -37,6 +37,10 @@ pub enum Commands {
         /// Overwrite existing files
         #[arg(long, default_value_t = false)]
         force: bool,
+
+        /// Install generic templates without launching Claude
+        #[arg(long, default_value_t = false)]
+        r#static: bool,
     },
 
     /// Dispatch a Docker worker for a PR
@@ -82,7 +86,11 @@ pub enum Commands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
-        Some(Commands::Init { dir, force }) => init_project::run_init(&dir, force),
+        Some(Commands::Init {
+            dir,
+            force,
+            r#static: static_only,
+        }) => init_project::run_init(&dir, force, static_only),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
         Some(Commands::Ps { all }) => run_ps(all),

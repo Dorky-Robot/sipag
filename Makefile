@@ -64,33 +64,27 @@ install-hooks:
 
 # ── Review agents ─────────────────────────────────────────────────────────────
 # Invoke specialized Claude Code review agents from .claude/agents/.
-# Run these in a `sipag start` session or directly with `claude --print`.
+# Install agents first with `sipag init`, then use in a Claude Code session.
 review:
-	@echo "sipag review agents:"
+	@echo "sipag review agents (install with: sipag init):"
 	@echo ""
 	@echo "  make review-security      STRIDE + OWASP + Docker security"
 	@echo "  make review-architecture  Crate boundaries + bash modules + config"
 	@echo "  make review-correctness   Lifecycle edges + races + API error handling"
 	@echo ""
-	@echo "To review a PR in a sipag start session:"
+	@echo "In a Claude Code session, ask:"
 	@echo "  Review PR #<N> using the security reviewer"
 	@echo "  Review PR #<N> using the architecture reviewer"
 	@echo "  Review PR #<N> using the correctness reviewer"
-	@echo ""
-	@echo "Or invoke directly (pipe a diff):"
-	@echo "  gh pr diff <N> | claude --print -p 'Review this diff' --agent security-reviewer"
 
 review-security:
-	@echo "Running security reviewer..."
-	@echo "Provide a PR number or diff to review:"
-	@echo "  gh pr diff <N> | claude --print --agent security-reviewer -p 'Review this diff for security issues'"
+	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "  Review the latest changes using the security reviewer"
 
 review-architecture:
-	@echo "Running architecture reviewer..."
-	@echo "Provide a PR number or diff to review:"
-	@echo "  gh pr diff <N> | claude --print --agent architecture-reviewer -p 'Review this diff for architecture issues'"
+	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "  Review the latest changes using the architecture reviewer"
 
 review-correctness:
-	@echo "Running correctness reviewer..."
-	@echo "Provide a PR number or diff to review:"
-	@echo "  gh pr diff <N> | claude --print --agent correctness-reviewer -p 'Review this diff for correctness issues'"
+	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "  Review the latest changes using the correctness reviewer"
