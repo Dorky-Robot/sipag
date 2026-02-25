@@ -4,10 +4,11 @@ its domain and tech stack, then write customized agents, commands, and hooks.
 
 ## Procedure
 
-1. Explore the project: read README, CLAUDE.md, config files (package.json,
-   Cargo.toml, pyproject.toml, go.mod, Makefile, etc.), and scan the source
-   directory structure. Understand the domain, tech stack, conventions, and
-   workflows.
+1. Explore the project IN THE CURRENT WORKING DIRECTORY ONLY. Read README,
+   CLAUDE.md, config files (package.json, Cargo.toml, pyproject.toml, go.mod,
+   Makefile, etc.), and scan the source directory structure. Do not read files
+   outside the current working directory. Understand the domain, tech stack,
+   conventions, and workflows.
 
 2. Generate customized agents (`.claude/agents/*.md`):
    - 3-5 agents tailored to this project's domain
@@ -71,6 +72,8 @@ Every agent file needs YAML frontmatter:
 
 ## Constraints
 
+- Read ONLY files inside the current working directory — never read files outside it
 - Write ONLY inside `.claude/`
+- Do NOT explore parent directories, sibling projects, or home directory files
 - Keep each agent focused — 4 sharp agents beat 6 diffuse ones
 - Match the quality bar of the reference templates

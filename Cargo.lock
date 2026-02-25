@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "sipag"
-version = "3.0.0"
+version = "3.0.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "sipag-core"
-version = "3.0.0"
+version = "3.0.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1429,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "sipag-tui"
-version = "3.0.0"
+version = "3.0.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "sipag-worker"
-version = "3.0.0"
+version = "3.0.2"
 dependencies = [
  "anyhow",
  "chrono",

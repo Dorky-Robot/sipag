@@ -18,10 +18,14 @@ const GIT_HASH: &str = env!("CARGO_GIT_SHA");
 #[command(
     name = "sipag",
     version,
+    disable_version_flag = true,
     about = "Sandbox launcher for Claude Code",
     long_about = "sipag spins up isolated Docker sandboxes for PR implementation.\n\nRun with no arguments to launch the interactive TUI."
 )]
 pub struct Cli {
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

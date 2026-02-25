@@ -1,6 +1,6 @@
 [package]
 name = "sipag-worker"
-version = "3.0.0"
+version = "3.0.2"
 edition = "2021"
 description = "Container-side worker binary for sipag — replaces worker.sh"
 
