@@ -1,3 +1,6 @@
 [workspace]
 members = ["sipag-core", "sipag", "tui", "sipag-worker"]
 resolver = "2"
+
+[workspace.dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
