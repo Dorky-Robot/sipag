@@ -326,6 +326,7 @@ fn configure_static_creates_all_templates() {
     assert!(claude_dir.join("commands/review.md").exists());
     assert!(claude_dir.join("commands/triage.md").exists());
     assert!(claude_dir.join("commands/ship-it.md").exists());
+    assert!(claude_dir.join("commands/work.md").exists());
     // No hooks or settings — sipag configure only creates agents and commands
     assert!(!claude_dir.join("hooks").exists());
 }

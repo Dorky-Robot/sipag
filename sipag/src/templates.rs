@@ -20,3 +20,4 @@ pub const COMMAND_DISPATCH: &str = include_str!("../../lib/templates/commands/di
 pub const COMMAND_REVIEW: &str = include_str!("../../lib/templates/commands/review.md");
 pub const COMMAND_TRIAGE: &str = include_str!("../../lib/templates/commands/triage.md");
 pub const COMMAND_SHIP_IT: &str = include_str!("../../lib/templates/commands/ship-it.md");
+pub const COMMAND_WORK: &str = include_str!("../../lib/templates/commands/work.md");

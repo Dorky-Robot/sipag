@@ -57,6 +57,10 @@ const TEMPLATES: &[TemplateFile] = &[
         relative_path: "commands/ship-it.md",
         content: templates::COMMAND_SHIP_IT,
     },
+    TemplateFile {
+        relative_path: "commands/work.md",
+        content: templates::COMMAND_WORK,
+    },
 ];
 
 const CONFIGURE_PROMPT: &str = include_str!("../../lib/prompts/configure.md");
@@ -141,6 +145,7 @@ pub(crate) fn build_configure_prompt() -> String {
         .replace("{COMMAND_REVIEW}", templates::COMMAND_REVIEW)
         .replace("{COMMAND_TRIAGE}", templates::COMMAND_TRIAGE)
         .replace("{COMMAND_SHIP_IT}", templates::COMMAND_SHIP_IT)
+        .replace("{COMMAND_WORK}", templates::COMMAND_WORK)
 }
 
 fn exec_claude(project_dir: &Path, prompt: &str) -> Result<()> {
