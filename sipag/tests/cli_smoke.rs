@@ -50,6 +50,15 @@ fn version_flag() {
         .stdout(predicate::str::starts_with("sipag "));
 }
 
+#[test]
+fn version_flag_short() {
+    sipag()
+        .arg("-v")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("sipag "));
+}
+
 // ── Help ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -309,12 +318,8 @@ fn init_static_creates_all_templates() {
     assert!(claude_dir.join("commands/dispatch.md").exists());
     assert!(claude_dir.join("commands/review.md").exists());
     assert!(claude_dir.join("commands/triage.md").exists());
-    // Hooks
-    assert!(claude_dir.join("hooks/safety-gate.sh").exists());
-    assert!(claude_dir.join("hooks/safety-gate.toml").exists());
-    assert!(claude_dir.join("hooks/README.md").exists());
-    // Settings
-    assert!(claude_dir.join("settings.local.json").exists());
+    // No hooks or settings — sipag init only creates agents and commands
+    assert!(!claude_dir.join("hooks").exists());
 }
 
 #[test]

@@ -6,7 +6,7 @@ This file primes Claude Code sessions working **on sipag itself**.
 
 sipag is a template installer and sandbox launcher for Claude Code. It does three things:
 
-1. **`sipag init`** — Install review agents, custom commands, and safety hooks into any project's `.claude/` directory
+1. **`sipag init`** — Install review agents and custom commands into any project's `.claude/` directory
 2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
 3. **`sipag tui`** — Dashboard for all Docker workers across the host
 
@@ -54,9 +54,7 @@ tui/src/
 ```
 lib/templates/
 ├── agents/             # Review agents (security, architecture, correctness, backlog, issue)
-├── commands/           # Custom commands (dispatch, review)
-├── hooks/              # Safety gate hook (deny-list-only PreToolUse)
-└── settings.local.json # Hook registration
+└── commands/           # Custom commands (dispatch, review, triage)
 ```
 
 Installed by `sipag init` into a project's `.claude/` directory.
@@ -91,7 +89,7 @@ Phases: `starting` → `working` → `finished` | `failed`
 ## Commands
 
 ```
-sipag init [dir] [--force]    Install agents, commands, and hooks into .claude/
+sipag init [dir] [--force]    Install agents and commands into .claude/
 sipag dispatch --repo <owner/repo> --pr <N>
                               Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
@@ -172,7 +170,7 @@ SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
 - `sipag-core/src/state.rs` — state file format and management
 - `sipag/src/cli.rs` — CLI commands
 - `sipag/src/init_project.rs` — template installer
-- `lib/templates/` — agents, commands, hooks
+- `lib/templates/` — agents, commands
 - `tui/src/` — TUI views and task model
 
 ### PR-only workflow
