@@ -39,7 +39,10 @@ pub struct App {
 
 impl App {
     pub fn new() -> Result<Self> {
-        let sipag_dir = sipag_core::config::default_sipag_dir();
+        Self::with_dir(sipag_core::config::default_sipag_dir())
+    }
+
+    pub fn with_dir(sipag_dir: PathBuf) -> Result<Self> {
         let archive_max_age_days = std::env::var("SIPAG_ARCHIVE_DAYS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -351,10 +354,9 @@ mod tests {
 
     #[test]
     fn app_new_missing_dir_succeeds() {
-        std::env::set_var("SIPAG_DIR", "/tmp/sipag-test-nonexistent-dir-xyz");
-        let app = App::new().expect("App::new() should succeed even with missing sipag dir");
+        let app = App::with_dir(PathBuf::from("/tmp/sipag-test-nonexistent-dir-xyz"))
+            .expect("App::with_dir() should succeed even with missing sipag dir");
         assert!(app.tasks.is_empty());
-        std::env::remove_var("SIPAG_DIR");
     }
 
     #[test]
