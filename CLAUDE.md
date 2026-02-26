@@ -170,7 +170,7 @@ SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
 - `sipag-core/src/state.rs` — state file format and management
 - `sipag/src/cli.rs` — CLI commands
 - `sipag/src/init_project.rs` — template installer
-- `lib/templates/` — agents, commands, hooks
+- `lib/templates/` — agents, commands
 - `tui/src/` — TUI views and task model
 
 ### PR-only workflow
