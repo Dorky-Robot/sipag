@@ -1,10 +1,10 @@
 # sipag
 
-**Template installer and sandbox launcher for Claude Code.**
+**Autonomous dev agents that evolve with your project.**
 
 ---
 
-sipag installs review agents and safety hooks into your project, launches isolated Docker workers to implement PRs, and provides a TUI to monitor everything. You write the assignment; workers do the work.
+sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures. You write the assignment; workers do the work.
 
 ## Three commands for humans
 

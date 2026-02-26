@@ -4,19 +4,17 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Template installer and sandbox launcher for Claude Code.*
+*Autonomous dev agents that evolve with your project.*
 
 </div>
 
 ## What is sipag?
 
-sipag does three things:
+sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures — all powered by Claude Code.
 
-1. **`sipag configure`** — Configure review agents and custom commands for any project's `.claude/` directory
-2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
-3. **`sipag tui`** — Dashboard for all Docker workers across the host
-
-sipag is pure infrastructure — containers, state files, lifecycle tracking, templates. Claude Code provides the intelligence.
+1. **`sipag configure`** — Analyzes your project and generates tailored review agents and commands for `.claude/`. Re-run as your project evolves — it reads what's there and updates it.
+2. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
+3. **`sipag tui`** — Live dashboard for all workers across the host.
 
 ## Quick start
 
