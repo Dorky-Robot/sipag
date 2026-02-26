@@ -33,6 +33,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Configure Claude Code agents and commands for a project
+    #[command(alias = "config")]
     Configure {
         /// Target directory (default: current dir)
         #[arg(default_value = ".")]
