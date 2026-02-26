@@ -10,7 +10,7 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 
 ```bash
 sipag configure                           # Configure agents + commands for .claude/
-sipag dispatch --repo owner/repo --pr N   # Launch a Docker worker for a PR
+sipag dispatch <PR_URL>                   # Launch a Docker worker for a PR
 sipag tui                                 # Monitor all workers
 ```
 

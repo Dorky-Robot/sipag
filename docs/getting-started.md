@@ -148,7 +148,7 @@ EOF
 ### Dispatch a worker
 
 ```bash
-sipag dispatch --repo owner/my-app --pr 47
+sipag dispatch https://github.com/owner/my-app/pull/47
 ```
 
 This launches a Docker container that clones the repo, reads the PR body, invokes Claude Code to implement the changes, and pushes commits to the PR branch.
@@ -231,7 +231,7 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 
 ```bash
 sipag configure                          # Configure agents + commands for .claude/
-sipag dispatch --repo owner/repo --pr N  # Launch a Docker worker
+sipag dispatch <PR_URL>                  # Launch a Docker worker
 sipag doctor                             # Check prerequisites
 sipag tui                                # Interactive worker dashboard
 sipag ps                                 # List workers

@@ -21,7 +21,7 @@ sipag generates project-aware review agents, ships work through isolated Docker 
                            │
                            v
 ┌──────────────────────────────────────────────────────┐
-│  sipag dispatch --repo owner/repo --pr N              │
+│  sipag dispatch <PR_URL>                              │
 │                                                       │
 │  Preflight: gh auth, Docker daemon, image available   │
 │  Back-pressure: count active workers vs max_open_prs  │
@@ -63,7 +63,7 @@ By default, it launches Claude to analyze your project and write tailored agents
 
 ## sipag dispatch
 
-`sipag dispatch --repo owner/repo --pr N` is a one-shot command that launches a Docker worker for a specific PR. Here's the full sequence:
+`sipag dispatch <PR_URL>` is a one-shot command that launches a Docker worker for a specific PR. Here's the full sequence:
 
 ### Preflight checks
 

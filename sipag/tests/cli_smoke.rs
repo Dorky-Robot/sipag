@@ -185,12 +185,12 @@ fn doctor_shows_sipag_dir_ok() {
 // ── Dispatch (validation errors) ────────────────────────────────────────────
 
 #[test]
-fn dispatch_requires_repo_and_pr() {
+fn dispatch_requires_pr_url() {
     sipag()
         .arg("dispatch")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--repo"));
+        .stderr(predicate::str::contains("PR_URL"));
 }
 
 // ── Ps (state verification) ─────────────────────────────────────────────────

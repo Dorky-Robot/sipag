@@ -46,13 +46,9 @@ pub enum Commands {
 
     /// Dispatch a Docker worker for a PR
     Dispatch {
-        /// Repository in owner/repo format
-        #[arg(long)]
-        repo: String,
-
-        /// PR number to implement
-        #[arg(long)]
-        pr: u64,
+        /// PR URL (e.g. https://github.com/owner/repo/pull/42)
+        #[arg(value_name = "PR_URL")]
+        url: String,
     },
 
     /// List active and recent workers
@@ -92,12 +88,33 @@ pub fn run(cli: Cli) -> Result<()> {
             r#static: static_only,
         }) => configure_project::run_configure(&dir, static_only),
         Some(Commands::Tui) => run_tui(),
-        Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
+        Some(Commands::Dispatch { url }) => {
+            let (repo, pr) = parse_pr_url(&url)?;
+            run_dispatch(&repo, pr)
+        }
         Some(Commands::Ps { all }) => run_ps(all),
         Some(Commands::Logs { id }) => run_logs(&id),
         Some(Commands::Kill { id }) => run_kill(&id),
         Some(Commands::Doctor) => run_doctor(),
         Some(Commands::Version) => run_version(),
+    }
+}
+
+/// Parse a GitHub PR URL into (owner/repo, pr_number).
+/// Accepts: https://github.com/owner/repo/pull/42
+fn parse_pr_url(url: &str) -> Result<(String, u64)> {
+    let url = url.trim().trim_end_matches('/');
+    let parts: Vec<&str> = url.split('/').collect();
+    // Expected: ["https:", "", "github.com", "owner", "repo", "pull", "42"]
+    if parts.len() >= 7 && parts[5] == "pull" {
+        let owner = parts[3];
+        let repo = parts[4];
+        let pr_num: u64 = parts[6]
+            .parse()
+            .with_context(|| format!("invalid PR number in URL: {}", parts[6]))?;
+        Ok((format!("{owner}/{repo}"), pr_num))
+    } else {
+        anyhow::bail!("Not a valid PR URL: {url}\nExpected: https://github.com/owner/repo/pull/N")
     }
 }
 
@@ -515,5 +532,25 @@ mod tests {
     #[test]
     fn extract_issue_nums_large_numbers() {
         assert_eq!(extract_issue_nums("Closes #99999"), vec![99999]);
+    }
+
+    #[test]
+    fn parse_pr_url_valid() {
+        let (repo, pr) = parse_pr_url("https://github.com/acme/my-app/pull/42").unwrap();
+        assert_eq!(repo, "acme/my-app");
+        assert_eq!(pr, 42);
+    }
+
+    #[test]
+    fn parse_pr_url_trailing_slash() {
+        let (repo, pr) = parse_pr_url("https://github.com/owner/repo/pull/7/").unwrap();
+        assert_eq!(repo, "owner/repo");
+        assert_eq!(pr, 7);
+    }
+
+    #[test]
+    fn parse_pr_url_invalid() {
+        assert!(parse_pr_url("https://github.com/owner/repo").is_err());
+        assert!(parse_pr_url("not-a-url").is_err());
     }
 }

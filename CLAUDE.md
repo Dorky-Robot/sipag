@@ -88,8 +88,7 @@ Phases: `starting` → `working` → `finished` | `failed`
 
 ```
 sipag configure [dir] [--static] Configure agents and commands for .claude/
-sipag dispatch --repo <owner/repo> --pr <N>
-                              Launch a Docker worker for a PR
+sipag dispatch <PR_URL>       Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
 sipag logs <id>               Show logs for a worker (PR number or container name)
 sipag kill <id>               Kill a running worker

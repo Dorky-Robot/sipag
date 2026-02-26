@@ -37,7 +37,7 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 4. Dispatch a Docker worker to implement the PR:
 
    ```bash
-   sipag dispatch --repo owner/my-app --pr 42
+   sipag dispatch https://github.com/owner/my-app/pull/42
    ```
 
 5. Monitor workers:
@@ -53,7 +53,7 @@ sipag configure               Configure agents + commands for .claude/
           ↓
 create branch + PR            Describe the work in the PR body
           ↓
-sipag dispatch --repo --pr    Launch a Docker worker
+sipag dispatch <PR_URL>       Launch a Docker worker
           ↓
 Docker container              clone → read PR body → claude → push → done
           ↓
@@ -165,8 +165,7 @@ Environment variable overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABE
 
 ```
 sipag configure [dir] [--static]        Configure agents and commands for .claude/
-sipag dispatch --repo <owner/repo> --pr <N>
-                                        Launch a Docker worker for a PR
+sipag dispatch <PR_URL>                 Launch a Docker worker for a PR
 sipag ps [--all]                        List active and recent workers
 sipag logs <id>                         Show logs for a worker (PR number or container name)
 sipag kill <id>                         Kill a running worker
