@@ -7,10 +7,9 @@
 use anyhow::{bail, Context, Result};
 use sipag_core::state::{self, WorkerPhase};
 use std::env;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Worker disposition prompt (embedded at compile time).
@@ -130,6 +129,7 @@ fn run() -> Result<i32> {
     // process args (visible in `ps aux`, /proc/PID/cmdline).
     let gh_token = env::var("GH_TOKEN").unwrap_or_default();
     {
+        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let mut f = fs::OpenOptions::new()
             .write(true)
@@ -222,11 +222,11 @@ fn run() -> Result<i32> {
     let pre_claude_sha =
         get_head_sha().context("failed to get HEAD SHA — git state may be corrupt")?;
 
-    // Start Claude Code with full permissions from /work directory.
-    let child = start_claude(&prompt)?;
+    // Start Claude Code inside a tmux session from /work directory.
+    start_claude(&prompt)?;
 
     // Supervise Claude: heartbeats, PR state checks, grace period on merge/close.
-    let exit_code = supervise_claude(child, &state_path, &repo, pr_num, heartbeat_interval)?;
+    let exit_code = supervise_claude(&state_path, &repo, pr_num, heartbeat_interval)?;
 
     // Dump Claude's output log to stderr so it flows to the host log file.
     if let Ok(content) = fs::read_to_string("/tmp/claude-output.log") {
@@ -473,49 +473,78 @@ fn read_lessons_file(repo: &str) -> String {
     }
 }
 
-/// Spawn Claude Code and return the Child handle without waiting.
+/// Start Claude Code inside a tmux session.
 ///
-/// Redirects Claude's stdout and stderr to `/tmp/claude-output.log` inside the
-/// container so the output can be dumped to the host log after Claude exits.
-fn start_claude(prompt: &str) -> Result<Child> {
-    let log_file =
-        File::create("/tmp/claude-output.log").context("failed to create claude output log")?;
-    let log_err = log_file
-        .try_clone()
-        .context("failed to clone log file handle")?;
+/// Writes the prompt to a file, creates a wrapper script that pipes it to Claude
+/// and tees output to the log file, then launches everything in a tmux session
+/// named "claude". This allows TUI users to attach and watch live output.
+fn start_claude(prompt: &str) -> Result<()> {
+    // Write prompt to file so the wrapper script can feed it via stdin.
+    fs::write("/tmp/claude-prompt.txt", prompt.as_bytes())
+        .context("failed to write prompt file")?;
 
-    let mut child = Command::new("claude")
-        .args(["--dangerously-skip-permissions", "-p", "-"])
-        .current_dir("/work")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_err))
-        .spawn()
-        .context("failed to spawn claude")?;
+    // Wrapper script: runs Claude, tees output to log, captures exit code.
+    let wrapper = "\
+#!/bin/bash
+cd /work
+claude --dangerously-skip-permissions -p - < /tmp/claude-prompt.txt 2>&1 | tee /tmp/claude-output.log
+echo ${PIPESTATUS[0]} > /tmp/.claude-exit
+";
+    fs::write("/tmp/run-claude.sh", wrapper.as_bytes())
+        .context("failed to write wrapper script")?;
 
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        if let Err(e) = stdin.write_all(prompt.as_bytes()) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(e).context("failed to write prompt to claude stdin");
-        }
+    // Launch the wrapper inside a tmux session.
+    let status = Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            "claude",
+            "bash /tmp/run-claude.sh",
+        ])
+        .status()
+        .context("failed to start tmux session")?;
+
+    if !status.success() {
+        bail!(
+            "tmux new-session exited with code {}",
+            status.code().unwrap_or(-1)
+        );
     }
 
-    Ok(child)
+    Ok(())
 }
 
-/// Supervise a running Claude process.
+/// Check whether the tmux "claude" session is still alive.
+fn tmux_session_alive() -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", "claude"])
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Read the exit code written by the wrapper script.
+///
+/// Falls back to 1 if the file is missing or unparsable (e.g., Claude crashed
+/// before the wrapper could write it).
+fn read_exit_code() -> i32 {
+    fs::read_to_string("/tmp/.claude-exit")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(1)
+}
+
+/// Supervise the Claude tmux session.
 ///
 /// Single loop with 10-second ticks that:
-/// - Calls `child.try_wait()` each tick to detect natural exit
+/// - Checks `tmux has-session -t claude` each tick to detect session exit
 /// - Writes heartbeat every `heartbeat_interval` seconds
 /// - Checks PR state on GitHub every 5 minutes
-/// - On Merged/Closed: starts a 120-second grace period, then kills Claude
+/// - On Merged/Closed: starts a 120-second grace period, then kills the session
 ///
-/// Returns the exit code.
+/// Returns the exit code (read from `/tmp/.claude-exit`).
 fn supervise_claude(
-    mut child: Child,
     state_path: &Path,
     repo: &str,
     pr_num: u64,
@@ -529,9 +558,9 @@ fn supervise_claude(
     loop {
         std::thread::sleep(Duration::from_secs(TICK_SECS));
 
-        // Check if Claude exited naturally.
-        if let Some(status) = child.try_wait().context("failed to check claude status")? {
-            return Ok(status.code().unwrap_or(1));
+        // Check if the tmux session exited naturally.
+        if !tmux_session_alive() {
+            return Ok(read_exit_code());
         }
 
         let now = Instant::now();
@@ -554,9 +583,12 @@ fn supervise_claude(
                     "sipag-worker: grace period expired after {}s, killing claude",
                     GRACE_PERIOD_SECS
                 );
-                let _ = child.kill();
-                let status = child.wait().context("failed to reap claude after kill")?;
-                return Ok(status.code().unwrap_or(0));
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", "claude"])
+                    .status();
+                // Give tmux a moment to tear down, then read exit code.
+                std::thread::sleep(Duration::from_millis(500));
+                return Ok(read_exit_code());
             }
             // During grace period, skip PR state checks (already decided to wind down).
             continue;
