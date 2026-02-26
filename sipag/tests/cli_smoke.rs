@@ -7,6 +7,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 #[allow(deprecated)]
@@ -327,8 +328,35 @@ fn configure_static_creates_all_templates() {
     assert!(claude_dir.join("commands/triage.md").exists());
     assert!(claude_dir.join("commands/ship-it.md").exists());
     assert!(claude_dir.join("commands/work.md").exists());
-    // No hooks or settings — sipag configure only creates agents and commands
+    // No Claude Code hooks or settings — those are separate from git hooks
     assert!(!claude_dir.join("hooks").exists());
+
+    // Git hooks installed to .husky/
+    let husky_dir = dir.path().join(".husky");
+    assert!(
+        husky_dir.join("pre-commit").exists(),
+        ".husky/pre-commit should exist"
+    );
+    assert!(
+        husky_dir.join("pre-push").exists(),
+        ".husky/pre-push should exist"
+    );
+
+    // Hooks must be executable
+    let pre_commit_perms = fs::metadata(husky_dir.join("pre-commit"))
+        .unwrap()
+        .permissions();
+    assert!(
+        pre_commit_perms.mode() & 0o111 != 0,
+        "pre-commit hook should be executable"
+    );
+    let pre_push_perms = fs::metadata(husky_dir.join("pre-push"))
+        .unwrap()
+        .permissions();
+    assert!(
+        pre_push_perms.mode() & 0o111 != 0,
+        "pre-push hook should be executable"
+    );
 }
 
 #[test]

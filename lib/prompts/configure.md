@@ -3,10 +3,12 @@ structure has been created.
 
 ## Goal
 
-Create project-specific **agents** and **commands** for this project in the
-current working directory. Agents are specialized reviewers that understand this
-project's domain. Commands are slash-command workflows (like `/review`, `/test`)
-that invoke those agents. Together they give Claude Code project-aware tooling.
+Create project-specific **agents**, **commands**, and **git hooks** for this
+project in the current working directory. Agents are specialized reviewers that
+understand this project's domain. Commands are slash-command workflows (like
+`/review`, `/test`) that invoke those agents. Git hooks enforce quality gates
+(secrets, formatting, linting, tests) before commits and pushes. Together they
+give Claude Code project-aware tooling.
 
 Because Claude Code also has global commands, every project command description
 MUST include the project name so users can distinguish project-specific commands
@@ -52,7 +54,22 @@ stacks, or domain concepts that are not present in the discovered context.
      `subagent_type: "security-reviewer"`) so the agents actually get used
    - Use the reference commands below for format and spirit
 
-5. Print a summary of what you generated and why, citing specific files or
+5. Generate git hooks (`.husky/pre-commit` and `.husky/pre-push`):
+   - Start from the reference hooks below and customize for this project
+   - Always include gitleaks (secrets scan) and typos (spell check) — these are
+     universal and must stay in every hook
+   - Replace the placeholder formatting and lint steps with real commands for the
+     tech stack discovered in step 2 (e.g., `cargo fmt` for Rust, `npx prettier`
+     for Node, `ruff format` for Python, `gofmt` for Go)
+   - Replace the placeholder test suite step in pre-push with the real test
+     runner (e.g., `cargo test --workspace`, `npm test`, `pytest`, `go test ./...`)
+   - Follow the exact bash structure: `set -euo pipefail`, `warn()`/`fail()`/`step()`
+     helpers, numbered steps, visual box formatting
+   - After writing both hook files, run `chmod +x .husky/pre-commit .husky/pre-push`
+     to make them executable
+   - Tell the user how to activate: `git config core.hooksPath .husky`
+
+6. Print a summary of what you generated and why, citing specific files or
    config entries that motivated each choice.
 
 ## Re-running on an existing project
@@ -113,10 +130,16 @@ Every agent file needs YAML frontmatter:
 ### Reference command: work
 {COMMAND_WORK}
 
+### Reference git hook: pre-commit
+{HOOK_PRE_COMMIT}
+
+### Reference git hook: pre-push
+{HOOK_PRE_PUSH}
+
 ## Constraints
 
 - Read ONLY files inside the current working directory — never read files outside it
-- Write ONLY inside `.claude/`
+- Write ONLY inside `.claude/` and `.husky/`
 - Do NOT explore parent directories, sibling projects, or home directory files
 - Do NOT invent or hallucinate project details — if a technology is not in the
   config files or source code, do not reference it in agents or commands
