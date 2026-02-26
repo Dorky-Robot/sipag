@@ -6,7 +6,7 @@ This file primes Claude Code sessions working **on sipag itself**.
 
 sipag is a template installer and sandbox launcher for Claude Code. It does three things:
 
-1. **`sipag init`** — Install review agents and custom commands into any project's `.claude/` directory
+1. **`sipag configure`** — Configure review agents and custom commands for any project's `.claude/` directory
 2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
 3. **`sipag tui`** — Dashboard for all Docker workers across the host
 
@@ -35,8 +35,8 @@ sipag-core/src/
 
 sipag/src/
 ├── main.rs             # Entry point
-├── cli.rs              # 7 commands: init, dispatch, ps, logs, kill, tui, doctor, version
-├── init_project.rs     # sipag init: write templates to .claude/
+├── cli.rs              # 8 commands: configure, dispatch, ps, logs, kill, tui, doctor, version
+├── configure_project.rs # sipag configure: write templates to .claude/
 └── templates.rs        # Embedded template files (include_str!)
 
 sipag-worker/src/
@@ -54,10 +54,10 @@ tui/src/
 ```
 lib/templates/
 ├── agents/             # Review agents (security, architecture, correctness, backlog, issue)
-└── commands/           # Custom commands (dispatch, review, triage)
+└── commands/           # Custom commands (dispatch, review, triage, ship-it)
 ```
 
-Installed by `sipag init` into a project's `.claude/` directory.
+Installed by `sipag configure` into a project's `.claude/` directory.
 
 ### Prompts
 
@@ -89,7 +89,7 @@ Phases: `starting` → `working` → `finished` | `failed`
 ## Commands
 
 ```
-sipag init [dir] [--force]    Install agents and commands into .claude/
+sipag configure [dir] [--static] Configure agents and commands for .claude/
 sipag dispatch --repo <owner/repo> --pr <N>
                               Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
@@ -169,7 +169,7 @@ SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
 - `sipag-core/src/worker/` — dispatch, lifecycle, GitHub operations
 - `sipag-core/src/state.rs` — state file format and management
 - `sipag/src/cli.rs` — CLI commands
-- `sipag/src/init_project.rs` — template installer
+- `sipag/src/configure_project.rs` — template installer
 - `lib/templates/` — agents, commands
 - `tui/src/` — TUI views and task model
 

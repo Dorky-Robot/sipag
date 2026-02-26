@@ -97,7 +97,7 @@ This means sipag never needs to shell out to `claude`. Analysis belongs in the p
 
 ## Sub-agents
 
-The `.claude/agents/` directory contains specialized review agents installed by `sipag init`. They're usable in any project via Claude Code's Task tool:
+The `.claude/agents/` directory contains specialized review agents installed by `sipag configure`. They're usable in any project via Claude Code's Task tool:
 
 | Agent | Purpose |
 |-------|---------|

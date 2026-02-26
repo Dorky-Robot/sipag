@@ -45,11 +45,15 @@ const TEMPLATES: &[TemplateFile] = &[
         relative_path: "commands/triage.md",
         content: templates::COMMAND_TRIAGE,
     },
+    TemplateFile {
+        relative_path: "commands/ship-it.md",
+        content: templates::COMMAND_SHIP_IT,
+    },
 ];
 
-const INIT_PROMPT: &str = include_str!("../../lib/prompts/init.md");
+const CONFIGURE_PROMPT: &str = include_str!("../../lib/prompts/configure.md");
 
-pub fn run_init(dir: &Path, force: bool, static_only: bool) -> Result<()> {
+pub fn run_configure(dir: &Path, static_only: bool) -> Result<()> {
     let dir = if dir.is_relative() {
         std::env::current_dir()?.join(dir)
     } else {
@@ -76,15 +80,15 @@ pub fn run_init(dir: &Path, force: bool, static_only: bool) -> Result<()> {
         if !static_only {
             eprintln!("claude CLI not found. Installing generic templates.");
             eprintln!(
-                "Re-run sipag init after installing Claude Code for project-specific setup.\n"
+                "Re-run sipag configure after installing Claude Code for project-specific setup.\n"
             );
         }
-        return install_static_templates(&claude_dir, force);
+        return install_static_templates(&claude_dir);
     }
 
     // Generative: launch Claude to explore the project and write
     // customized agents and commands.
-    let prompt = build_init_prompt(force);
+    let prompt = build_configure_prompt();
     eprintln!("Launching Claude to set up agents and commands for this project...\n");
     exec_claude(&dir, &prompt)
 }
@@ -99,16 +103,10 @@ fn claude_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Build the system prompt for the generative init session.
-/// Replaces placeholder tokens in the init template with reference template content.
-pub(crate) fn build_init_prompt(force: bool) -> String {
-    let force_instruction = if force {
-        "Overwrite any existing files in .claude/."
-    } else {
-        "If .claude/ already contains customized files, ask before overwriting."
-    };
-    INIT_PROMPT
-        .replace("{FORCE_INSTRUCTION}", force_instruction)
+/// Build the system prompt for the generative configure session.
+/// Replaces placeholder tokens in the template with reference template content.
+pub(crate) fn build_configure_prompt() -> String {
+    CONFIGURE_PROMPT
         .replace(
             "{AGENT_SECURITY_REVIEWER}",
             templates::AGENT_SECURITY_REVIEWER,
@@ -126,6 +124,7 @@ pub(crate) fn build_init_prompt(force: bool) -> String {
         .replace("{COMMAND_DISPATCH}", templates::COMMAND_DISPATCH)
         .replace("{COMMAND_REVIEW}", templates::COMMAND_REVIEW)
         .replace("{COMMAND_TRIAGE}", templates::COMMAND_TRIAGE)
+        .replace("{COMMAND_SHIP_IT}", templates::COMMAND_SHIP_IT)
 }
 
 fn exec_claude(project_dir: &Path, prompt: &str) -> Result<()> {
@@ -224,8 +223,8 @@ fn discover_project(dir: &Path) -> String {
     }
 }
 
-fn install_static_templates(claude_dir: &Path, force: bool) -> Result<()> {
-    let (installed, skipped) = install_templates(claude_dir, TEMPLATES, force)?;
+fn install_static_templates(claude_dir: &Path) -> Result<()> {
+    let installed = install_templates(claude_dir, TEMPLATES)?;
 
     // Categorize for summary.
     let agents = TEMPLATES
@@ -238,32 +237,15 @@ fn install_static_templates(claude_dir: &Path, force: bool) -> Result<()> {
         .count();
 
     println!("\nInstalled {installed} files ({agents} agents, {commands} commands) to .claude/");
-    if skipped > 0 {
-        println!("Skipped {skipped} existing files (use --force to overwrite)");
-    }
 
     Ok(())
 }
 
-fn install_templates(
-    claude_dir: &Path,
-    templates: &[TemplateFile],
-    force: bool,
-) -> Result<(u32, u32)> {
+fn install_templates(claude_dir: &Path, templates: &[TemplateFile]) -> Result<u32> {
     let mut installed = 0u32;
-    let mut skipped = 0u32;
 
     for template in templates {
         let dest = claude_dir.join(template.relative_path);
-
-        if dest.exists() && !force {
-            println!(
-                "  skip: .claude/{} (already exists)",
-                template.relative_path
-            );
-            skipped += 1;
-            continue;
-        }
 
         let action = if dest.exists() { "overwrite" } else { "create" };
 
@@ -272,7 +254,7 @@ fn install_templates(
         installed += 1;
     }
 
-    Ok((installed, skipped))
+    Ok(installed)
 }
 
 #[cfg(test)]
@@ -280,8 +262,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_init_prompt_replaces_all_placeholders() {
-        let prompt = build_init_prompt(false);
+    fn build_configure_prompt_replaces_all_placeholders() {
+        let prompt = build_configure_prompt();
         assert!(
             !prompt.contains("{AGENT_"),
             "prompt should not contain unreplaced {{AGENT_*}} placeholders"
@@ -294,24 +276,11 @@ mod tests {
             !prompt.contains("{HOOK_"),
             "prompt should not contain unreplaced {{HOOK_*}} placeholders"
         );
-        assert!(
-            !prompt.contains("{FORCE_INSTRUCTION}"),
-            "prompt should not contain unreplaced {{FORCE_INSTRUCTION}}"
-        );
     }
 
     #[test]
-    fn build_init_prompt_force_instruction() {
-        let prompt_no_force = build_init_prompt(false);
-        assert!(prompt_no_force.contains("ask before overwriting"));
-
-        let prompt_force = build_init_prompt(true);
-        assert!(prompt_force.contains("Overwrite any existing files"));
-    }
-
-    #[test]
-    fn build_init_prompt_contains_template_content() {
-        let prompt = build_init_prompt(false);
+    fn build_configure_prompt_contains_template_content() {
+        let prompt = build_configure_prompt();
         // Should contain content from at least one reference template.
         assert!(prompt.contains("security"));
         assert!(prompt.contains("architecture"));
@@ -319,8 +288,17 @@ mod tests {
     }
 
     #[test]
-    fn build_init_prompt_contains_boundary_constraints() {
-        let prompt = build_init_prompt(false);
+    fn build_configure_prompt_contains_ship_it() {
+        let prompt = build_configure_prompt();
+        assert!(
+            prompt.contains("ship-it"),
+            "prompt should reference ship-it"
+        );
+    }
+
+    #[test]
+    fn build_configure_prompt_contains_boundary_constraints() {
+        let prompt = build_configure_prompt();
         assert!(prompt.contains("Do NOT invent or hallucinate project details"));
         assert!(prompt.contains("Read ONLY files inside the current working directory"));
         assert!(prompt.contains("Do NOT explore parent directories"));

@@ -12,7 +12,7 @@
 
 sipag does three things:
 
-1. **`sipag init`** — Install review agents, custom commands, and safety hooks into any project's `.claude/` directory
+1. **`sipag configure`** — Configure review agents and custom commands for any project's `.claude/` directory
 2. **`sipag dispatch`** — Send work to an isolated Docker container that reads a PR description and implements it
 3. **`sipag tui`** — Dashboard for all Docker workers across the host
 
@@ -27,11 +27,11 @@ sipag is pure infrastructure — containers, state files, lifecycle tracking, te
    brew install sipag
    ```
 
-2. Install review agents and safety hooks into your project:
+2. Configure review agents and commands for your project:
 
    ```bash
    cd ~/Projects/my-app
-   sipag init
+   sipag configure
    ```
 
 3. Create a branch and PR on GitHub describing what needs to happen.
@@ -51,7 +51,7 @@ sipag is pure infrastructure — containers, state files, lifecycle tracking, te
 ## How it works
 
 ```
-sipag init                    Install agents + hooks into .claude/
+sipag configure               Configure agents + commands for .claude/
           ↓
 create branch + PR            Describe the work in the PR body
           ↓
@@ -64,17 +64,16 @@ sipag tui / sipag ps          Monitor progress
 review + merge                You decide what ships
 ```
 
-### sipag init
+### sipag configure
 
-Installs five review agents, two custom commands, and a safety hook into `.claude/`:
+Generates project-specific review agents and commands into `.claude/`. By default it launches Claude to analyze your project and write tailored agents. Use `--static` to install generic templates without Claude.
 
 | Category | Files |
 |----------|-------|
 | Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `backlog-triager`, `issue-analyst` |
-| Commands | `dispatch`, `review` |
-| Hooks | `safety-gate.sh` + `safety-gate.toml` + `settings.local.json` |
+| Commands | `dispatch`, `review`, `triage`, `ship-it` |
 
-These are templates — once installed, they're part of your project and can be customized.
+Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
 ### sipag dispatch
 
@@ -167,7 +166,7 @@ Environment variable overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABE
 ## CLI reference
 
 ```
-sipag init [dir] [--force]              Install agents, commands, and hooks into .claude/
+sipag configure [dir] [--static]        Configure agents and commands for .claude/
 sipag dispatch --repo <owner/repo> --pr <N>
                                         Launch a Docker worker for a PR
 sipag ps [--all]                        List active and recent workers

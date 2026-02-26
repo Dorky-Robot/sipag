@@ -1,7 +1,7 @@
 //! Binary smoke tests for the `sipag` CLI.
 //!
 //! These tests use `assert_cmd` to run the actual compiled binary and verify
-//! basic behavior for the CLI (8 commands: init, dispatch, ps, logs, kill,
+//! basic behavior for the CLI (8 commands: configure, dispatch, ps, logs, kill,
 //! tui, doctor, version).
 
 use assert_cmd::Command;
@@ -78,7 +78,14 @@ fn help_lists_subcommands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for cmd in &[
-        "init", "dispatch", "ps", "logs", "kill", "tui", "doctor", "version",
+        "configure",
+        "dispatch",
+        "ps",
+        "logs",
+        "kill",
+        "tui",
+        "doctor",
+        "version",
     ] {
         assert!(
             stdout.contains(cmd),
@@ -295,16 +302,16 @@ fn logs_falls_back_to_log_file() {
         .stdout(predicate::str::contains("Worker output line 1"));
 }
 
-// ── Init ───────────────────────────────────────────────────────────────────
+// ── Configure ───────────────────────────────────────────────────────────────
 
 #[test]
-fn init_static_creates_all_templates() {
+fn configure_static_creates_all_templates() {
     let dir = TempDir::new().unwrap();
     // Create a .git dir so the warning doesn't fire.
     fs::create_dir(dir.path().join(".git")).unwrap();
 
     sipag()
-        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .args(["configure", "--static", dir.path().to_str().unwrap()])
         .assert()
         .success()
         .stdout(predicate::str::contains("Installed"));
@@ -318,34 +325,34 @@ fn init_static_creates_all_templates() {
     assert!(claude_dir.join("commands/dispatch.md").exists());
     assert!(claude_dir.join("commands/review.md").exists());
     assert!(claude_dir.join("commands/triage.md").exists());
-    // No hooks or settings — sipag init only creates agents and commands
+    assert!(claude_dir.join("commands/ship-it.md").exists());
+    // No hooks or settings — sipag configure only creates agents and commands
     assert!(!claude_dir.join("hooks").exists());
 }
 
 #[test]
-fn init_static_skips_existing_without_force() {
+fn configure_static_overwrites_existing() {
     let dir = TempDir::new().unwrap();
     fs::create_dir(dir.path().join(".git")).unwrap();
 
     // First run — creates files.
     sipag()
-        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .args(["configure", "--static", dir.path().to_str().unwrap()])
         .assert()
         .success();
 
-    // Second run — skips existing.
+    // Second run — overwrites existing (no skip behavior).
     sipag()
-        .args(["init", "--static", dir.path().to_str().unwrap()])
+        .args(["configure", "--static", dir.path().to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains("skip:"))
-        .stdout(predicate::str::contains("Skipped"));
+        .stdout(predicate::str::contains("overwrite:"));
 }
 
 #[test]
-fn init_help_shows_static_flag() {
+fn configure_help_shows_static_flag() {
     sipag()
-        .args(["init", "--help"])
+        .args(["configure", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--static"));

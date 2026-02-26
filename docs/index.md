@@ -9,7 +9,7 @@ sipag installs review agents and safety hooks into your project, launches isolat
 ## Three commands for humans
 
 ```bash
-sipag init                                # Install agents + hooks into .claude/
+sipag configure                           # Configure agents + commands for .claude/
 sipag dispatch --repo owner/repo --pr N   # Launch a Docker worker for a PR
 sipag tui                                 # Monitor all workers
 ```
@@ -19,7 +19,7 @@ Everything else (`sipag ps`, `sipag logs`, `sipag kill`) is for managing workers
 ## How it works
 
 ```
-sipag init           Install review agents + safety hooks
+sipag configure      Configure review agents + commands
        ↓
 create PR            Describe the work in the PR body
        ↓

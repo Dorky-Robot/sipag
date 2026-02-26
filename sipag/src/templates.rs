@@ -1,4 +1,4 @@
-// Embedded template files installed by `sipag init`.
+// Embedded template files installed by `sipag configure`.
 
 // Agents
 pub const AGENT_SECURITY_REVIEWER: &str =
@@ -15,3 +15,4 @@ pub const AGENT_ISSUE_ANALYST: &str = include_str!("../../lib/templates/agents/i
 pub const COMMAND_DISPATCH: &str = include_str!("../../lib/templates/commands/dispatch.md");
 pub const COMMAND_REVIEW: &str = include_str!("../../lib/templates/commands/review.md");
 pub const COMMAND_TRIAGE: &str = include_str!("../../lib/templates/commands/triage.md");
+pub const COMMAND_SHIP_IT: &str = include_str!("../../lib/templates/commands/ship-it.md");

@@ -1,5 +1,5 @@
 mod cli;
-mod init_project;
+mod configure_project;
 mod templates;
 
 use clap::Parser;
