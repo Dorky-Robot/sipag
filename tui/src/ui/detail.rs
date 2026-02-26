@@ -181,12 +181,13 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         let mut log_lines: Vec<Line> = Vec::new();
 
         log_lines.push(section_header(
-            &format!("── Log (last {} lines) ", app.log_lines.len()),
+            &format!("── Log ({} lines) ", app.log_lines.len()),
             content_area.width,
         ));
 
         let visible_rows = log_rect.height.saturating_sub(1) as usize;
-        let start = app.log_scroll;
+        // Clamp here (not in the model) because visible_rows is a renderer concept.
+        let start = app.log_scroll.min(app.log_lines.len().saturating_sub(visible_rows));
         let end = (start + visible_rows).min(app.log_lines.len());
 
         for log_line in &app.log_lines[start..end] {
@@ -196,11 +197,11 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         let log_para = Paragraph::new(log_lines);
         f.render_widget(log_para, log_rect);
 
-        // Scroll indicator.
+        // Scroll indicator — use the clamped `start` so the position matches what is rendered.
         if app.log_lines.len() > visible_rows && log_rect.width > 10 {
             let indicator = format!(
                 "[{}/{}]",
-                app.log_scroll + 1,
+                start + 1,
                 app.log_lines.len().saturating_sub(visible_rows) + 1
             );
             let indicator_rect = Rect {

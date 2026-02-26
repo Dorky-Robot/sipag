@@ -35,6 +35,11 @@ pub struct App {
     pub list_mode: ListMode,
     pub archive_max_age_days: u64,
     pub total_state_files: usize,
+    /// Stable identity (repo, pr_num) of the task shown in detail view.
+    /// Survives task-vector rebuilds; used to re-anchor `selected` after refresh.
+    pub detail_task_id: Option<(String, u64)>,
+    /// Tick counter for throttling log refreshes (refresh every 5 ticks ≈ 1 s).
+    tick_count: u8,
 }
 
 impl App {
@@ -58,6 +63,8 @@ impl App {
             list_mode: ListMode::Active,
             archive_max_age_days,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks()?;
         Ok(app)
@@ -95,6 +102,19 @@ impl App {
         } else if self.selected >= self.tasks.len() {
             self.selected = self.tasks.len() - 1;
         }
+
+        // Restore selection by identity so detail view tracks the right task
+        // even when the vector order changes between refreshes.
+        if let Some((ref repo, pr_num)) = self.detail_task_id {
+            if let Some(pos) = self
+                .tasks
+                .iter()
+                .position(|t| &t.repo == repo && t.pr_num == *pr_num)
+            {
+                self.selected = pos;
+            }
+        }
+
         Ok(())
     }
 
@@ -125,12 +145,15 @@ impl App {
         if self.tasks.is_empty() {
             return;
         }
-        self.log_lines = self.tasks[self.selected].log_lines();
+        let task = &self.tasks[self.selected];
+        self.detail_task_id = Some((task.repo.clone(), task.pr_num));
+        self.log_lines = task.log_lines();
         self.log_scroll = 0;
         self.view = View::Detail;
     }
 
     pub fn close_detail(&mut self) {
+        self.detail_task_id = None;
         self.view = View::List;
     }
 
@@ -161,7 +184,7 @@ impl App {
         state::remove_state(&task.file_path)?;
 
         if matches!(self.view, View::Detail) {
-            self.view = View::List;
+            self.close_detail();
         }
         self.refresh_tasks()?;
         Ok(())
@@ -309,6 +332,27 @@ impl App {
     // ── Tick ──────────────────────────────────────────────────────────────────
 
     pub fn on_tick(&mut self) -> Result<()> {
+        self.tick_count = self.tick_count.wrapping_add(1);
+        // Refresh log content every 5 ticks (~1 s at 200 ms tick rate).
+        if self.tick_count % 5 != 0 {
+            return Ok(());
+        }
+        if !matches!(self.view, View::Detail) {
+            return Ok(());
+        }
+        // Clone identity to release borrows before touching other fields.
+        let Some((repo, pr_num)) = self.detail_task_id.clone() else {
+            return Ok(());
+        };
+        let refreshed = self
+            .tasks
+            .iter()
+            .find(|t| t.repo == repo && t.pr_num == pr_num)
+            .map(|task| task.log_lines());
+        match refreshed {
+            Some(lines) => self.log_lines = lines,
+            None => self.close_detail(), // Task disappeared — close gracefully.
+        }
         Ok(())
     }
 }
@@ -349,6 +393,8 @@ mod tests {
             list_mode: ListMode::Active,
             archive_max_age_days: 7,
             total_state_files: total,
+            detail_task_id: None,
+            tick_count: 0,
         }
     }
 
@@ -418,6 +464,8 @@ mod tests {
             list_mode: ListMode::Archive,
             archive_max_age_days: 7,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -478,6 +526,8 @@ mod tests {
             list_mode: ListMode::Active,
             archive_max_age_days: 7,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -525,6 +575,8 @@ mod tests {
             list_mode: ListMode::Active,
             archive_max_age_days: 99999,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -571,6 +623,8 @@ mod tests {
             list_mode: ListMode::Archive,
             archive_max_age_days: 7,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks().unwrap();
 
@@ -610,6 +664,8 @@ mod tests {
             list_mode: ListMode::Archive,
             archive_max_age_days: 99999,
             total_state_files: 0,
+            detail_task_id: None,
+            tick_count: 0,
         };
         app.refresh_tasks().unwrap();
         assert_eq!(app.tasks.len(), 1);
@@ -626,5 +682,150 @@ mod tests {
         let mut app = make_app_with_tasks(vec![task]);
         app.kill_selected().unwrap();
         assert_eq!(app.tasks[0].phase, WorkerPhase::Finished);
+    }
+
+    // ── Identity-anchored detail view tests ───────────────────────────────────
+
+    #[test]
+    fn open_detail_sets_identity() {
+        let mut app = make_app_with_tasks(vec![
+            make_task(1, WorkerPhase::Working),
+            make_task(2, WorkerPhase::Working),
+        ]);
+        app.selected = 1;
+        app.open_detail();
+        assert_eq!(app.detail_task_id, Some(("test/repo".to_string(), 2)));
+        assert!(matches!(app.view, View::Detail));
+    }
+
+    #[test]
+    fn close_detail_clears_identity() {
+        let mut app = make_app_with_tasks(vec![make_task(1, WorkerPhase::Working)]);
+        app.open_detail();
+        assert!(app.detail_task_id.is_some());
+        app.close_detail();
+        assert!(app.detail_task_id.is_none());
+        assert!(matches!(app.view, View::List));
+    }
+
+    #[test]
+    fn refresh_tasks_restores_selection_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("workers")).unwrap();
+
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        // Write two finished tasks.
+        for pr_num in [10u64, 20u64] {
+            let s = state::WorkerState {
+                repo: "test/repo".to_string(),
+                pr_num,
+                issues: vec![],
+                branch: format!("sipag/pr-{pr_num}"),
+                container_id: "c".to_string(),
+                phase: WorkerPhase::Finished,
+                heartbeat: now.clone(),
+                started: now.clone(),
+                ended: Some(now.clone()),
+                exit_code: Some(0),
+                error: None,
+                file_path: state::state_file_path(dir.path(), "test/repo", pr_num),
+            };
+            state::write_state(&s).unwrap();
+        }
+
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::Detail,
+            log_lines: vec![],
+            log_scroll: 0,
+            attach_request: None,
+            list_mode: ListMode::Archive,
+            archive_max_age_days: 99999,
+            total_state_files: 0,
+            detail_task_id: Some(("test/repo".to_string(), 20)),
+            tick_count: 0,
+        };
+        app.refresh_tasks().unwrap();
+
+        // selected should now point at pr_num 20, regardless of vector order.
+        assert_eq!(app.tasks[app.selected].pr_num, 20);
+    }
+
+    #[test]
+    fn on_tick_refreshes_log_every_5_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("workers")).unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let file_path = state::state_file_path(dir.path(), "test/repo", 1);
+        let log_path = dir.path().join("logs").join("test--repo--pr-1.log");
+        std::fs::write(&log_path, "line 0\n").unwrap();
+
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let s = state::WorkerState {
+            repo: "test/repo".to_string(),
+            pr_num: 1,
+            issues: vec![],
+            branch: "sipag/pr-1".to_string(),
+            container_id: "c".to_string(),
+            phase: WorkerPhase::Finished,
+            heartbeat: now.clone(),
+            started: now.clone(),
+            ended: Some(now),
+            exit_code: Some(0),
+            error: None,
+            file_path: file_path.clone(),
+        };
+        state::write_state(&s).unwrap();
+
+        let mut app = App {
+            sipag_dir: dir.path().to_path_buf(),
+            tasks: vec![],
+            selected: 0,
+            view: View::Detail,
+            log_lines: vec!["line 0".to_string()],
+            log_scroll: 0,
+            attach_request: None,
+            list_mode: ListMode::Archive,
+            archive_max_age_days: 99999,
+            total_state_files: 0,
+            detail_task_id: Some(("test/repo".to_string(), 1)),
+            tick_count: 0,
+        };
+        app.refresh_tasks().unwrap();
+        assert_eq!(app.tasks.len(), 1);
+
+        // Append a new line to the log.
+        std::fs::write(&log_path, "line 0\nline 1\n").unwrap();
+
+        // Ticks 1-4 should not refresh log.
+        for _ in 0..4 {
+            app.on_tick().unwrap();
+        }
+        assert_eq!(app.log_lines.len(), 1, "log should not refresh before tick 5");
+
+        // Tick 5 triggers a refresh.
+        app.on_tick().unwrap();
+        assert_eq!(app.log_lines.len(), 2);
+        assert_eq!(app.log_lines[1], "line 1");
+    }
+
+    #[test]
+    fn on_tick_closes_detail_when_task_disappears() {
+        let mut app = make_app_with_tasks(vec![make_task(1, WorkerPhase::Working)]);
+        app.view = View::Detail;
+        app.detail_task_id = Some(("test/repo".to_string(), 1));
+
+        // Remove the task from the vector to simulate it disappearing.
+        app.tasks.clear();
+
+        // Drive tick_count to a multiple of 5.
+        app.tick_count = 4;
+        app.on_tick().unwrap();
+
+        assert!(matches!(app.view, View::List));
+        assert!(app.detail_task_id.is_none());
     }
 }
