@@ -27,6 +27,11 @@ RUN cargo build --release --package sipag-worker \
 # Stage 2: Runtime image
 FROM ubuntu:24.04
 
+# Dependency versions — update these when bumping.
+# To build with a different Claude CLI version:
+#   docker build --build-arg CLAUDE_CLI_VERSION=X.Y.Z .
+ARG CLAUDE_CLI_VERSION=2.1.59
+
 RUN apt-get update && apt-get install -y \
     git curl build-essential ca-certificates tmux gnupg locales \
     && locale-gen en_US.UTF-8 \
@@ -45,11 +50,11 @@ RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}
 
 # gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
     | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
     && apt-get update && apt-get install -y gh \
