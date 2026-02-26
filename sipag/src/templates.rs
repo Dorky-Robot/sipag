@@ -10,6 +10,10 @@ pub const AGENT_CORRECTNESS_REVIEWER: &str =
 pub const AGENT_BACKLOG_TRIAGER: &str =
     include_str!("../../lib/templates/agents/backlog-triager.md");
 pub const AGENT_ISSUE_ANALYST: &str = include_str!("../../lib/templates/agents/issue-analyst.md");
+pub const AGENT_ROOT_CAUSE_ANALYST: &str =
+    include_str!("../../lib/templates/agents/root-cause-analyst.md");
+pub const AGENT_SIMPLICITY_ADVOCATE: &str =
+    include_str!("../../lib/templates/agents/simplicity-advocate.md");
 
 // Commands
 pub const COMMAND_DISPATCH: &str = include_str!("../../lib/templates/commands/dispatch.md");
