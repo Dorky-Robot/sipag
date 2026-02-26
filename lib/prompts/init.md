@@ -40,7 +40,9 @@ stacks, or domain concepts that are not present in the discovered context.
    - Every agent description must reference technologies ACTUALLY found in step 2
 
 4. Generate customized commands (`.claude/commands/*.md`):
-   - 2-4 slash commands that drive the agents you created in step 3
+   - 3-5 slash commands that drive the agents you created in step 3
+   - Every project MUST have a `/ship-it` command — the commit→PR→review→merge
+     workflow that invokes your review agents. This is the most important command.
    - The first line of each command file is the description shown in the
      command picker — it MUST include the project name (e.g.,
      "Review a pull request for CoolBeans." not "Review a pull request.")
@@ -53,7 +55,14 @@ stacks, or domain concepts that are not present in the discovered context.
 5. Print a summary of what you generated and why, citing specific files or
    config entries that motivated each choice.
 
-{FORCE_INSTRUCTION}
+## Re-running on an existing project
+
+If `.claude/` already contains files from a previous run:
+- Read existing agents and commands first
+- Update agents if the project's tech stack or structure has changed
+- Add new agents or commands for capabilities that have grown
+- Remove agents that no longer apply
+- Always overwrite — you are the source of truth for these files
 
 ## Agent format
 
@@ -91,6 +100,9 @@ Every agent file needs YAML frontmatter:
 
 ### Reference command: triage
 {COMMAND_TRIAGE}
+
+### Reference command: ship-it
+{COMMAND_SHIP_IT}
 
 ## Constraints
 

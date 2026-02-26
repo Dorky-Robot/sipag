@@ -9,7 +9,7 @@ use sipag_core::{
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::init_project;
+use crate::configure_project;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_HASH: &str = env!("CARGO_GIT_SHA");
@@ -32,15 +32,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Install agents and commands into a project
-    Init {
-        /// Project directory (defaults to current directory)
+    /// Configure Claude Code agents and commands for a project
+    Configure {
+        /// Target directory (default: current dir)
         #[arg(default_value = ".")]
         dir: PathBuf,
-
-        /// Overwrite existing files
-        #[arg(long, default_value_t = false)]
-        force: bool,
 
         /// Install generic templates without launching Claude
         #[arg(long, default_value_t = false)]
@@ -90,11 +86,10 @@ pub enum Commands {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
-        Some(Commands::Init {
+        Some(Commands::Configure {
             dir,
-            force,
             r#static: static_only,
-        }) => init_project::run_init(&dir, force, static_only),
+        }) => configure_project::run_configure(&dir, static_only),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch { repo, pr }) => run_dispatch(&repo, pr),
         Some(Commands::Ps { all }) => run_ps(all),
