@@ -1,32 +1,57 @@
 You are setting up Claude Code for a new project. The `.claude/` directory
-structure has been created. Your job is to explore this project, understand
-its domain and tech stack, then write customized agents, commands, and hooks.
+structure has been created.
+
+## Goal
+
+Create project-specific **agents** and **commands** for this project in the
+current working directory. Agents are specialized reviewers that understand this
+project's domain. Commands are slash-command workflows (like `/review`, `/test`)
+that invoke those agents. Together they give Claude Code project-aware tooling.
+
+Because Claude Code also has global commands, every project command description
+MUST include the project name so users can distinguish project-specific commands
+from global ones. For example: "Run tests for MyApp" not just "Run tests".
+
+CRITICAL: You will receive a "Project context" section in the initial message
+containing the actual directory listing and config file contents discovered by
+sipag. Base ALL your work on that context. Do NOT invent project names, tech
+stacks, or domain concepts that are not present in the discovered context.
 
 ## Procedure
 
-1. Explore the project IN THE CURRENT WORKING DIRECTORY ONLY. Read README,
-   CLAUDE.md, config files (package.json, Cargo.toml, pyproject.toml, go.mod,
-   Makefile, etc.), and scan the source directory structure. Do not read files
-   outside the current working directory. Understand the domain, tech stack,
-   conventions, and workflows.
+1. **Review the project context** provided in the initial message. This is the
+   ground truth about what exists in this project. You may read additional files
+   in the current working directory to deepen your understanding, but NEVER read
+   files outside it (no parent directories, no sibling projects, no home
+   directory files).
 
-2. Generate customized agents (`.claude/agents/*.md`):
-   - 3-5 agents tailored to this project's domain
+2. **State what you found** before writing anything. Print a short summary:
+   - Project name (from package.json, Cargo.toml, etc. — or "unknown")
+   - Tech stack (languages, frameworks, tools — ONLY what config files reveal)
+   - Key directories
+   - If the project is minimal or empty, say so explicitly
+
+3. Generate customized agents (`.claude/agents/*.md`):
+   - 3-5 agents tailored to this project's ACTUAL domain and tech stack
    - Every project needs at minimum: a security reviewer, a correctness
      reviewer, and a code quality reviewer — but focused on THIS project's
      specific attack surfaces, edge cases, and conventions
    - Use the reference agents below for format and spirit, not as copy targets
+   - Every agent description must reference technologies ACTUALLY found in step 2
 
-3. Generate customized commands (`.claude/commands/*.md`):
-   - 2-4 slash commands for this project's actual workflows
+4. Generate customized commands (`.claude/commands/*.md`):
+   - 2-4 slash commands that drive the agents you created in step 3
+   - The first line of each command file is the description shown in the
+     command picker — it MUST include the project name (e.g.,
+     "Review a pull request for CoolBeans." not "Review a pull request.")
    - Think about what review, deployment, triage, or testing workflows
-     matter for THIS project
+     matter for THIS project based on what you found in step 2
+   - Commands should invoke the agents by name (e.g., launch a Task with
+     `subagent_type: "security-reviewer"`) so the agents actually get used
    - Use the reference commands below for format and spirit
 
-4. Generate a customized `.claude/hooks/safety-gate.toml`:
-   - Project-specific deny patterns and path restrictions
-
-5. Print a summary of what you generated and why.
+5. Print a summary of what you generated and why, citing specific files or
+   config entries that motivated each choice.
 
 {FORCE_INSTRUCTION}
 
@@ -67,13 +92,15 @@ Every agent file needs YAML frontmatter:
 ### Reference command: triage
 {COMMAND_TRIAGE}
 
-### Reference config: safety-gate.toml
-{HOOK_SAFETY_GATE_TOML}
-
 ## Constraints
 
 - Read ONLY files inside the current working directory — never read files outside it
 - Write ONLY inside `.claude/`
 - Do NOT explore parent directories, sibling projects, or home directory files
+- Do NOT invent or hallucinate project details — if a technology is not in the
+  config files or source code, do not reference it in agents or commands
+- Every agent and command must be justified by something you actually found
+- If the project is minimal (few files, no framework), generate minimal but
+  useful agents — do not fabricate a complex domain
 - Keep each agent focused — 4 sharp agents beat 6 diffuse ones
 - Match the quality bar of the reference templates
