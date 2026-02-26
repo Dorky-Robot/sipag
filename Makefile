@@ -64,9 +64,9 @@ install-hooks:
 
 # ── Review agents ─────────────────────────────────────────────────────────────
 # Invoke specialized Claude Code review agents from .claude/agents/.
-# Install agents first with `sipag init`, then use in a Claude Code session.
+# Install agents first with `sipag configure`, then use in a Claude Code session.
 review:
-	@echo "sipag review agents (install with: sipag init):"
+	@echo "sipag review agents (install with: sipag configure):"
 	@echo ""
 	@echo "  make review-security      STRIDE + OWASP + Docker security"
 	@echo "  make review-architecture  Crate boundaries + bash modules + config"
@@ -78,13 +78,13 @@ review:
 	@echo "  Review PR #<N> using the correctness reviewer"
 
 review-security:
-	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "In a Claude Code session with agents installed (sipag configure), ask:"
 	@echo "  Review the latest changes using the security reviewer"
 
 review-architecture:
-	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "In a Claude Code session with agents installed (sipag configure), ask:"
 	@echo "  Review the latest changes using the architecture reviewer"
 
 review-correctness:
-	@echo "In a Claude Code session with agents installed (sipag init), ask:"
+	@echo "In a Claude Code session with agents installed (sipag configure), ask:"
 	@echo "  Review the latest changes using the correctness reviewer"

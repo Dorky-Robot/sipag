@@ -8,9 +8,9 @@ sipag is a template installer and sandbox launcher for Claude Code. It installs 
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  sipag init                                           │
-│  Installs agents, commands, and safety hooks          │
-│  into your project's .claude/ directory               │
+│  sipag configure                                      │
+│  Configures agents and commands                       │
+│  for your project's .claude/ directory                │
 └──────────────────────────┬───────────────────────────┘
                            │
                            v
@@ -48,18 +48,16 @@ sipag is a template installer and sandbox launcher for Claude Code. It installs 
 
 ---
 
-## sipag init
+## sipag configure
 
-`sipag init` installs templates into a project's `.claude/` directory:
+`sipag configure` generates project-specific agents and commands for your project's `.claude/` directory:
 
 | Category | Files | Purpose |
 |----------|-------|---------|
 | Agents | `security-reviewer.md`, `architecture-reviewer.md`, `correctness-reviewer.md`, `backlog-triager.md`, `issue-analyst.md` | Specialized review agents usable via Claude Code's Task tool |
-| Commands | `dispatch.md`, `review.md` | Custom slash commands for Claude Code |
-| Hooks | `safety-gate.sh`, `safety-gate.toml`, `README.md` | PreToolUse deny-list hook |
-| Settings | `settings.local.json` | Hook registration |
+| Commands | `dispatch.md`, `review.md`, `triage.md`, `ship-it.md` | Custom slash commands for Claude Code |
 
-These are installed as static files. Once in your project, they're yours to customize.
+By default, it launches Claude to analyze your project and write tailored agents. Use `--static` to install generic templates without Claude. Re-run as your project evolves.
 
 ---
 

@@ -85,13 +85,13 @@ sipag doctor
 
 Fix anything marked FAIL or MISSING before proceeding.
 
-## 5. Initialize a project
+## 5. Configure a project
 
-Install review agents, custom commands, and safety hooks into your project:
+Configure review agents and commands for your project:
 
 ```bash
 cd ~/Projects/my-app
-sipag init
+sipag configure
 ```
 
 This creates files in `.claude/`:
@@ -104,21 +104,14 @@ This creates files in `.claude/`:
 │   ├── correctness-reviewer.md
 │   ├── backlog-triager.md
 │   └── issue-analyst.md
-├── commands/
-│   ├── dispatch.md
-│   └── review.md
-├── hooks/
-│   ├── safety-gate.sh
-│   ├── safety-gate.toml
-│   └── README.md
-└── settings.local.json
+└── commands/
+    ├── dispatch.md
+    ├── review.md
+    ├── triage.md
+    └── ship-it.md
 ```
 
-To overwrite existing files:
-
-```bash
-sipag init --force
-```
+Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
 ## 6. Create and dispatch work
 
@@ -237,7 +230,7 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 ## Quick reference
 
 ```bash
-sipag init                               # Install agents + hooks into .claude/
+sipag configure                          # Configure agents + commands for .claude/
 sipag dispatch --repo owner/repo --pr N  # Launch a Docker worker
 sipag doctor                             # Check prerequisites
 sipag tui                                # Interactive worker dashboard

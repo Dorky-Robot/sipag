@@ -1,32 +1,32 @@
 # CLI Reference
 
-## sipag init
+## sipag configure
 
-Install review agents, custom commands, and safety hooks into a project's `.claude/` directory.
+Configure review agents and custom commands for a project's `.claude/` directory.
 
 ```
-sipag init [DIR] [--force]
+sipag configure [DIR] [--static]
 ```
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `DIR` | `.` (current directory) | Project directory to install into |
-| `--force` | off | Overwrite existing files |
+| `DIR` | `.` (current directory) | Project directory to configure |
+| `--static` | off | Install generic templates without launching Claude |
 
 **Examples:**
 
 ```bash
-sipag init                    # Install into current project
-sipag init ~/Projects/my-app  # Install into a specific project
-sipag init --force            # Overwrite existing files
+sipag configure                    # Configure current project (launches Claude)
+sipag configure ~/Projects/my-app  # Configure a specific project
+sipag configure --static           # Install generic templates without Claude
 ```
 
 **What gets installed:**
 
 - `.claude/agents/` — 5 review agents (security, architecture, correctness, backlog, issue)
-- `.claude/commands/` — 2 custom commands (dispatch, review)
-- `.claude/hooks/` — safety gate hook (deny-list PreToolUse)
-- `.claude/settings.local.json` — hook registration
+- `.claude/commands/` — 4 custom commands (dispatch, review, triage, ship-it)
+
+Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
 ---
 
