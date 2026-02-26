@@ -342,6 +342,22 @@ fn configure_static_creates_all_templates() {
         ".husky/pre-push should exist"
     );
 
+    // Hook content is non-empty and has expected structure
+    let pre_commit_content = fs::read_to_string(husky_dir.join("pre-commit")).unwrap();
+    assert!(
+        pre_commit_content.contains("#!/usr/bin/env bash"),
+        "pre-commit hook should have bash shebang"
+    );
+    assert!(
+        pre_commit_content.contains("gitleaks"),
+        "pre-commit hook should include gitleaks"
+    );
+    let pre_push_content = fs::read_to_string(husky_dir.join("pre-push")).unwrap();
+    assert!(
+        pre_push_content.contains("#!/usr/bin/env bash"),
+        "pre-push hook should have bash shebang"
+    );
+
     // Hooks must be executable
     let pre_commit_perms = fs::metadata(husky_dir.join("pre-commit"))
         .unwrap()

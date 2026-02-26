@@ -262,7 +262,7 @@ fn discover_project(dir: &Path) -> String {
 }
 
 fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
-    let installed = install_templates(claude_dir, TEMPLATES)?;
+    let installed = install_templates(claude_dir, TEMPLATES, ".claude/")?;
     let hooks_installed = install_static_hooks(husky_dir)?;
 
     // Categorize for summary.
@@ -283,7 +283,7 @@ fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
 }
 
 fn install_static_hooks(husky_dir: &Path) -> Result<u32> {
-    let installed = install_templates(husky_dir, HOOK_TEMPLATES)?;
+    let installed = install_templates(husky_dir, HOOK_TEMPLATES, ".husky/")?;
     for hook in HOOK_TEMPLATES {
         set_executable(&husky_dir.join(hook.relative_path))?;
     }
@@ -298,16 +298,20 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn install_templates(claude_dir: &Path, templates: &[TemplateFile]) -> Result<u32> {
+fn install_templates(
+    base_dir: &Path,
+    templates: &[TemplateFile],
+    display_prefix: &str,
+) -> Result<u32> {
     let mut installed = 0u32;
 
     for template in templates {
-        let dest = claude_dir.join(template.relative_path);
+        let dest = base_dir.join(template.relative_path);
 
         let action = if dest.exists() { "overwrite" } else { "create" };
 
         fs::write(&dest, template.content)?;
-        println!("  {action}: .claude/{}", template.relative_path);
+        println!("  {action}: {display_prefix}{}", template.relative_path);
         installed += 1;
     }
 
