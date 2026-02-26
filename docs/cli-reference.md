@@ -35,19 +35,18 @@ Re-run `sipag configure` as your project evolves — it reads existing files and
 Launch a Docker worker for a specific PR.
 
 ```
-sipag dispatch --repo <OWNER/REPO> --pr <N>
+sipag dispatch <PR_URL>
 ```
 
-| Flag | Required | Description |
-|------|----------|-------------|
-| `--repo` | yes | Repository in `owner/repo` format |
-| `--pr` | yes | PR number to implement |
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `PR_URL` | yes | GitHub PR URL (e.g. `https://github.com/owner/repo/pull/42`) |
 
 **Examples:**
 
 ```bash
-sipag dispatch --repo acme/my-app --pr 42
-sipag dispatch --repo Dorky-Robot/sipag --pr 123
+sipag dispatch https://github.com/acme/my-app/pull/42
+sipag dispatch https://github.com/Dorky-Robot/sipag/pull/123
 ```
 
 **What it does:**
