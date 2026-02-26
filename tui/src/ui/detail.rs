@@ -187,7 +187,9 @@ pub fn render_detail(f: &mut Frame, app: &App) {
 
         let visible_rows = log_rect.height.saturating_sub(1) as usize;
         // Clamp here (not in the model) because visible_rows is a renderer concept.
-        let start = app.log_scroll.min(app.log_lines.len().saturating_sub(visible_rows));
+        let start = app
+            .log_scroll
+            .min(app.log_lines.len().saturating_sub(visible_rows));
         let end = (start + visible_rows).min(app.log_lines.len());
 
         for log_line in &app.log_lines[start..end] {

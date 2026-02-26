@@ -109,7 +109,7 @@ impl App {
             if let Some(pos) = self
                 .tasks
                 .iter()
-                .position(|t| &t.repo == repo && t.pr_num == *pr_num)
+                .position(|t| &t.repo == repo && t.pr_num == pr_num)
             {
                 self.selected = pos;
             }
@@ -334,7 +334,7 @@ impl App {
     pub fn on_tick(&mut self) -> Result<()> {
         self.tick_count = self.tick_count.wrapping_add(1);
         // Refresh log content every 5 ticks (~1 s at 200 ms tick rate).
-        if self.tick_count % 5 != 0 {
+        if !self.tick_count.is_multiple_of(5) {
             return Ok(());
         }
         if !matches!(self.view, View::Detail) {
@@ -804,7 +804,11 @@ mod tests {
         for _ in 0..4 {
             app.on_tick().unwrap();
         }
-        assert_eq!(app.log_lines.len(), 1, "log should not refresh before tick 5");
+        assert_eq!(
+            app.log_lines.len(),
+            1,
+            "log should not refresh before tick 5"
+        );
 
         // Tick 5 triggers a refresh.
         app.on_tick().unwrap();
