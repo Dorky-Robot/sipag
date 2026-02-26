@@ -358,6 +358,25 @@ fn configure_help_shows_static_flag() {
         .stdout(predicate::str::contains("--static"));
 }
 
+// ── Configure alias ─────────────────────────────────────────────────────────
+
+#[test]
+fn config_alias_works() {
+    let dir = TempDir::new().unwrap();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+
+    sipag()
+        .args(["config", "--static", dir.path().to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Installed"));
+
+    assert!(dir
+        .path()
+        .join(".claude/agents/security-reviewer.md")
+        .exists());
+}
+
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
 #[test]
