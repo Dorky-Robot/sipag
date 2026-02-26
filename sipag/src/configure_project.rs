@@ -34,6 +34,14 @@ const TEMPLATES: &[TemplateFile] = &[
         content: templates::AGENT_ISSUE_ANALYST,
     },
     TemplateFile {
+        relative_path: "agents/root-cause-analyst.md",
+        content: templates::AGENT_ROOT_CAUSE_ANALYST,
+    },
+    TemplateFile {
+        relative_path: "agents/simplicity-advocate.md",
+        content: templates::AGENT_SIMPLICITY_ADVOCATE,
+    },
+    TemplateFile {
         relative_path: "commands/dispatch.md",
         content: templates::COMMAND_DISPATCH,
     },
@@ -121,6 +129,14 @@ pub(crate) fn build_configure_prompt() -> String {
         )
         .replace("{AGENT_BACKLOG_TRIAGER}", templates::AGENT_BACKLOG_TRIAGER)
         .replace("{AGENT_ISSUE_ANALYST}", templates::AGENT_ISSUE_ANALYST)
+        .replace(
+            "{AGENT_ROOT_CAUSE_ANALYST}",
+            templates::AGENT_ROOT_CAUSE_ANALYST,
+        )
+        .replace(
+            "{AGENT_SIMPLICITY_ADVOCATE}",
+            templates::AGENT_SIMPLICITY_ADVOCATE,
+        )
         .replace("{COMMAND_DISPATCH}", templates::COMMAND_DISPATCH)
         .replace("{COMMAND_REVIEW}", templates::COMMAND_REVIEW)
         .replace("{COMMAND_TRIAGE}", templates::COMMAND_TRIAGE)
