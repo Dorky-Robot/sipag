@@ -197,11 +197,11 @@ pub fn render_detail(f: &mut Frame, app: &App) {
         let log_para = Paragraph::new(log_lines);
         f.render_widget(log_para, log_rect);
 
-        // Scroll indicator.
+        // Scroll indicator — use the clamped `start` so the position matches what is rendered.
         if app.log_lines.len() > visible_rows && log_rect.width > 10 {
             let indicator = format!(
                 "[{}/{}]",
-                app.log_scroll + 1,
+                start + 1,
                 app.log_lines.len().saturating_sub(visible_rows) + 1
             );
             let indicator_rect = Rect {
