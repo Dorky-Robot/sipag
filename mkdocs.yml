@@ -1,6 +1,6 @@
 site_name: sipag
 site_url: https://sipag.dev
-site_description: Conversational agile for Claude Code. You talk; workers ship PRs.
+site_description: Autonomous dev agents that evolve with your project.
 site_author: Dorky-Robot
 
 repo_url: https://github.com/Dorky-Robot/sipag
