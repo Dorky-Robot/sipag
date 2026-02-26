@@ -143,6 +143,18 @@ fn exec_claude(project_dir: &Path, prompt: &str) -> Result<()> {
     bail!("failed to exec claude: {err}")
 }
 
+/// Truncate a string at a UTF-8 safe boundary, appending "(truncated)" if needed.
+fn truncate_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...\n(truncated)", &s[..end])
+}
+
 /// Scan the project directory and return a structured context string.
 /// This grounds the Claude session in actual project data rather than
 /// relying on Claude to explore (and potentially hallucinate).
@@ -189,12 +201,7 @@ fn discover_project(dir: &Path) -> String {
     for name in &config_files {
         let path = dir.join(name);
         if let Ok(content) = fs::read_to_string(&path) {
-            // Truncate large files to keep prompt reasonable.
-            let truncated = if content.len() > 2000 {
-                format!("{}...\n(truncated)", &content[..2000])
-            } else {
-                content
-            };
+            let truncated = truncate_utf8(&content, 2000);
             sections.push(format!("## {name}\n\n```\n{truncated}\n```"));
         }
     }
@@ -203,11 +210,7 @@ fn discover_project(dir: &Path) -> String {
     for name in &["README.md", "README", "CLAUDE.md"] {
         let path = dir.join(name);
         if let Ok(content) = fs::read_to_string(&path) {
-            let truncated = if content.len() > 3000 {
-                format!("{}...\n(truncated)", &content[..3000])
-            } else {
-                content
-            };
+            let truncated = truncate_utf8(&content, 3000);
             sections.push(format!("## {name}\n\n{truncated}"));
         }
     }
@@ -353,5 +356,34 @@ mod tests {
             context.contains("empty or minimal"),
             "should note empty project"
         );
+    }
+
+    #[test]
+    fn truncate_utf8_safe_on_multibyte() {
+        // 'é' is 2 bytes in UTF-8. Place it at the boundary.
+        let s = "a".repeat(1999) + "é" + "bbb";
+        assert_eq!(s.len(), 2004); // 1999 + 2 + 3
+        let result = truncate_utf8(&s, 2000);
+        // Should NOT panic, and should truncate before the 'é'
+        assert!(result.ends_with("(truncated)"));
+        assert!(result.len() < 2020);
+    }
+
+    #[test]
+    fn truncate_utf8_no_op_for_short_strings() {
+        let s = "hello";
+        assert_eq!(truncate_utf8(s, 2000), "hello");
+    }
+
+    #[test]
+    fn discover_project_truncates_large_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let big = "x".repeat(3000);
+        fs::write(dir.path().join("package.json"), &big).unwrap();
+
+        let context = discover_project(dir.path());
+        assert!(context.contains("(truncated)"));
+        // The full 3000-char content should not be present.
+        assert!(!context.contains(&big));
     }
 }

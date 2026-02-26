@@ -32,7 +32,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Install agents, commands, and hooks into a project
+    /// Install agents and commands into a project
     Init {
         /// Project directory (defaults to current directory)
         #[arg(default_value = ".")]
