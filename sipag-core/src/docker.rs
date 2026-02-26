@@ -2,21 +2,26 @@ use anyhow::Result;
 use std::process::{Command, Stdio};
 
 /// Find a working timeout command: `timeout` (Linux/coreutils) or `gtimeout` (macOS Homebrew).
-/// Returns `None` if neither is available.
+/// Returns `None` if neither is available. Result is cached process-wide via `OnceLock`.
 pub fn resolve_timeout_command() -> Option<String> {
-    for bin in ["timeout", "gtimeout"] {
-        if Command::new(bin)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return Some(bin.to_string());
-        }
-    }
-    None
+    static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            for bin in ["timeout", "gtimeout"] {
+                if Command::new(bin)
+                    .arg("--version")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+                {
+                    return Some(bin.to_string());
+                }
+            }
+            None
+        })
+        .clone()
 }
 
 /// Check that Docker daemon is running and accessible.
