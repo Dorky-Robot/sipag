@@ -1,6 +1,6 @@
 # Getting started with sipag
 
-sipag is a template installer and sandbox launcher for Claude Code. It installs review agents and safety hooks into your project, then launches isolated Docker workers that read a PR description and implement it autonomously. You create the PR; workers do the work.
+sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures. Re-run `sipag configure` as your project evolves — it analyzes what's there and updates your agents. You create the PR; workers do the work.
 
 ## Prerequisites
 
