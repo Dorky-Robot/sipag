@@ -110,6 +110,9 @@ Every agent file needs YAML frontmatter:
 ### Reference command: ship-it
 {COMMAND_SHIP_IT}
 
+### Reference command: work
+{COMMAND_WORK}
+
 ## Constraints
 
 - Read ONLY files inside the current working directory — never read files outside it
