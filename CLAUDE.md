@@ -156,7 +156,7 @@ Worker containers use `ghcr.io/dorky-robot/sipag-worker:latest`, published via G
 
 ```bash
 docker build -t sipag-worker:local .
-SIPAG_IMAGE=sipag-worker:local sipag dispatch --repo <owner/repo> --pr <N>
+SIPAG_IMAGE=sipag-worker:local sipag dispatch https://github.com/owner/repo/pull/N
 ```
 
 ## Working on sipag

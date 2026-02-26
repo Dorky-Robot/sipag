@@ -112,7 +112,7 @@ pub fn render_list(f: &mut Frame, app: &App) {
         let empty_msg = if is_archive {
             "\nNo archived workers.\n\nCompleted workers will appear here."
         } else {
-            "\nNo workers running.\n\nStart with:  sipag dispatch --repo <owner/repo> --pr <N>"
+            "\nNo workers running.\n\nStart with:  sipag dispatch <PR_URL>"
         };
         let empty = Paragraph::new(empty_msg)
             .style(Style::default().fg(Color::DarkGray))

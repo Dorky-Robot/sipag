@@ -44,7 +44,7 @@ The PR description is the worker's complete assignment. Make it thorough — the
 ## Step 3: Dispatch the worker
 
 ```bash
-sipag dispatch --repo <owner/repo> --pr <N>
+sipag dispatch https://github.com/owner/repo/pull/N
 ```
 
 ## Step 4: Monitor progress
