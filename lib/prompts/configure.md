@@ -92,6 +92,12 @@ Every agent file needs YAML frontmatter:
 ### Reference agent: issue-analyst
 {AGENT_ISSUE_ANALYST}
 
+### Reference agent: root-cause-analyst
+{AGENT_ROOT_CAUSE_ANALYST}
+
+### Reference agent: simplicity-advocate
+{AGENT_SIMPLICITY_ADVOCATE}
+
 ### Reference command: dispatch
 {COMMAND_DISPATCH}
 
