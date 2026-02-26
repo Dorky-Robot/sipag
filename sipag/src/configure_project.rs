@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
@@ -63,6 +64,18 @@ const TEMPLATES: &[TemplateFile] = &[
     },
 ];
 
+/// Git hook templates installed to .husky/ (separate from .claude/ templates).
+const HOOK_TEMPLATES: &[TemplateFile] = &[
+    TemplateFile {
+        relative_path: "pre-commit",
+        content: templates::GIT_HOOK_PRE_COMMIT,
+    },
+    TemplateFile {
+        relative_path: "pre-push",
+        content: templates::GIT_HOOK_PRE_PUSH,
+    },
+];
+
 const CONFIGURE_PROMPT: &str = include_str!("../../lib/prompts/configure.md");
 
 pub fn run_configure(dir: &Path, static_only: bool) -> Result<()> {
@@ -82,11 +95,13 @@ pub fn run_configure(dir: &Path, static_only: bool) -> Result<()> {
     }
 
     let claude_dir = dir.join(".claude");
+    let husky_dir = dir.join(".husky");
 
     // Create directory structure.
     for subdir in &["agents", "commands"] {
         fs::create_dir_all(claude_dir.join(subdir))?;
     }
+    fs::create_dir_all(&husky_dir)?;
 
     if static_only || !claude_available() {
         if !static_only {
@@ -95,7 +110,7 @@ pub fn run_configure(dir: &Path, static_only: bool) -> Result<()> {
                 "Re-run sipag configure after installing Claude Code for project-specific setup.\n"
             );
         }
-        return install_static_templates(&claude_dir);
+        return install_static_templates(&claude_dir, &husky_dir);
     }
 
     // Generative: launch Claude to explore the project and write
@@ -146,6 +161,8 @@ pub(crate) fn build_configure_prompt() -> String {
         .replace("{COMMAND_TRIAGE}", templates::COMMAND_TRIAGE)
         .replace("{COMMAND_SHIP_IT}", templates::COMMAND_SHIP_IT)
         .replace("{COMMAND_WORK}", templates::COMMAND_WORK)
+        .replace("{HOOK_PRE_COMMIT}", templates::GIT_HOOK_PRE_COMMIT)
+        .replace("{HOOK_PRE_PUSH}", templates::GIT_HOOK_PRE_PUSH)
 }
 
 fn exec_claude(project_dir: &Path, prompt: &str) -> Result<()> {
@@ -244,8 +261,9 @@ fn discover_project(dir: &Path) -> String {
     }
 }
 
-fn install_static_templates(claude_dir: &Path) -> Result<()> {
-    let installed = install_templates(claude_dir, TEMPLATES)?;
+fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
+    let installed = install_templates(claude_dir, TEMPLATES, ".claude/")?;
+    let hooks_installed = install_static_hooks(husky_dir)?;
 
     // Categorize for summary.
     let agents = TEMPLATES
@@ -258,20 +276,42 @@ fn install_static_templates(claude_dir: &Path) -> Result<()> {
         .count();
 
     println!("\nInstalled {installed} files ({agents} agents, {commands} commands) to .claude/");
+    println!("Installed {hooks_installed} git hooks to .husky/");
+    println!("\nActivate hooks:  git config core.hooksPath .husky");
 
     Ok(())
 }
 
-fn install_templates(claude_dir: &Path, templates: &[TemplateFile]) -> Result<u32> {
+fn install_static_hooks(husky_dir: &Path) -> Result<u32> {
+    let installed = install_templates(husky_dir, HOOK_TEMPLATES, ".husky/")?;
+    for hook in HOOK_TEMPLATES {
+        set_executable(&husky_dir.join(hook.relative_path))?;
+    }
+    Ok(installed)
+}
+
+fn set_executable(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)?;
+    let mut perms = metadata.permissions();
+    perms.set_mode(perms.mode() | 0o111);
+    fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+fn install_templates(
+    base_dir: &Path,
+    templates: &[TemplateFile],
+    display_prefix: &str,
+) -> Result<u32> {
     let mut installed = 0u32;
 
     for template in templates {
-        let dest = claude_dir.join(template.relative_path);
+        let dest = base_dir.join(template.relative_path);
 
         let action = if dest.exists() { "overwrite" } else { "create" };
 
         fs::write(&dest, template.content)?;
-        println!("  {action}: .claude/{}", template.relative_path);
+        println!("  {action}: {display_prefix}{}", template.relative_path);
         installed += 1;
     }
 

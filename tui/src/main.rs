@@ -60,7 +60,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut app::App
                     // to the live tmux session (or display completion status if done).
                     let attach_script = "\
                         echo '=== Claude output (last 100 lines) ==='; \
-                        tail -n 100 /tmp/claude.log 2>/dev/null; \
+                        tail -n 100 /tmp/claude-output.log 2>/dev/null; \
                         echo '==================================='; \
                         if tmux has-session -t claude 2>/dev/null; then \
                             echo 'Attaching to live session (Ctrl-b d to detach)...'; \
