@@ -87,13 +87,7 @@ impl Task {
             return vec![];
         }
         let content = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-        let n = 30;
-        if lines.len() <= n {
-            lines
-        } else {
-            lines[lines.len() - n..].to_vec()
-        }
+        content.lines().map(|l| l.to_string()).collect()
     }
 
     fn log_path(&self) -> PathBuf {
@@ -232,6 +226,30 @@ mod tests {
         let lines = task.log_lines();
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[0], "line 0");
+    }
+
+    #[test]
+    fn log_lines_reads_full_log_without_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let workers_dir = dir.path().join("workers");
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&workers_dir).unwrap();
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let mut w = sample_worker_state();
+        w.file_path = workers_dir.join("test--repo--pr-99.json");
+
+        let task = Task::from(w);
+        let log_path = logs_dir.join("test--repo--pr-99.log");
+        let mut f = std::fs::File::create(&log_path).unwrap();
+        for i in 0..100 {
+            writeln!(f, "line {i}").unwrap();
+        }
+
+        let lines = task.log_lines();
+        assert_eq!(lines.len(), 100);
+        assert_eq!(lines[0], "line 0");
+        assert_eq!(lines[99], "line 99");
     }
 
     #[test]
