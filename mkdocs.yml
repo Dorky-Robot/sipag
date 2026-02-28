@@ -9,21 +9,9 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  font: false
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-7
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: indigo
-      accent: indigo
-      toggle:
-        icon: material/brightness-4
-        name: Switch to light mode
+    scheme: slate
   features:
     - navigation.instant
     - navigation.tracking
@@ -66,6 +54,9 @@ nav:
       - Setting Up a New Repo: guides/new-repo-setup.md
       - Running sipag in CI: guides/ci-integration.md
   - FAQ: faq.md
+
+extra_css:
+  - assets/css/dorkyrobot-theme.css
 
 extra:
   social:
