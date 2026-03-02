@@ -13,7 +13,7 @@ Read ALL source files. Every module, every component, every test. Do not skip fi
 
 ## Phase 2: Launch Review Agents in Parallel
 
-Use the Agent tool to launch all eight agents concurrently in a single message. Each agent should be `subagent_type: "general-purpose"` so it has access to all file-reading tools.
+Send a single message with 8 Task tool calls so they run concurrently. Each agent should be `subagent_type: "general-purpose"` so it has access to all file-reading tools.
 
 **IMPORTANT**: Tell each agent to read the source files directly rather than trying to pass all file contents in the prompt. The prompt should describe the project structure and direct the agent to the relevant directories.
 
