@@ -256,16 +256,18 @@ Key principles from the 356722a prompt that should carry forward:
 - **Not autonomous.** A human (or parent orchestrator) starts it, reviews the PRs, and decides what to merge. sipag proposes; humans dispose.
 - **Not fast.** It's relentless. One careful cycle at a time, every cycle leaving the project measurably better.
 
-## Open questions for v3
+## How the open questions were resolved
 
-- **What data does sipag provide to the main session?** The main session needs issue titles for disease clustering, and full issue bodies for the selected cluster when writing the PR. Does sipag provide this via commands (`sipag issues`, `sipag issue #N`), or does the main session just use `gh` directly? sipag commands would be more ergonomic and could handle caching/formatting.
+These questions were originally open during v3 design. Here's how the implementation resolved them:
 
-- **How does the worker receive its assignment?** Currently via env vars (PROMPT, ISSUE_NUMS, etc.). In v3, the worker should receive a PR URL/branch and work on that PR. The PR description *is* the assignment. The worker prompt just sets the disposition (boy scout, elegance, test curation).
+- **Data for the main session:** The main session uses `gh` directly for issue/PR data. sipag provides building blocks (dispatch, state, lifecycle) but doesn't wrap GitHub's API. The `/triage` and `/dispatch` commands orchestrate the analysis flow.
 
-- **What's the review experience?** The main session reviews via `gh pr diff` + `gh pr review`. Should sipag provide a structured review command, or is that just Claude Code being Claude Code?
+- **Worker assignment:** The worker receives a PR URL. It reads the PR description via `gh pr view` — the PR body *is* the assignment. The worker prompt (`lib/prompts/worker.md`) sets the disposition.
 
-- **How do we handle the "issues that don't need code" case?** Some issues are duplicates, some are invalid, some need discussion. Should the analysis phase recommend closing/adjusting issues, or just skip them?
+- **Review experience:** The `/review` command runs 4 review agents in parallel (security, architecture, correctness, plus a test-adequacy check). The main session orchestrates this via Claude Code's Task tool.
 
-- **How much of the flow does sipag automate vs. the main session orchestrate?** Two extremes: (a) `sipag work` is a single command that runs the full loop automatically, or (b) `sipag` provides building blocks (`sipag issues`, `sipag dispatch`, `sipag review`) and the main session strings them together with its own judgment. The diagram suggests (b) — the main Claude Code session is in the driver's seat.
+- **Non-code issues:** The `backlog-triager` agent evaluates issues against VISION.md and recommends CLOSE/ADJUST/KEEP/MERGE. The `issue-analyst` agent clusters issues and identifies which to group into a PR.
 
-- **Scaling beyond one repo.** Currently `sipag work repo1 repo2` polls both. Should repos be fully independent (separate cycles), or should the analysis consider cross-repo patterns?
+- **Automation level:** sipag provides building blocks. The main Claude Code session is in the driver's seat. The `/work` command automates the full loop (poll → analyze → dispatch → monitor) with back-pressure, and `/ship-it` handles the commit → PR → review → merge cycle.
+
+- **Multi-repo:** Each repo runs independently. The `/work` command can dispatch across repos but each worker targets a single repo's PR.

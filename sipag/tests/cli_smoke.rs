@@ -322,6 +322,10 @@ fn configure_static_creates_all_templates() {
     assert!(claude_dir.join("agents/security-reviewer.md").exists());
     assert!(claude_dir.join("agents/architecture-reviewer.md").exists());
     assert!(claude_dir.join("agents/correctness-reviewer.md").exists());
+    assert!(claude_dir.join("agents/root-cause-analyst.md").exists());
+    assert!(claude_dir.join("agents/simplicity-advocate.md").exists());
+    assert!(claude_dir.join("agents/backlog-triager.md").exists());
+    assert!(claude_dir.join("agents/issue-analyst.md").exists());
     // Commands
     assert!(claude_dir.join("commands/dispatch.md").exists());
     assert!(claude_dir.join("commands/review.md").exists());
