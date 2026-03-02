@@ -21,6 +21,7 @@ pub const COMMAND_REVIEW: &str = include_str!("../../lib/templates/commands/revi
 pub const COMMAND_TRIAGE: &str = include_str!("../../lib/templates/commands/triage.md");
 pub const COMMAND_SHIP_IT: &str = include_str!("../../lib/templates/commands/ship-it.md");
 pub const COMMAND_WORK: &str = include_str!("../../lib/templates/commands/work.md");
+pub const COMMAND_CONSULT: &str = include_str!("../../lib/templates/commands/consult.md");
 
 // Git hooks
 pub const GIT_HOOK_PRE_COMMIT: &str = include_str!("../../lib/templates/git-hooks/pre-commit");
