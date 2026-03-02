@@ -66,6 +66,10 @@ const TEMPLATES: &[TemplateFile] = &[
         relative_path: "commands/consult.md",
         content: templates::COMMAND_CONSULT,
     },
+    TemplateFile {
+        relative_path: "commands/release.md",
+        content: templates::COMMAND_RELEASE,
+    },
 ];
 
 /// Git hook templates installed to .husky/ (separate from .claude/ templates).
@@ -166,6 +170,7 @@ pub(crate) fn build_configure_prompt() -> String {
         .replace("{COMMAND_SHIP_IT}", templates::COMMAND_SHIP_IT)
         .replace("{COMMAND_WORK}", templates::COMMAND_WORK)
         .replace("{COMMAND_CONSULT}", templates::COMMAND_CONSULT)
+        .replace("{COMMAND_RELEASE}", templates::COMMAND_RELEASE)
         .replace("{HOOK_PRE_COMMIT}", templates::GIT_HOOK_PRE_COMMIT)
         .replace("{HOOK_PRE_PUSH}", templates::GIT_HOOK_PRE_PUSH)
 }
