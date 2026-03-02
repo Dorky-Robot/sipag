@@ -54,8 +54,8 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 
 | Category | Files | Purpose |
 |----------|-------|---------|
-| Agents | `security-reviewer.md`, `architecture-reviewer.md`, `correctness-reviewer.md`, `backlog-triager.md`, `issue-analyst.md` | Specialized review agents usable via Claude Code's Task tool |
-| Commands | `dispatch.md`, `review.md`, `triage.md`, `ship-it.md` | Custom slash commands for Claude Code |
+| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `root-cause-analyst`, `simplicity-advocate`, `backlog-triager`, `issue-analyst` | Specialized review agents usable via Claude Code's Task tool |
+| Commands | `dispatch`, `review`, `triage`, `ship-it`, `work`, `consult`, `release` | Custom slash commands for Claude Code |
 
 By default, it launches Claude to analyze your project and write tailored agents. Use `--static` to install generic templates without Claude. Re-run as your project evolves.
 

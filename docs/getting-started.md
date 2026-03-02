@@ -15,7 +15,7 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 ### Homebrew (macOS)
 
 ```bash
-brew tap Dorky-Robot/tap
+brew tap Dorky-Robot/sipag
 brew install sipag
 ```
 
@@ -102,13 +102,18 @@ This creates files in `.claude/`:
 │   ├── security-reviewer.md
 │   ├── architecture-reviewer.md
 │   ├── correctness-reviewer.md
+│   ├── root-cause-analyst.md
+│   ├── simplicity-advocate.md
 │   ├── backlog-triager.md
 │   └── issue-analyst.md
 └── commands/
     ├── dispatch.md
     ├── review.md
     ├── triage.md
-    └── ship-it.md
+    ├── ship-it.md
+    ├── work.md
+    ├── consult.md
+    └── release.md
 ```
 
 Re-run `sipag configure` as your project evolves — it reads existing files and updates them.

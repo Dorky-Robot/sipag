@@ -68,8 +68,8 @@ Generates project-specific review agents and commands into `.claude/`. By defaul
 
 | Category | Files |
 |----------|-------|
-| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `backlog-triager`, `issue-analyst` |
-| Commands | `dispatch`, `review`, `triage`, `ship-it` |
+| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `root-cause-analyst`, `simplicity-advocate`, `backlog-triager`, `issue-analyst` |
+| Commands | `dispatch`, `review`, `triage`, `ship-it`, `work`, `consult`, `release` |
 
 Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
@@ -198,6 +198,6 @@ make fmt             # cargo fmt
 make dev             # lint + fmt-check + test
 ```
 
-## Status
+## Documentation
 
-sipag is in active development. See [VISION.md](VISION.md) for the full product vision.
+Full documentation at [sipag.dev](https://sipag.dev).

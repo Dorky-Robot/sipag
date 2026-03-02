@@ -103,7 +103,9 @@ The `.claude/agents/` directory contains specialized review agents installed by 
 |-------|---------|
 | `issue-analyst` | Pre-dispatch analysis: cluster issues, evaluate from 3 perspectives, recommend highest bang-for-buck PR |
 | `backlog-triager` | Evaluate issues against VISION.md, recommend CLOSE/ADJUST/KEEP/MERGE |
-| `architecture-reviewer` | Review PRs for crate boundary violations, config resolution order |
+| `root-cause-analyst` | Traces issues to structural design flaws, prescribes structural cures |
+| `simplicity-advocate` | Challenges whether abstractions should exist, finds accidental complexity |
+| `architecture-reviewer` | Review PRs for module boundary violations, config resolution order |
 | `security-reviewer` | STRIDE threat modeling, OWASP checks, token handling |
 | `correctness-reviewer` | Worker lifecycle edge cases, race conditions, state machine transitions |
 

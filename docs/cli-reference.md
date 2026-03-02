@@ -23,8 +23,8 @@ sipag configure --static           # Install generic templates without Claude
 
 **What gets installed:**
 
-- `.claude/agents/` — 5 review agents (security, architecture, correctness, backlog, issue)
-- `.claude/commands/` — 4 custom commands (dispatch, review, triage, ship-it)
+- `.claude/agents/` — 7 review agents (security, architecture, correctness, root-cause, simplicity, backlog, issue)
+- `.claude/commands/` — 7 custom commands (dispatch, review, triage, ship-it, work, consult, release)
 
 Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
@@ -205,5 +205,5 @@ sipag version
 **Example output:**
 
 ```
-sipag 0.5.0 (a1b2c3d)
+sipag 3.0.9 (ea3802e)
 ```
