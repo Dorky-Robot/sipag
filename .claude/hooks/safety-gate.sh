@@ -255,6 +255,11 @@ Bash)
 		check_rm_safe "$cmd"
 	fi
 
+	# SSH to known trusted hosts is allowed.
+	if echo "$cmd" | grep -qE '^ssh (mini|mac-2019) '; then
+		allow "SSH to trusted host"
+	fi
+
 	# Deny check is the only gate — if it matches, deny; otherwise allow.
 	if check_bash_deny "$cmd"; then
 		deny "Command matches deny pattern: $cmd"

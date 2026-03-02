@@ -45,6 +45,9 @@ stacks, or domain concepts that are not present in the discovered context.
    - 3-5 slash commands that drive the agents you created in step 3
    - Every project MUST have a `/ship-it` command — the commit→PR→review→merge
      workflow that invokes your review agents. This is the most important command.
+   - Every project MUST have a `/consult` command — the multi-perspective
+     consultation workflow. Use the reference command below as a starting point
+     and customize the perspectives for this project's domain.
    - The first line of each command file is the description shown in the
      command picker — it MUST include the project name (e.g.,
      "Review a pull request for CoolBeans." not "Review a pull request.")
