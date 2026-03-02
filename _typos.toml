@@ -13,5 +13,10 @@ ratatui = "ratatui"   # TUI framework crate (not "ratatouille")
 # Regex fragments in shell scripts (e.g., (ba)?sh matches bash/sh)
 ba = "ba"
 
+# Rich Hickey's term: to interweave/braid together (used in /consult agent)
+complecting  = "complecting"
+complection  = "complection"
+complected   = "complected"
+
 # Intentional misspellings in test fixtures (Levenshtein distance tests)
 imge = "imge"
