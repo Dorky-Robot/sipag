@@ -133,6 +133,9 @@ Every agent file needs YAML frontmatter:
 ### Reference command: consult
 {COMMAND_CONSULT}
 
+### Reference command: release
+{COMMAND_RELEASE}
+
 ### Reference git hook: pre-commit
 {HOOK_PRE_COMMIT}
 

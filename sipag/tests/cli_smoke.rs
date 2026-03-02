@@ -329,6 +329,7 @@ fn configure_static_creates_all_templates() {
     assert!(claude_dir.join("commands/ship-it.md").exists());
     assert!(claude_dir.join("commands/work.md").exists());
     assert!(claude_dir.join("commands/consult.md").exists());
+    assert!(claude_dir.join("commands/release.md").exists());
     // No Claude Code hooks or settings — those are separate from git hooks
     assert!(!claude_dir.join("hooks").exists());
 
