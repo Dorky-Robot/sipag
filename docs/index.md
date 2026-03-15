@@ -46,7 +46,7 @@ Workers run in isolated Docker containers. Claude has full autonomy inside them 
 === "One-line script"
 
     ```bash
-    curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
+    curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | sh
     ```
 
 === "From source"

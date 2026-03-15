@@ -1,129 +1,183 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # sipag installer — downloads the correct pre-built binary for your OS/arch.
-# Usage: curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
-set -euo pipefail
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | sh
+#
+# Options (environment variables):
+#   SIPAG_INSTALL_DIR  — where to put the binary    (default: /usr/local/bin)
+#   SIPAG_SHARE_DIR    — where to put prompt files   (default: /usr/local/share/sipag)
+#   SIPAG_VERSION      — install a specific version  (default: latest)
+#
+# Works on: Linux (x86_64, aarch64), macOS (x86_64, arm64), Docker containers.
+set -eu
 
 REPO="Dorky-Robot/sipag"
 INSTALL_DIR="${SIPAG_INSTALL_DIR:-/usr/local/bin}"
 SHARE_DIR="${SIPAG_SHARE_DIR:-/usr/local/share/sipag}"
 
-# ── Detect OS ─────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-os="$(uname -s)"
-arch="$(uname -m)"
+log()   { printf '  %s\n' "$*"; }
+info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
+err()   { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-case "$os" in
-  Darwin)
-    case "$arch" in
-      x86_64)  target="x86_64-apple-darwin" ;;
-      arm64)   target="aarch64-apple-darwin" ;;
-      *)       echo "Unsupported macOS architecture: $arch" >&2; exit 1 ;;
-    esac
-    ;;
-  Linux)
-    case "$arch" in
-      x86_64)  target="x86_64-unknown-linux-gnu" ;;
-      aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
-      *)       echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
-    esac
-    ;;
-  *)
-    echo "Unsupported OS: $os" >&2
-    exit 1
-    ;;
-esac
+need() {
+  command -v "$1" >/dev/null 2>&1 || err "'$1' is required but not found. Install it and try again."
+}
 
-# ── Resolve latest release ────────────────────────────────────────────────────
-
-echo "Fetching latest sipag release..."
-api_url="https://api.github.com/repos/${REPO}/releases/latest"
-release_json="$(curl -fsSL "$api_url")"
-
-# Extract version tag (works without jq)
-version="$(echo "$release_json" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
-
-if [ -z "$version" ]; then
-  echo "Could not determine latest release version." >&2
-  exit 1
-fi
-
-archive="sipag-${version}-${target}.tar.gz"
-download_url="https://github.com/${REPO}/releases/download/${version}/${archive}"
-
-# ── Download ──────────────────────────────────────────────────────────────────
-
-tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
-
-echo "Downloading sipag ${version} for ${target}..."
-curl -fsSL -o "${tmpdir}/${archive}" "$download_url"
-
-# ── Extract ───────────────────────────────────────────────────────────────────
-
-tar -xzf "${tmpdir}/${archive}" -C "$tmpdir"
-extracted_dir="${tmpdir}/sipag-${version}-${target}"
-
-# ── Install bash scripts to share prefix ─────────────────────────────────────
-#
-# Layout: ${SHARE_DIR}/
-#   lib/               — shell-out scripts (setup, doctor, start, merge, refresh-docs)
-#   lib/container/     — container entrypoint scripts (embedded in Rust via include_str)
-#   lib/prompts/       — prompt templates
-
-_install() {
-  if [ -w "$(dirname "$2")" ]; then
-    install "$@"
+# Run a command with sudo only when the target directory is not writable.
+# Usage: maybe_sudo <target_path> <command> [args...]
+maybe_sudo() {
+  _target="$1"; shift
+  if [ -w "$(dirname "$_target")" ] 2>/dev/null; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
   else
-    sudo install "$@"
+    "$@"  # let it fail with a permission error
   fi
 }
 
-_mkdir() {
-  if [ -w "$(dirname "$1")" ] 2>/dev/null || [ -d "$1" ]; then
-    mkdir -p "$1"
-  else
-    sudo mkdir -p "$1"
+# ── Detect platform ─────────────────────────────────────────────────────────
+
+detect_platform() {
+  os="$(uname -s)"
+  arch="$(uname -m)"
+
+  case "$os" in
+    Darwin)
+      case "$arch" in
+        x86_64)       target="x86_64-apple-darwin" ;;
+        arm64|aarch64) target="aarch64-apple-darwin" ;;
+        *) err "Unsupported macOS architecture: $arch" ;;
+      esac
+      ;;
+    Linux)
+      case "$arch" in
+        x86_64)       target="x86_64-unknown-linux-gnu" ;;
+        aarch64|arm64) target="aarch64-unknown-linux-gnu" ;;
+        *) err "Unsupported Linux architecture: $arch" ;;
+      esac
+      ;;
+    *)
+      err "Unsupported OS: $os"
+      ;;
+  esac
+}
+
+# ── Resolve version ─────────────────────────────────────────────────────────
+
+resolve_version() {
+  if [ -n "${SIPAG_VERSION:-}" ]; then
+    version="$SIPAG_VERSION"
+    # Ensure it starts with 'v'
+    case "$version" in
+      v*) ;;
+      *)  version="v${version}" ;;
+    esac
+    # Validate version format (vX.Y.Z)
+    case "$version" in
+      v[0-9]*.[0-9]*.[0-9]*) ;;
+      *) err "Invalid version format: $version (expected vX.Y.Z)" ;;
+    esac
+    return
+  fi
+
+  need curl
+  info "Fetching latest release..."
+  api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  release_json="$(curl -fsSL "$api_url")" || err "Failed to fetch release info from GitHub."
+
+  # Extract tag_name without jq (works with grep + sed)
+  version="$(printf '%s' "$release_json" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+
+  [ -n "$version" ] || err "Could not determine latest release version."
+}
+
+# ── Download & extract ───────────────────────────────────────────────────────
+
+download() {
+  need curl
+  need tar
+
+  archive="sipag-${version}-${target}.tar.gz"
+  download_url="https://github.com/${REPO}/releases/download/${version}/${archive}"
+
+  tmpdir="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" EXIT
+
+  info "Downloading sipag ${version} for ${target}..."
+  curl -fsSL -o "${tmpdir}/${archive}" "$download_url" \
+    || err "Download failed. Check that release ${version} exists for ${target}."
+
+  tar -xzf "${tmpdir}/${archive}" -C "$tmpdir"
+  extracted="${tmpdir}/sipag-${version}-${target}"
+
+  [ -f "${extracted}/sipag" ] || err "Archive missing sipag binary."
+}
+
+# ── Install ──────────────────────────────────────────────────────────────────
+
+install_files() {
+  info "Installing sipag to ${INSTALL_DIR}..."
+
+  # Create directories
+  maybe_sudo "$INSTALL_DIR" mkdir -p "$INSTALL_DIR"
+  maybe_sudo "${INSTALL_DIR}/sipag" install -m 755 "${extracted}/sipag" "${INSTALL_DIR}/sipag"
+
+  # Install prompt files if present in the release
+  if [ -d "${extracted}/lib/prompts" ]; then
+    info "Installing prompts to ${SHARE_DIR}..."
+    maybe_sudo "${SHARE_DIR}/lib/prompts" mkdir -p "${SHARE_DIR}/lib/prompts"
+    for f in "${extracted}"/lib/prompts/*.md; do
+      [ -f "$f" ] && maybe_sudo "${SHARE_DIR}/lib/prompts/" install -m 644 "$f" "${SHARE_DIR}/lib/prompts/"
+    done
   fi
 }
 
-echo "Installing bash scripts to ${SHARE_DIR}..."
-_mkdir "${SHARE_DIR}/lib/container"
-_mkdir "${SHARE_DIR}/lib/prompts"
+# ── Post-install checks ─────────────────────────────────────────────────────
 
-_install -m 644 "${extracted_dir}"/lib/*.sh         "${SHARE_DIR}/lib/"
-_install -m 644 "${extracted_dir}"/lib/container/*.sh "${SHARE_DIR}/lib/container/"
-_install -m 644 "${extracted_dir}"/lib/prompts/*.md  "${SHARE_DIR}/lib/prompts/"
-
-# ── Install binary ───────────────────────────────────────────────────────────
-
-echo "Installing sipag binary to ${INSTALL_DIR}..."
-_mkdir "${INSTALL_DIR}"
-_install -m 755 "${extracted_dir}/sipag" "${INSTALL_DIR}/sipag"
-
-# ── PATH reminder ─────────────────────────────────────────────────────────────
-
-if ! command -v sipag >/dev/null 2>&1; then
+post_install() {
   echo ""
-  echo "Note: ${INSTALL_DIR} is not in your PATH."
-  echo "Add it by running:"
+  info "sipag ${version} installed successfully."
+  log "binary:  ${INSTALL_DIR}/sipag"
+  [ -d "${SHARE_DIR}/lib/prompts" ] && log "prompts: ${SHARE_DIR}/lib/prompts/"
   echo ""
-  echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc  # bash"
-  echo "  echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.zshrc   # zsh"
-  echo ""
-fi
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+  # PATH check
+  if ! command -v sipag >/dev/null 2>&1; then
+    log "Note: ${INSTALL_DIR} is not in your PATH. Add it:"
+    log ""
+    log "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    log ""
+  fi
 
-echo ""
-echo "sipag ${version} installed."
-echo "  scripts: ${SHARE_DIR}"
-echo "  command: ${INSTALL_DIR}/sipag"
-echo ""
-echo "Prerequisites (install separately if not present):"
-echo "  jq        — brew install jq / apt install jq"
-echo "  gh        — brew install gh / https://cli.github.com"
-echo "  Docker    — https://www.docker.com/products/docker-desktop"
-echo "  Claude Code — npm install -g @anthropic-ai/claude-code"
-echo ""
-echo "Next step:"
-echo "  sipag setup"
+  # Prerequisite hints
+  missing=""
+  command -v docker >/dev/null 2>&1 || missing="${missing} docker"
+  command -v gh     >/dev/null 2>&1 || missing="${missing} gh"
+  command -v claude >/dev/null 2>&1 || missing="${missing} claude"
+
+  if [ -n "$missing" ]; then
+    log "Optional prerequisites not found:${missing}"
+    log ""
+    command -v docker >/dev/null 2>&1 || log "  docker — https://docs.docker.com/get-docker/"
+    command -v gh     >/dev/null 2>&1 || log "  gh     — https://cli.github.com"
+    command -v claude >/dev/null 2>&1 || log "  claude — npm install -g @anthropic-ai/claude-code"
+    echo ""
+  fi
+
+  log "Get started:"
+  log "  sipag configure    # set up review agents for your project"
+  log "  sipag doctor       # check all prerequisites"
+}
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+detect_platform
+resolve_version
+download
+install_files
+post_install

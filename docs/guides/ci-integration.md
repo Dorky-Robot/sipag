@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Install sipag
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
+          curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | sh
 
       - name: Pull worker image
         run: docker pull ghcr.io/dorky-robot/sipag-worker:latest
