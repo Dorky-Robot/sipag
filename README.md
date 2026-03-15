@@ -108,7 +108,7 @@ This installs the pre-built binary — no Rust toolchain required.
 ### One-line install (macOS and Linux)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | sh
 ```
 
 Supports macOS (Intel and Apple Silicon) and Linux (x86\_64 and ARM64). Installs the binary to `/usr/local/bin/sipag`.

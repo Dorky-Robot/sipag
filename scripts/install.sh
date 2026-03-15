@@ -26,9 +26,11 @@ need() {
   command -v "$1" >/dev/null 2>&1 || err "'$1' is required but not found. Install it and try again."
 }
 
-# Run a command with sudo only if needed.
+# Run a command with sudo only when the target directory is not writable.
+# Usage: maybe_sudo <target_path> <command> [args...]
 maybe_sudo() {
-  if [ -w "$(dirname "$1")" ] 2>/dev/null; then
+  _target="$1"; shift
+  if [ -w "$(dirname "$_target")" ] 2>/dev/null; then
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
@@ -74,6 +76,11 @@ resolve_version() {
       v*) ;;
       *)  version="v${version}" ;;
     esac
+    # Validate version format (vX.Y.Z)
+    case "$version" in
+      v[0-9]*.[0-9]*.[0-9]*) ;;
+      *) err "Invalid version format: $version (expected vX.Y.Z)" ;;
+    esac
     return
   fi
 
@@ -117,15 +124,15 @@ install_files() {
   info "Installing sipag to ${INSTALL_DIR}..."
 
   # Create directories
-  maybe_sudo mkdir -p "$INSTALL_DIR"
-  maybe_sudo install -m 755 "${extracted}/sipag" "${INSTALL_DIR}/sipag"
+  maybe_sudo "$INSTALL_DIR" mkdir -p "$INSTALL_DIR"
+  maybe_sudo "${INSTALL_DIR}/sipag" install -m 755 "${extracted}/sipag" "${INSTALL_DIR}/sipag"
 
   # Install prompt files if present in the release
   if [ -d "${extracted}/lib/prompts" ]; then
     info "Installing prompts to ${SHARE_DIR}..."
-    maybe_sudo mkdir -p "${SHARE_DIR}/lib/prompts"
+    maybe_sudo "${SHARE_DIR}/lib/prompts" mkdir -p "${SHARE_DIR}/lib/prompts"
     for f in "${extracted}"/lib/prompts/*.md; do
-      [ -f "$f" ] && maybe_sudo install -m 644 "$f" "${SHARE_DIR}/lib/prompts/"
+      [ -f "$f" ] && maybe_sudo "${SHARE_DIR}/lib/prompts/" install -m 644 "$f" "${SHARE_DIR}/lib/prompts/"
     done
   fi
 }
