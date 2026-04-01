@@ -3,6 +3,7 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sipag_core::board::{self, Task, TaskStatus};
+use sipag_core::katulong;
 use std::path::PathBuf;
 
 /// The kanban board application state.
@@ -31,6 +32,11 @@ pub struct BoardApp {
     // ── Input mode ───────────────────────────────────────────────────────────
     pub input_mode: InputMode,
     pub input_buffer: String,
+
+    // ── Status bar ───────────────────────────────────────────────────────────
+    /// Transient status message shown in the footer (clears after a few ticks).
+    pub status_message: Option<String>,
+    status_message_ttl: u8,
 
     /// Tick counter for periodic refresh.
     tick_count: u8,
@@ -63,6 +69,8 @@ impl BoardApp {
             role_names: vec![],
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
+            status_message: None,
+            status_message_ttl: 0,
             tick_count: 0,
         };
         app.load_projects()?;
@@ -311,6 +319,81 @@ impl BoardApp {
         Ok(())
     }
 
+    /// Set a transient status message (shown for ~3 seconds).
+    fn set_status(&mut self, msg: String) {
+        self.status_message = Some(msg);
+        self.status_message_ttl = 15; // ~3s at 200ms tick rate
+    }
+
+    /// Dispatch the selected task via katulong crew API.
+    pub fn dispatch_task(&mut self) -> Result<()> {
+        let Some(project_name) = self.active_project_name().map(|s| s.to_string()) else {
+            self.set_status("No project selected".to_string());
+            return Ok(());
+        };
+
+        let Some(task) = self.selected_task() else {
+            self.set_status("No task selected".to_string());
+            return Ok(());
+        };
+        let task_id = task.id;
+        let task_title = task.title.clone();
+        let role_name = task.role.clone();
+
+        // Load role template.
+        let role = match board::Role::load(&self.sipag_dir, &project_name, &role_name) {
+            Ok(r) => r,
+            Err(_) => {
+                self.set_status(format!("Role '{role_name}' not found"));
+                return Ok(());
+            }
+        };
+
+        // Connect to katulong.
+        let client = match katulong::KatulongClient::from_remote_json() {
+            Ok(c) => c,
+            Err(_) => {
+                self.set_status("Cannot connect to katulong".to_string());
+                return Ok(());
+            }
+        };
+
+        let session = katulong::session_name(&project_name, &role_name);
+
+        // Create session.
+        if let Err(e) = client.create_session(&session) {
+            self.set_status(format!("Session create failed: {e}"));
+            return Ok(());
+        }
+
+        // Worktree setup.
+        if role.worktree {
+            let wt_cmd = katulong::worktree_command(&project_name, task_id);
+            let _ = client.exec_session(&session, &wt_cmd);
+        }
+
+        // Launch agent.
+        let agent_cmd = katulong::agent_command(
+            &project_name,
+            task_id,
+            &task_title,
+            &role.command,
+            role.worktree,
+        );
+        if let Err(e) = client.exec_session(&session, &agent_cmd) {
+            self.set_status(format!("Agent launch failed: {e}"));
+            return Ok(());
+        }
+
+        // Move task to in-progress.
+        board::move_task(&self.sipag_dir, &project_name, task_id, "in-progress")?;
+        self.selected_task_id = Some(task_id);
+        self.load_board()?;
+
+        self.set_status(format!("Dispatched #{task_id} to {session}"));
+        Ok(())
+    }
+
     /// Quick-move: advance the selected task to the next status column.
     pub fn move_task_forward(&mut self) -> Result<()> {
         let Some(project) = self.active_project_name().map(|s| s.to_string()) else {
@@ -354,6 +437,7 @@ impl BoardApp {
             KeyCode::Char('h') | KeyCode::Left => self.nav_left(),
             KeyCode::Tab => self.next_project(),
             KeyCode::Char('a') => self.start_add_task(),
+            KeyCode::Char('d') => self.dispatch_task()?,
             KeyCode::Char('m') => self.start_move_task(),
             KeyCode::Enter => self.move_task_forward()?,
             _ => {}
@@ -386,6 +470,15 @@ impl BoardApp {
 
     pub fn on_tick(&mut self) -> Result<()> {
         self.tick_count = self.tick_count.wrapping_add(1);
+
+        // Decay status message.
+        if self.status_message_ttl > 0 {
+            self.status_message_ttl -= 1;
+            if self.status_message_ttl == 0 {
+                self.status_message = None;
+            }
+        }
+
         // Refresh board every 5 ticks (~1s at 200ms tick rate).
         if self.tick_count.is_multiple_of(5) && self.input_mode == InputMode::Normal {
             self.load_board()?;

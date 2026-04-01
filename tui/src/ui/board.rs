@@ -224,13 +224,23 @@ fn render_role_bar(f: &mut Frame, app: &BoardApp, area: Rect) {
 }
 
 fn render_footer(f: &mut Frame, app: &BoardApp, area: Rect) {
-    let text = if app.input_mode != InputMode::Normal {
-        " Esc:cancel  Enter:confirm"
+    // Show status message if present, otherwise show keybindings.
+    let text = if let Some(ref msg) = app.status_message {
+        format!(" {msg}")
+    } else if app.input_mode != InputMode::Normal {
+        " Esc:cancel  Enter:confirm".to_string()
     } else {
-        " j/k:nav  h/l:column  Tab:project  a:add  m:move  Enter:advance  q:quit"
+        " j/k:nav  h/l:column  Tab:project  a:add  d:dispatch  m:move  Enter:advance  q:quit"
+            .to_string()
     };
-    let footer = Paragraph::new(Line::from(text))
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
+
+    let style = if app.status_message.is_some() {
+        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+    } else {
+        Style::default().fg(Color::White).bg(Color::DarkGray)
+    };
+
+    let footer = Paragraph::new(Line::from(text)).style(style);
     f.render_widget(footer, area);
 }
 

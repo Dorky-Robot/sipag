@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use sipag_core::{
     board,
     config::{default_sipag_dir, validate_config_file_for_doctor, ConfigEntryStatus, WorkerConfig},
-    docker, init,
+    docker, init, katulong,
     state::{self, format_duration},
     worker::{dispatch, github, lifecycle},
 };
@@ -46,11 +46,25 @@ pub enum Commands {
         r#static: bool,
     },
 
-    /// Dispatch a Docker worker for a PR
+    /// Dispatch a task (by ID) or a Docker worker (by PR URL)
     Dispatch {
-        /// PR URL (e.g. https://github.com/owner/repo/pull/42)
-        #[arg(value_name = "PR_URL")]
-        url: String,
+        /// Task ID (e.g. 42) or PR URL (https://github.com/owner/repo/pull/42)
+        #[arg(value_name = "TARGET")]
+        target: String,
+
+        /// Project name (for task dispatch, default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Role override (default: from task or 'dev')
+        #[arg(short, long)]
+        role: Option<String>,
+    },
+
+    /// Spin up all configured role sessions for a project
+    Up {
+        /// Project name (default: from config)
+        project: Option<String>,
     },
 
     /// List active and recent workers
@@ -169,10 +183,21 @@ pub fn run(cli: Cli) -> Result<()> {
             r#static: static_only,
         }) => configure_project::run_configure(&dir, static_only),
         Some(Commands::Tui) => run_tui(),
-        Some(Commands::Dispatch { url }) => {
-            let (repo, pr) = parse_pr_url(&url)?;
-            run_dispatch(&repo, pr)
+        Some(Commands::Dispatch {
+            target,
+            project,
+            role,
+        }) => {
+            // Detect: pure number = task ID, URL = legacy PR dispatch.
+            if target.parse::<u64>().is_ok() {
+                let task_id: u64 = target.parse().unwrap();
+                run_dispatch_task(task_id, project.as_deref(), role.as_deref())
+            } else {
+                let (repo, pr) = parse_pr_url(&target)?;
+                run_dispatch_pr(&repo, pr)
+            }
         }
+        Some(Commands::Up { project }) => run_up(project.as_deref()),
         Some(Commands::Ps { all }) => run_ps(all),
         Some(Commands::Logs { id }) => run_logs(&id),
         Some(Commands::Kill { id }) => run_kill(&id),
@@ -227,7 +252,7 @@ fn parse_pr_url(url: &str) -> Result<(String, u64)> {
     }
 }
 
-fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
+fn run_dispatch_pr(repo: &str, pr_num: u64) -> Result<()> {
     let sipag_dir = default_sipag_dir();
     init::init_dirs(&sipag_dir)?;
 
@@ -302,6 +327,109 @@ fn run_dispatch(repo: &str, pr_num: u64) -> Result<()> {
     let creds = sipag_core::config::Credentials::load(&sipag_dir)?;
 
     dispatch::dispatch_worker(repo, pr_num, &branch, &issues, &cfg, &creds)?;
+    Ok(())
+}
+
+// ── v4 dispatch (task-based via katulong API) ───────────────────────────────
+
+fn run_dispatch_task(
+    task_id: u64,
+    project: Option<&str>,
+    role_override: Option<&str>,
+) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+
+    // Load task.
+    let task = board::Task::load(&sipag_dir, &project_name, task_id)
+        .with_context(|| format!("task #{task_id} not found in project {project_name}"))?;
+
+    // Determine role: override > task.role > "dev".
+    let role_name = role_override.unwrap_or(&task.role);
+
+    // Load role template.
+    let role = board::Role::load(&sipag_dir, &project_name, role_name)
+        .with_context(|| {
+            format!("role '{role_name}' not found in project {project_name}. Create it at ~/.sipag/projects/{project_name}/roles/{role_name}.toml")
+        })?;
+
+    // Connect to katulong.
+    let client = katulong::KatulongClient::from_remote_json()
+        .context("Cannot connect to katulong — is ~/.katulong/remote.json configured?")?;
+
+    let session = katulong::session_name(&project_name, role_name);
+
+    // 1. Create session (idempotent find-or-create).
+    println!("Creating session {session}...");
+    client.create_session(&session)?;
+
+    // 2. If role uses worktrees, set one up for this task.
+    if role.worktree {
+        let wt_cmd = katulong::worktree_command(&project_name, task_id);
+        println!("Creating worktree for task #{task_id}...");
+        client.exec_session(&session, &wt_cmd)?;
+    }
+
+    // 3. Exec the agent command.
+    let agent_cmd = katulong::agent_command(
+        &project_name,
+        task_id,
+        &task.title,
+        &role.command,
+        role.worktree,
+    );
+    println!("Launching agent for task #{task_id}: {}", task.title);
+    client.exec_session(&session, &agent_cmd)?;
+
+    // 4. Move task to in-progress.
+    board::move_task(&sipag_dir, &project_name, task_id, "in-progress")?;
+
+    // 5. Confirmation.
+    println!();
+    println!("Dispatched task #{task_id} to session {session}");
+    println!("  Project:  {project_name}");
+    println!("  Role:     {role_name}");
+    println!("  Command:  {}", role.command);
+    if role.worktree {
+        println!(
+            "  Worktree: {}",
+            katulong::worktree_path(&project_name, task_id)
+        );
+    }
+    println!();
+    println!("Monitor at: {} (session: {session})", client.url());
+
+    Ok(())
+}
+
+fn run_up(project: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+
+    // Load roles.
+    let roles = board::list_roles(&sipag_dir, &project_name)?;
+    if roles.is_empty() {
+        println!(
+            "No roles configured for {project_name}. Add them at ~/.sipag/projects/{project_name}/roles/"
+        );
+        return Ok(());
+    }
+
+    // Connect to katulong.
+    let client = katulong::KatulongClient::from_remote_json()
+        .context("Cannot connect to katulong — is ~/.katulong/remote.json configured?")?;
+
+    println!("Bringing up sessions for {project_name}...\n");
+
+    for role in &roles {
+        let session = katulong::session_name(&project_name, &role.name);
+        match client.create_session(&session) {
+            Ok(()) => println!("  {session} — created"),
+            Err(e) => println!("  {session} — FAILED: {e}"),
+        }
+    }
+
+    println!("\n{} sessions for {project_name}", roles.len());
     Ok(())
 }
 
@@ -905,5 +1033,29 @@ mod tests {
     #[test]
     fn parse_pr_url_non_numeric_pr() {
         assert!(parse_pr_url("https://github.com/owner/repo/pull/abc").is_err());
+    }
+
+    #[test]
+    fn dispatch_target_detection_task_id() {
+        // Pure numbers should parse as task IDs.
+        assert!("42".parse::<u64>().is_ok());
+        assert!("1".parse::<u64>().is_ok());
+        assert!("99999".parse::<u64>().is_ok());
+    }
+
+    #[test]
+    fn dispatch_target_detection_url() {
+        // URLs should NOT parse as task IDs.
+        assert!("https://github.com/owner/repo/pull/42"
+            .parse::<u64>()
+            .is_err());
+        assert!("not-a-number".parse::<u64>().is_err());
+    }
+
+    #[test]
+    fn resolve_project_explicit() {
+        let result = resolve_project(Some("myproject"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "myproject");
     }
 }

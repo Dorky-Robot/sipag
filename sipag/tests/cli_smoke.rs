@@ -81,6 +81,7 @@ fn help_lists_subcommands() {
     for cmd in &[
         "configure",
         "dispatch",
+        "up",
         "ps",
         "logs",
         "kill",
@@ -186,12 +187,12 @@ fn doctor_shows_sipag_dir_ok() {
 // ── Dispatch (validation errors) ────────────────────────────────────────────
 
 #[test]
-fn dispatch_requires_pr_url() {
+fn dispatch_requires_target() {
     sipag()
         .arg("dispatch")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("PR_URL"));
+        .stderr(predicate::str::contains("TARGET"));
 }
 
 // ── Ps (state verification) ─────────────────────────────────────────────────
@@ -445,6 +446,87 @@ fn config_alias_works() {
         .path()
         .join(".claude/agents/security-reviewer.md")
         .exists());
+}
+
+// ── Dispatch (task-based) ───────────────────────────────────────────────────
+
+#[test]
+fn dispatch_task_requires_project() {
+    // Dispatching task #1 with no project configured should fail with a
+    // helpful message.
+    let dir = temp_sipag_dir();
+    sipag()
+        .args(["dispatch", "1"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No project specified"));
+}
+
+#[test]
+fn dispatch_task_missing_task() {
+    // Dispatching a non-existent task should fail.
+    let dir = temp_sipag_dir();
+    // Create a project so project resolution works.
+    let project_dir = dir.path().join("projects/testproj");
+    fs::create_dir_all(project_dir.join("tasks")).unwrap();
+    fs::create_dir_all(project_dir.join("roles")).unwrap();
+    fs::write(
+        project_dir.join("project.toml"),
+        "name = \"testproj\"\nrepo = \"a/b\"\nstatuses = [\"todo\", \"done\"]\n",
+    )
+    .unwrap();
+    // Set as default.
+    fs::write(
+        dir.path().join("config.toml"),
+        "default_project = \"testproj\"\n",
+    )
+    .unwrap();
+
+    sipag()
+        .args(["dispatch", "999"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("task #999 not found"));
+}
+
+// ── Up ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn up_requires_project() {
+    let dir = temp_sipag_dir();
+    sipag()
+        .arg("up")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("No project specified"));
+}
+
+#[test]
+fn up_with_no_roles() {
+    let dir = temp_sipag_dir();
+    let project_dir = dir.path().join("projects/testproj");
+    fs::create_dir_all(project_dir.join("tasks")).unwrap();
+    fs::create_dir_all(project_dir.join("roles")).unwrap();
+    fs::write(
+        project_dir.join("project.toml"),
+        "name = \"testproj\"\nrepo = \"a/b\"\nstatuses = [\"todo\", \"done\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        "default_project = \"testproj\"\n",
+    )
+    .unwrap();
+
+    sipag()
+        .arg("up")
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No roles configured"));
 }
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────
