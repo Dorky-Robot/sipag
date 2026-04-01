@@ -1,4 +1,7 @@
+#[allow(dead_code)]
 mod app;
+mod board_app;
+#[allow(dead_code)]
 mod task;
 mod ui;
 
@@ -21,8 +24,8 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = app::App::new()?;
-    let result = run(&mut terminal, &mut app);
+    let mut app = board_app::BoardApp::new()?;
+    let result = run_board(&mut terminal, &mut app);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -31,56 +34,26 @@ fn main() -> Result<()> {
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut app::App) -> Result<()> {
+fn run_board(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut board_app::BoardApp,
+) -> Result<()> {
     let tick = Duration::from_millis(200);
     let mut last_tick = Instant::now();
-    let mut last_task_refresh = Instant::now();
+    let mut last_board_refresh = Instant::now();
 
     loop {
-        terminal.draw(|f| ui::render(f, app))?;
+        terminal.draw(|f| ui::board::render_board(f, app))?;
 
         let timeout = tick.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                // Ctrl-C always quits
+                // Ctrl-C always quits.
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return Ok(());
                 }
                 if app.handle_key(key)? {
                     return Ok(());
-                }
-
-                // Check if user requested to attach to a running container
-                if let Some(container) = app.attach_request.take() {
-                    // Suspend TUI
-                    disable_raw_mode()?;
-                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-
-                    // Show the last 100 lines of the log for context, then attach
-                    // to the live tmux session (or display completion status if done).
-                    let attach_script = "\
-                        echo '=== Claude output (last 100 lines) ==='; \
-                        tail -n 100 /tmp/claude-output.log 2>/dev/null; \
-                        echo '==================================='; \
-                        if tmux has-session -t claude 2>/dev/null; then \
-                            echo 'Attaching to live session (Ctrl-b d to detach)...'; \
-                            tmux attach -t claude; \
-                        else \
-                            echo \"[Session complete. Exit: $(cat /tmp/.claude-exit 2>/dev/null || echo unknown)]\"; \
-                        fi";
-                    let status = std::process::Command::new("docker")
-                        .args(["exec", "-it", &container, "bash", "-c", attach_script])
-                        .status();
-
-                    if let Err(e) = status {
-                        eprintln!("Failed to attach: {e}");
-                        std::thread::sleep(Duration::from_secs(1));
-                    }
-
-                    // Resume TUI
-                    enable_raw_mode()?;
-                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                    terminal.clear()?;
                 }
             }
         }
@@ -90,10 +63,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut app::App
             last_tick = Instant::now();
         }
 
-        // Refresh task list from disk every second
-        if last_task_refresh.elapsed() >= Duration::from_secs(1) {
-            app.refresh_tasks()?;
-            last_task_refresh = Instant::now();
+        // Refresh board data from disk every 2 seconds.
+        if last_board_refresh.elapsed() >= Duration::from_secs(2) {
+            app.load_board()?;
+            last_board_refresh = Instant::now();
         }
     }
 }

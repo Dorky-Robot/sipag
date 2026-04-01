@@ -7,5 +7,8 @@ description = "Core library for sipag — sandbox launcher for Claude Code"
 [dependencies]
 anyhow = "1"
 chrono = { workspace = true }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+toml = "0.8"

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod board;
 pub mod config;
 pub mod docker;
 pub mod events;

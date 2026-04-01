@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{
+    board,
     config::{default_sipag_dir, validate_config_file_for_doctor, ConfigEntryStatus, WorkerConfig},
     docker, init,
     state::{self, format_duration},
@@ -73,11 +74,76 @@ pub enum Commands {
     /// Launch interactive TUI
     Tui,
 
+    // ── v4 board commands ────────────────────────────────────────────────────
+    /// Add a task to the board
+    Add {
+        /// Task title
+        title: String,
+
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Labels (comma-separated or repeated)
+        #[arg(short, long, value_delimiter = ',')]
+        label: Vec<String>,
+
+        /// Role for dispatch (default: dev)
+        #[arg(short, long)]
+        role: Option<String>,
+    },
+
+    /// List tasks on the board
+    List {
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Filter by status
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Move a task to a new status
+    Move {
+        /// Task ID
+        id: u64,
+
+        /// New status (e.g. in-progress, review, done)
+        status: String,
+
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+
+    /// List all projects
+    Projects,
+
+    /// Manage projects
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+
     /// Check system prerequisites
     Doctor,
 
     /// Print version
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectAction {
+    /// Add a new project
+    Add {
+        /// Project name
+        name: String,
+
+        /// GitHub repo (owner/repo)
+        #[arg(long)]
+        repo: String,
+    },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -95,6 +161,22 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Ps { all }) => run_ps(all),
         Some(Commands::Logs { id }) => run_logs(&id),
         Some(Commands::Kill { id }) => run_kill(&id),
+        Some(Commands::Add {
+            title,
+            project,
+            label,
+            role,
+        }) => run_add(&title, project.as_deref(), &label, role.as_deref()),
+        Some(Commands::List { project, status }) => run_list(project.as_deref(), status.as_deref()),
+        Some(Commands::Move {
+            id,
+            status,
+            project,
+        }) => run_move(id, &status, project.as_deref()),
+        Some(Commands::Projects) => run_projects(),
+        Some(Commands::Project { action }) => match action {
+            ProjectAction::Add { name, repo } => run_project_add(&name, &repo),
+        },
         Some(Commands::Doctor) => run_doctor(),
         Some(Commands::Version) => run_version(),
     }
@@ -396,6 +478,121 @@ fn run_kill(id: &str) -> Result<()> {
     // Try as container name directly.
     let _ = Command::new("docker").args(["kill", id]).status();
     println!("Killed {id}");
+    Ok(())
+}
+
+// ── v4 board command handlers ─────────────────────────────────────────────
+
+/// Resolve the project name: explicit flag > config default > error.
+fn resolve_project(explicit: Option<&str>) -> Result<String> {
+    if let Some(p) = explicit {
+        return Ok(p.to_string());
+    }
+    let sipag_dir = default_sipag_dir();
+    let cfg = board::BoardConfig::load(&sipag_dir)?;
+    if let Some(p) = cfg.default_project {
+        return Ok(p);
+    }
+    // If there's exactly one project, use it.
+    let projects = board::list_project_names(&sipag_dir)?;
+    if projects.len() == 1 {
+        return Ok(projects.into_iter().next().unwrap());
+    }
+    anyhow::bail!("No project specified. Use -p <project> or set default_project in config.toml")
+}
+
+fn run_add(
+    title: &str,
+    project: Option<&str>,
+    labels: &[String],
+    role: Option<&str>,
+) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project = resolve_project(project)?;
+    let task = board::add_task(&sipag_dir, &project, title, role, labels)?;
+    println!("#{} added to {} [{}]", task.id, project, task.status);
+    Ok(())
+}
+
+fn run_list(project: Option<&str>, status: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project = resolve_project(project)?;
+    let tasks = board::list_tasks(&sipag_dir, &project, status)?;
+
+    if tasks.is_empty() {
+        if let Some(s) = status {
+            println!("No {s} tasks in {project}.");
+        } else {
+            println!("No tasks in {project}.");
+        }
+        return Ok(());
+    }
+
+    println!("{:<6} {:<40} {:<14} {:<8}", "ID", "TITLE", "STATUS", "ROLE");
+    println!("{}", "-".repeat(70));
+    for t in &tasks {
+        let title_display = if t.title.len() > 38 {
+            format!("{}...", &t.title[..35])
+        } else {
+            t.title.clone()
+        };
+        println!(
+            "#{:<5} {:<40} {:<14} {:<8}",
+            t.id, title_display, t.status, t.role
+        );
+    }
+    println!("\n{} tasks in {project}", tasks.len());
+    Ok(())
+}
+
+fn run_move(task_id: u64, new_status: &str, project: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project = resolve_project(project)?;
+    let task = board::move_task(&sipag_dir, &project, task_id, new_status)?;
+    println!("#{} -> {} in {project}", task.id, task.status);
+    Ok(())
+}
+
+fn run_projects() -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let names = board::list_project_names(&sipag_dir)?;
+
+    if names.is_empty() {
+        println!("No projects. Create one with: sipag project add <name> --repo <owner/repo>");
+        return Ok(());
+    }
+
+    let cfg = board::BoardConfig::load(&sipag_dir)?;
+
+    for name in &names {
+        let marker = if cfg.default_project.as_deref() == Some(name) {
+            " (default)"
+        } else {
+            ""
+        };
+        match board::load_project(&sipag_dir, name) {
+            Ok(proj) => println!("  {} — {}{}", proj.name, proj.repo, marker),
+            Err(_) => println!("  {} — (invalid project.toml){}", name, marker),
+        }
+    }
+
+    Ok(())
+}
+
+fn run_project_add(name: &str, repo: &str) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    board::create_project(&sipag_dir, name, repo, None)?;
+    println!("Project '{name}' created ({repo}).");
+
+    // If this is the first project, set it as default.
+    let names = board::list_project_names(&sipag_dir)?;
+    if names.len() == 1 {
+        let mut cfg = board::BoardConfig::load(&sipag_dir)?;
+        cfg.default_project = Some(name.to_string());
+        cfg.save(&sipag_dir)?;
+        println!("Set as default project.");
+    }
+
     Ok(())
 }
 
