@@ -334,8 +334,27 @@ fn configure_static_creates_all_templates() {
     assert!(claude_dir.join("commands/work.md").exists());
     assert!(claude_dir.join("commands/consult.md").exists());
     assert!(claude_dir.join("commands/release.md").exists());
-    // No Claude Code hooks or settings — those are separate from git hooks
-    assert!(!claude_dir.join("hooks").exists());
+    // Claude Code hooks installed to .claude/hooks/
+    assert!(
+        claude_dir.join("hooks/katulong-pubsub.sh").exists(),
+        ".claude/hooks/katulong-pubsub.sh should exist"
+    );
+    // katulong-pubsub.sh must be executable
+    let pubsub_meta = fs::metadata(claude_dir.join("hooks/katulong-pubsub.sh")).unwrap();
+    assert!(
+        pubsub_meta.permissions().mode() & 0o111 != 0,
+        "katulong-pubsub.sh should be executable"
+    );
+    // settings.local.json installed to .claude/
+    assert!(
+        claude_dir.join("settings.local.json").exists(),
+        ".claude/settings.local.json should exist"
+    );
+    let settings_content = fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
+    assert!(
+        settings_content.contains("katulong-pubsub.sh"),
+        "settings.local.json should reference katulong-pubsub.sh"
+    );
 
     // Git hooks installed to .husky/
     let husky_dir = dir.path().join(".husky");

@@ -12,6 +12,12 @@ struct TemplateFile {
     content: &'static str,
 }
 
+/// Claude Code hook templates installed to .claude/hooks/.
+const CLAUDE_HOOK_TEMPLATES: &[TemplateFile] = &[TemplateFile {
+    relative_path: "hooks/katulong-pubsub.sh",
+    content: templates::HOOK_KATULONG_PUBSUB,
+}];
+
 /// All templates for the --static path (agents + commands only).
 const TEMPLATES: &[TemplateFile] = &[
     TemplateFile {
@@ -106,7 +112,7 @@ pub fn run_configure(dir: &Path, static_only: bool) -> Result<()> {
     let husky_dir = dir.join(".husky");
 
     // Create directory structure.
-    for subdir in &["agents", "commands"] {
+    for subdir in &["agents", "commands", "hooks"] {
         fs::create_dir_all(claude_dir.join(subdir))?;
     }
     fs::create_dir_all(&husky_dir)?;
@@ -273,6 +279,8 @@ fn discover_project(dir: &Path) -> String {
 
 fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
     let installed = install_templates(claude_dir, TEMPLATES, ".claude/")?;
+    let claude_hooks_installed = install_claude_hooks(claude_dir)?;
+    let settings_installed = install_settings(claude_dir)?;
     let hooks_installed = install_static_hooks(husky_dir)?;
 
     // Categorize for summary.
@@ -286,10 +294,30 @@ fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
         .count();
 
     println!("\nInstalled {installed} files ({agents} agents, {commands} commands) to .claude/");
+    println!("Installed {claude_hooks_installed} Claude Code hooks to .claude/hooks/");
+    if settings_installed {
+        println!("Installed settings.local.json to .claude/");
+    }
     println!("Installed {hooks_installed} git hooks to .husky/");
     println!("\nActivate hooks:  git config core.hooksPath .husky");
 
     Ok(())
+}
+
+fn install_claude_hooks(claude_dir: &Path) -> Result<u32> {
+    let installed = install_templates(claude_dir, CLAUDE_HOOK_TEMPLATES, ".claude/")?;
+    for hook in CLAUDE_HOOK_TEMPLATES {
+        set_executable(&claude_dir.join(hook.relative_path))?;
+    }
+    Ok(installed)
+}
+
+fn install_settings(claude_dir: &Path) -> Result<bool> {
+    let dest = claude_dir.join("settings.local.json");
+    let action = if dest.exists() { "overwrite" } else { "create" };
+    fs::write(&dest, templates::SETTINGS_LOCAL)?;
+    println!("  {action}: .claude/settings.local.json");
+    Ok(true)
 }
 
 fn install_static_hooks(husky_dir: &Path) -> Result<u32> {

@@ -7,7 +7,8 @@ use sipag_core::{
     state::{self, format_duration},
     worker::{dispatch, github, lifecycle},
 };
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::configure_project;
@@ -126,6 +127,20 @@ pub enum Commands {
         action: ProjectAction,
     },
 
+    /// Subscribe to katulong pub/sub topic and print events
+    Sub {
+        /// Pub/sub topic (e.g. crew/katulong/dev/agent-done)
+        topic: String,
+
+        /// Replay from sequence number
+        #[arg(long, default_value = "0")]
+        from_seq: u64,
+
+        /// Output as JSON (one event per line)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
     /// Check system prerequisites
     Doctor,
 
@@ -177,6 +192,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Project { action }) => match action {
             ProjectAction::Add { name, repo } => run_project_add(&name, &repo),
         },
+        Some(Commands::Sub {
+            topic,
+            from_seq,
+            json,
+        }) => run_sub(&topic, from_seq, json),
         Some(Commands::Doctor) => run_doctor(),
         Some(Commands::Version) => run_version(),
     }
@@ -593,6 +613,117 @@ fn run_project_add(name: &str, repo: &str) -> Result<()> {
         println!("Set as default project.");
     }
 
+    Ok(())
+}
+
+/// Read katulong remote config from ~/.katulong/remote.json.
+/// Returns (url, api_key) tuple.
+fn read_katulong_remote() -> Result<(String, Option<String>)> {
+    let home = std::env::var("HOME").context("HOME not set")?;
+    let config_path = Path::new(&home).join(".katulong/remote.json");
+    let content = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("Cannot read {}", config_path.display()))?;
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Invalid JSON in {}", config_path.display()))?;
+
+    let url = parsed["url"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .context("Missing 'url' in ~/.katulong/remote.json")?
+        .to_string();
+
+    let api_key = parsed["apiKey"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    Ok((url, api_key))
+}
+
+fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
+    let (katulong_url, api_key) = read_katulong_remote()?;
+
+    // URL-encode the topic (slashes become path segments for the SSE endpoint).
+    // katulong expects: GET /sub/:topic where topic uses / separators.
+    let encoded_topic = topic.replace('/', "%2F");
+    let url = format!(
+        "{}/sub/{}?fromSeq={}",
+        katulong_url.trim_end_matches('/'),
+        encoded_topic,
+        from_seq
+    );
+
+    eprintln!("Subscribing to: {topic}");
+    eprintln!("Endpoint: {url}");
+
+    // Use curl to connect to SSE endpoint and stream events.
+    let mut cmd = Command::new("curl");
+    cmd.args(["-sfN", "--no-buffer"]);
+
+    if let Some(ref key) = api_key {
+        cmd.args(["-H", &format!("Authorization: Bearer {key}")]);
+    }
+
+    cmd.arg(&url);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+
+    let mut child = cmd
+        .spawn()
+        .context("Failed to start curl for SSE subscription")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("Failed to capture curl stdout")?;
+
+    let reader = BufReader::new(stdout);
+    let mut event_type = String::new();
+    let mut data_buf = String::new();
+
+    for line in reader.lines() {
+        let line = line.context("Error reading SSE stream")?;
+
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            let data = rest.trim();
+            if !data_buf.is_empty() {
+                data_buf.push('\n');
+            }
+            data_buf.push_str(data);
+        } else if line.is_empty() && !data_buf.is_empty() {
+            // End of SSE event — dispatch
+            if json_output {
+                println!("{data_buf}");
+            } else {
+                // Pretty-print: try to parse as JSON for display
+                match serde_json::from_str::<serde_json::Value>(&data_buf) {
+                    Ok(val) => {
+                        let evt = val["event"].as_str().unwrap_or(&event_type);
+                        let ts = val["timestamp"].as_str().unwrap_or("?");
+                        let session = val["session"].as_str().unwrap_or("?");
+                        println!("[{ts}] {evt} session={session}");
+                        // Print extra fields based on event type
+                        if let Some(task_id) = val["task_id"].as_str() {
+                            println!("  task_id: {task_id}");
+                        }
+                        if let Some(msg) = val["message"].as_str() {
+                            if !msg.is_empty() {
+                                println!("  message: {msg}");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        println!("[{event_type}] {data_buf}");
+                    }
+                }
+            }
+            event_type.clear();
+            data_buf.clear();
+        }
+    }
+
+    let _ = child.wait();
     Ok(())
 }
 

@@ -27,3 +27,9 @@ pub const COMMAND_RELEASE: &str = include_str!("../../lib/templates/commands/rel
 // Git hooks
 pub const GIT_HOOK_PRE_COMMIT: &str = include_str!("../../lib/templates/git-hooks/pre-commit");
 pub const GIT_HOOK_PRE_PUSH: &str = include_str!("../../lib/templates/git-hooks/pre-push");
+
+// Claude Code hooks
+pub const HOOK_KATULONG_PUBSUB: &str = include_str!("../../lib/templates/hooks/katulong-pubsub.sh");
+
+// Settings template
+pub const SETTINGS_LOCAL: &str = include_str!("../../lib/templates/settings.local.json");
