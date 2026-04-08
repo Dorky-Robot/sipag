@@ -1,225 +1,117 @@
-# Getting started with sipag
+# Getting started
 
-sipag ships work through isolated Docker containers and learns from failures. You create the PR; workers do the work.
-
-To scaffold review agents and slash commands into a project's `.claude/` directory, use the companion tool [hulma](https://github.com/Dorky-Robot/hulma).
+This page walks through installing sipag, registering a project, adding a
+task, and dispatching it to a katulong session.
 
 ## Prerequisites
 
-| Tool | Why | Install |
-|------|-----|---------|
-| Docker Desktop | Runs worker containers | [docker.com](https://www.docker.com/products/docker-desktop/) |
-| GitHub CLI (`gh`) | API access for PRs and issues | `brew install gh` |
-| Claude Code CLI | AI on the host and inside containers | `npm install -g @anthropic-ai/claude-code` |
+- A reachable [katulong](https://github.com/Dorky-Robot/katulong) server
+- The katulong connection details written to `~/.katulong/remote.json`:
 
-## 1. Install sipag
+  ```json
+  { "url": "https://katulong.example", "apiKey": "..." }
+  ```
 
-### Homebrew (macOS)
+That is sipag's only runtime dependency. If you don't yet run katulong, set
+it up first — sipag's dispatcher has nothing to talk to without it.
 
-```bash
-brew tap Dorky-Robot/sipag
-brew install sipag
-```
+## Install
 
-### From source
+=== "Homebrew (recommended)"
 
-Requires the [Rust toolchain](https://rustup.rs/).
+    ```bash
+    brew tap Dorky-Robot/sipag
+    brew install sipag
+    ```
 
-```bash
-git clone https://github.com/Dorky-Robot/sipag.git
-cd sipag
-make install
-```
+=== "One-line script"
 
-### Verify
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/Dorky-Robot/sipag/main/scripts/install.sh | sh
+    ```
+
+=== "From source"
+
+    ```bash
+    cargo install --path sipag
+    ```
+
+Confirm the install:
 
 ```bash
 sipag version
 ```
 
-## 2. Authenticate
+## 1. Register a project
 
-### GitHub
-
-```bash
-gh auth login
-```
-
-sipag uses `gh auth token` at runtime. Alternatively, export `GH_TOKEN` directly.
-
-### Claude
-
-**Option A: OAuth (recommended)**
-
-1. Run `claude` and complete the OAuth flow in your browser
-2. Copy the token that gets printed to your console
-3. Save it to `~/.sipag/token`:
+A project is a named bundle of tasks and roles. Create one for the repo you
+want to dispatch work for:
 
 ```bash
-echo 'YOUR_OAUTH_TOKEN' > ~/.sipag/token
-chmod 600 ~/.sipag/token
+sipag project add my-app --repo owner/my-app
 ```
 
-**Option B: API key**
+The first project you register becomes the default; subsequent commands can
+omit `--project` and target it automatically.
+
+## 2. Add a role
+
+Roles are templates that say "when you dispatch a task tagged with this role,
+run *this* command in *that* session." Create one at:
+
+```
+~/.sipag/projects/my-app/roles/dev.toml
+```
+
+with contents like:
+
+```toml
+name = "dev"
+command = "claude --dangerously-skip-permissions"
+worktree = true
+```
+
+`command` is what katulong runs in the session for each task. `worktree =
+true` tells sipag to create an isolated git worktree for each task before
+launching the agent.
+
+## 3. Add a task
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+sipag add "Wire up the settings page" --role dev
 ```
 
-## 3. Pull the worker Docker image
+This writes a TOML file under `~/.sipag/projects/my-app/tasks/` with an
+auto-incrementing id. List the board to see it:
 
 ```bash
-docker pull ghcr.io/dorky-robot/sipag-worker:latest
+sipag list
 ```
 
-Or build locally:
+## 4. Dispatch the task
 
 ```bash
-docker build -t sipag-worker:local .
-export SIPAG_IMAGE=sipag-worker:local
+sipag dispatch 1
 ```
 
-## 4. Check your setup
+sipag will:
+
+1. Look up task `#1` and its role
+2. Open (or reuse) the katulong session for that role
+3. Optionally create a worktree for the task
+4. Exec the role's command in the session
+5. Move the task to `in-progress`
+
+## 5. Watch the board
 
 ```bash
-sipag doctor
+sipag tui
 ```
 
-Fix anything marked FAIL or MISSING before proceeding.
+The TUI is a kanban view of every project's tasks. Use the arrow keys to
+move between cards; hotkeys add, move, and dispatch tasks without leaving the
+board.
 
-## 5. (Optional) Scaffold review agents with hulma
+## Next steps
 
-If you want project-aware review agents and slash commands in your project's `.claude/` directory, install [hulma](https://github.com/Dorky-Robot/hulma) and run:
-
-```bash
-cd ~/Projects/my-app
-hulma configure
-```
-
-This is optional — `sipag dispatch` does not require any `.claude/` setup.
-
-## 6. Create and dispatch work
-
-### Create a PR
-
-Create a branch and PR on GitHub. The PR body is the complete assignment for the worker — include what needs to happen, which issues it addresses, and any constraints:
-
-```bash
-git checkout -b sipag/fix-auth-middleware
-git push -u origin sipag/fix-auth-middleware
-gh pr create --title "Fix auth middleware timeout handling" --body "$(cat <<'EOF'
-## Assignment
-
-Fix the auth middleware to handle token refresh timeouts gracefully.
-
-Closes #42
-Closes #45
-
-## Context
-
-The auth middleware in `src/middleware/auth.rs` panics when the token refresh
-endpoint takes longer than 5 seconds. Instead, it should fall back to the
-cached token and log a warning.
-
-## Constraints
-
-- Do not change the token refresh endpoint itself
-- Existing tests in `tests/auth_test.rs` must continue to pass
-- Add a new test for the timeout fallback behavior
-EOF
-)"
-```
-
-### Dispatch a worker
-
-```bash
-sipag dispatch https://github.com/owner/my-app/pull/47
-```
-
-This launches a Docker container that clones the repo, reads the PR body, invokes Claude Code to implement the changes, and pushes commits to the PR branch.
-
-## 7. Monitor workers
-
-### TUI
-
-Open a separate terminal and run `sipag` with no arguments (or `sipag tui`) for the interactive dashboard:
-
-```bash
-sipag
-```
-
-The TUI shows all workers across all repos in a live table. From here you can:
-
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up (list view) / scroll up (detail view) |
-| `Enter` | Open detail view (metadata + log) |
-| `Esc` | Back to list |
-| `a` | Attach to a running container's shell |
-| `k` | Kill the selected worker |
-| `K` | Kill all active workers |
-| `x` / `Delete` | Dismiss a finished/failed worker |
-| `Tab` | Toggle between active and archive views |
-| `q` | Quit |
-
-### CLI
-
-You can also manage workers from the command line:
-
-```bash
-sipag ps          # List workers and their status
-sipag logs 42     # View output for PR #42
-sipag kill 42     # Stop a worker
-```
-
-Phases: `starting` → `working` → `finished` | `failed`
-
-## Configuration
-
-Create `~/.sipag/config` to override defaults:
-
-```
-image=ghcr.io/dorky-robot/sipag-worker:latest
-timeout=7200
-work_label=ready
-max_open_prs=3
-poll_interval=120
-heartbeat_interval=30
-heartbeat_stale=90
-```
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker image for workers |
-| `timeout` | `7200` | Worker timeout in seconds (2 hours) |
-| `work_label` | `ready` | Issue label that marks tasks ready for dispatch |
-| `max_open_prs` | `3` | Max active workers before dispatch is paused (0 = no limit) |
-| `poll_interval` | `120` | Seconds between polling cycles |
-| `heartbeat_interval` | `30` | Seconds between heartbeat writes |
-| `heartbeat_stale` | `90` | Seconds before a heartbeat is considered stale |
-
-Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`, `SIPAG_HEARTBEAT_INTERVAL`, `SIPAG_HEARTBEAT_STALE`.
-
-## File layout
-
-```
-~/.sipag/
-├── config          # Optional key=value config
-├── workers/        # PR-keyed state JSON files + heartbeat files
-├── events/         # Append-only lifecycle events
-├── logs/           # Worker stdout/stderr
-└── lessons/        # Per-repo learning from failures
-```
-
-## Quick reference
-
-```bash
-sipag dispatch <PR_URL>                  # Launch a Docker worker
-sipag doctor                             # Check prerequisites
-sipag tui                                # Interactive worker dashboard
-sipag ps                                 # List workers
-sipag logs <id>                          # View worker output
-sipag kill <id>                          # Stop a worker
-sipag version                            # Print version
-```
+- [CLI reference](cli-reference.md) — every command and flag

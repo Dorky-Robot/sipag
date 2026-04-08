@@ -2,180 +2,137 @@
 
 > **Looking for `sipag configure`?** It moved to a separate tool: [hulma](https://github.com/Dorky-Robot/hulma). Run `hulma configure` to scaffold review agents and slash commands into a project's `.claude/` directory.
 
+All commands operate on data under `~/.sipag/` (override with `SIPAG_DIR`).
+Dispatching talks to a katulong server configured at `~/.katulong/remote.json`.
+
 ## sipag dispatch
 
-Launch a Docker worker for a specific PR.
+Send a task from the board to its role's katulong session.
 
 ```
-sipag dispatch <PR_URL>
+sipag dispatch <TASK_ID> [--project NAME] [--role NAME]
 ```
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `PR_URL` | yes | GitHub PR URL (e.g. `https://github.com/owner/repo/pull/42`) |
+| Flag | Description |
+|------|-------------|
+| `<TASK_ID>` | Numeric task id (e.g. `42`) |
+| `-p`, `--project` | Project name (default: from `config.toml` `default_project`) |
+| `-r`, `--role` | Override the task's role |
 
-**Examples:**
+What it does:
 
-```bash
-sipag dispatch https://github.com/acme/my-app/pull/42
-sipag dispatch https://github.com/Dorky-Robot/sipag/pull/123
-```
+1. Loads the task TOML and the role template
+2. Creates (or reuses) the katulong session for the role
+3. Optionally creates a worktree for the task (`worktree = true` in the role)
+4. Execs the role's command in the session
+5. Moves the task to `in-progress`
 
-**What it does:**
+## sipag up
 
-1. Runs preflight checks (gh auth, Docker daemon, Docker image)
-2. Checks back-pressure (refuses if active workers >= `max_open_prs`)
-3. Fetches the PR branch and body via `gh pr view`
-4. Launches a Docker container that clones, implements, and pushes
-
-**Environment overrides:**
-
-- `SIPAG_IMAGE` — use a different Docker image
-- `SIPAG_TIMEOUT` — override worker timeout
-
----
-
-## sipag ps
-
-List active and recent workers.
+Spin up the katulong sessions for every role configured in a project — useful
+right after registering a new project.
 
 ```
-sipag ps [--all]
+sipag up [PROJECT]
 ```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--all` | off | Show all workers (not just active + recent) |
-
-By default, shows active workers plus the 5 most recent terminal workers from the last 24 hours. Use `--all` to see everything.
-
-**Example output:**
-
-```
-PR       REPO                           PHASE        AGE      CONTAINER
-------------------------------------------------------------------------------
-#42      acme/my-app                    working      15m      pr-42
-#38      acme/my-app                    finished     2h       pr-38
-#35      acme/my-app                    failed       5h       pr-35
-         ↳ No commits pushed
-
-3 active, 1 finished, 1 failed (3 total)
-```
-
----
-
-## sipag logs
-
-Show logs for a worker.
-
-```
-sipag logs <ID>
-```
-
-| Argument | Description |
-|----------|-------------|
-| `ID` | PR number (e.g. `42` or `#42`) or Docker container name |
-
-**Examples:**
-
-```bash
-sipag logs 42       # View logs for PR #42
-sipag logs #42      # Same thing
-```
-
-Reads from the log file at `~/.sipag/logs/{owner}--{repo}--pr-{N}.log`. Falls back to `docker logs` if no log file exists.
-
----
-
-## sipag kill
-
-Kill a running worker.
-
-```
-sipag kill <ID>
-```
-
-| Argument | Description |
-|----------|-------------|
-| `ID` | PR number (e.g. `42` or `#42`) or Docker container name |
-
-**Examples:**
-
-```bash
-sipag kill 42       # Kill worker for PR #42
-```
-
-Stops the Docker container and marks the worker state as failed with "Killed by user". If the worker already reached a terminal state (finished/failed), the state is preserved.
-
----
 
 ## sipag tui
 
-Launch the interactive terminal UI. Also runs when `sipag` is invoked with no arguments.
+Open the interactive kanban TUI. Running `sipag` with no arguments does the
+same thing.
 
 ```
 sipag tui
-sipag         # equivalent
 ```
 
-Shows all workers across all repos in a live table with keyboard navigation:
+Key bindings (from the board view):
 
-| Key | Action |
-|-----|--------|
-| `j` / `↓` | Move down |
-| `k` / `↑` | Move up / scroll up |
-| `Enter` | Open detail view |
-| `Esc` | Back to list |
-| `a` | Attach to container shell |
-| `k` | Kill selected worker |
-| `K` | Kill all active workers |
-| `x` / `Delete` | Dismiss finished/failed worker |
-| `Tab` | Toggle active/archive views |
-| `r` | Refresh |
-| `q` | Quit |
+- `↑`/`k`, `↓`/`j` — move within a column
+- `←`/`h`, `→`/`l` — move between columns
+- `a` — add a task
+- `m` — move the selected task to the next status
+- `Enter` — dispatch the selected task
+- `q`, `Ctrl-C` — quit
 
----
+## sipag add
 
-## sipag doctor
-
-Check system prerequisites.
+Add a task to the board.
 
 ```
-sipag doctor
+sipag add <TITLE> [--project NAME] [--role NAME] [--label TAG[,TAG...]]
 ```
 
-Checks:
+| Flag | Description |
+|------|-------------|
+| `<TITLE>` | Task title (free text) |
+| `-p`, `--project` | Project name |
+| `-r`, `--role` | Role to dispatch with (default: `dev`) |
+| `-l`, `--label` | Comma-separated labels |
 
-- Docker daemon running
-- Docker worker image available
-- GitHub CLI authenticated
-- `~/.sipag/` directory exists
-- Config file validation (if present)
+## sipag list
 
-**Example output:**
+List tasks on the board, optionally filtered by status.
 
 ```
-sipag doctor
-============
-
-Docker daemon:  OK
-Docker image:   OK (ghcr.io/dorky-robot/sipag-worker:latest)
-GitHub CLI:     OK
-sipag dir:      OK (/Users/you/.sipag)
+sipag list [--project NAME] [--status STATUS]
 ```
 
----
+## sipag move
+
+Move a task to a new status (one of the statuses defined in `project.toml`).
+
+```
+sipag move <TASK_ID> <STATUS> [--project NAME]
+```
+
+## sipag projects
+
+List every registered project, with the default project marked.
+
+```
+sipag projects
+```
+
+## sipag project add
+
+Register a new project. The first project you add is set as the default.
+
+```
+sipag project add <NAME> --repo <OWNER/REPO>
+```
+
+## sipag sub
+
+Subscribe to a katulong pub/sub topic and stream events.
+
+```
+sipag sub <TOPIC> [--from-seq N] [--json]
+```
+
+| Flag | Description |
+|------|-------------|
+| `<TOPIC>` | Pub/sub topic (e.g. `crew/katulong/dev/agent-done`) |
+| `--from-seq` | Replay from a specific sequence number (default: `0`) |
+| `--json` | Print events as JSON, one per line |
+
+Useful for wiring sipag into shell scripts or other agents that react to
+crew events.
 
 ## sipag version
 
-Print version and git commit hash.
+Print the sipag version and the git SHA it was built from.
 
 ```
 sipag version
 ```
 
-**Example output:**
+`sipag --version` and `sipag -v` are equivalent.
 
-```
-sipag 3.0.9 (ea3802e)
-```
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SIPAG_DIR` | `~/.sipag` | Root directory for board state |
+
+The katulong server URL and API key are read from `~/.katulong/remote.json`,
+not from environment variables.

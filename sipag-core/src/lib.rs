@@ -1,11 +1,3 @@
-pub mod auth;
 pub mod board;
 pub mod config;
-pub mod docker;
-pub mod events;
-pub mod init;
 pub mod katulong;
-pub mod lessons;
-pub mod repo;
-pub mod state;
-pub mod worker;

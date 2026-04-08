@@ -6,7 +6,6 @@
 #
 # Options (environment variables):
 #   SIPAG_INSTALL_DIR  — where to put the binary    (default: /usr/local/bin)
-#   SIPAG_SHARE_DIR    — where to put prompt files   (default: /usr/local/share/sipag)
 #   SIPAG_VERSION      — install a specific version  (default: latest)
 #
 # Works on: Linux (x86_64, aarch64), macOS (x86_64, arm64), Docker containers.
@@ -14,7 +13,6 @@ set -eu
 
 REPO="Dorky-Robot/sipag"
 INSTALL_DIR="${SIPAG_INSTALL_DIR:-/usr/local/bin}"
-SHARE_DIR="${SIPAG_SHARE_DIR:-/usr/local/share/sipag}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -126,15 +124,6 @@ install_files() {
   # Create directories
   maybe_sudo "$INSTALL_DIR" mkdir -p "$INSTALL_DIR"
   maybe_sudo "${INSTALL_DIR}/sipag" install -m 755 "${extracted}/sipag" "${INSTALL_DIR}/sipag"
-
-  # Install prompt files if present in the release
-  if [ -d "${extracted}/lib/prompts" ]; then
-    info "Installing prompts to ${SHARE_DIR}..."
-    maybe_sudo "${SHARE_DIR}/lib/prompts" mkdir -p "${SHARE_DIR}/lib/prompts"
-    for f in "${extracted}"/lib/prompts/*.md; do
-      [ -f "$f" ] && maybe_sudo "${SHARE_DIR}/lib/prompts/" install -m 644 "$f" "${SHARE_DIR}/lib/prompts/"
-    done
-  fi
 }
 
 # ── Post-install checks ─────────────────────────────────────────────────────
@@ -143,7 +132,6 @@ post_install() {
   echo ""
   info "sipag ${version} installed successfully."
   log "binary:  ${INSTALL_DIR}/sipag"
-  [ -d "${SHARE_DIR}/lib/prompts" ] && log "prompts: ${SHARE_DIR}/lib/prompts/"
   echo ""
 
   # PATH check
@@ -154,23 +142,10 @@ post_install() {
     log ""
   fi
 
-  # Prerequisite hints
-  missing=""
-  command -v docker >/dev/null 2>&1 || missing="${missing} docker"
-  command -v gh     >/dev/null 2>&1 || missing="${missing} gh"
-  command -v claude >/dev/null 2>&1 || missing="${missing} claude"
-
-  if [ -n "$missing" ]; then
-    log "Optional prerequisites not found:${missing}"
-    log ""
-    command -v docker >/dev/null 2>&1 || log "  docker — https://docs.docker.com/get-docker/"
-    command -v gh     >/dev/null 2>&1 || log "  gh     — https://cli.github.com"
-    command -v claude >/dev/null 2>&1 || log "  claude — npm install -g @anthropic-ai/claude-code"
-    echo ""
-  fi
-
   log "Get started:"
-  log "  sipag doctor       # check all prerequisites"
+  log "  sipag version           # confirm install"
+  log "  sipag project add ...   # register a project"
+  log "  sipag tui               # open the kanban board"
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────

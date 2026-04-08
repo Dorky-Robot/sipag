@@ -1415,7 +1415,6 @@ version = "3.0.10"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "chrono",
  "clap",
  "predicates",
  "serde",
@@ -1446,16 +1445,6 @@ dependencies = [
  "ratatui",
  "sipag-core",
  "tempfile",
-]
-
-[[package]]
-name = "sipag-worker"
-version = "3.0.2"
-dependencies = [
- "anyhow",
- "chrono",
- "serde_json",
- "sipag-core",
 ]
 
 [[package]]

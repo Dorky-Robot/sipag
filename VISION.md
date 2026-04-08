@@ -2,65 +2,68 @@
 
 ## One-liner
 
-Queue up backlog items, go to sleep, wake up to pull requests.
+A board you can dispatch from. Tasks become work running in real terminals.
 
 ## What sipag is
 
-sipag is a slow, relentless gardener for codebases. It ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
+sipag is the dispatcher in the Dorky Robot stack. It owns the project board —
+tasks, statuses, roles — and ships work to long-running terminal sessions
+managed by [katulong](https://github.com/Dorky-Robot/katulong).
 
 Two commands for humans:
 
-1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-2. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch <task_id>`** — Sends a task to its role's katulong
+   session and moves it to `in-progress`.
+2. **`sipag tui`** — Live kanban board across all configured projects.
 
-Everything else (`sipag ps`, `sipag logs`, `sipag kill`, `sipag doctor`) is for managing workers from the command line.
+Everything else (`sipag add`, `sipag move`, `sipag list`, `sipag projects`,
+`sipag up`) is for managing the board from the command line.
 
-Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool extracted from sipag in April 2026.
+Project-aware review agents and slash commands are scaffolded by
+[hulma](https://github.com/Dorky-Robot/hulma), a separate tool extracted from
+sipag in April 2026. The legacy v2/v3 Docker dispatch path was deleted in
+April 2026 — sipag no longer launches containers itself.
 
 ## The philosophy
 
-**Find the disease, not the symptoms.** Three issues about different error messages probably mean there's no unified error handling. sipag's job — through its analysis agents and the Claude Code session crafting PRs — is to see these patterns and fix the root cause.
+**The board is the contract.** A task is a small TOML file with a title and a
+role. Roles are templates that say "when you dispatch a task with this role,
+run this command in that katulong session." Everything else is bookkeeping.
 
-**The container is the safety boundary.** Docker replaces the approval dialog. Inside the container, Claude has full autonomy. Outside, nothing is touched. The permission boundary isn't "Claude can do X but not Y." It's "Claude can do anything, but only inside this throwaway box."
+**File-based state.** All board data lives under `~/.sipag/projects/<name>/`
+as plain TOML. Git, sync tools, scripts, and other agents can read and write
+the same files. There is no daemon, no database, no lock service.
 
-**The PR is the contract.** The PR description is the complete assignment for a worker. The person creating the PR has done the analysis; the worker's job is to implement the plan. Analysis quality determines implementation quality.
+**One job: route work to crews.** sipag does not run code, manage containers,
+or talk to GitHub directly. It tells katulong what to do next, and katulong
+runs the actual session. The two tools compose; either can be replaced.
 
-**Finishing beats starting.** sipag enforces a work-in-progress limit (default 3 active workers). Starting new work feels productive but increases cycle time. Finishing existing work reduces it.
+**Finishing beats starting.** Statuses are intentionally ordered. Moving a
+card forward should feel cheap; adding new ones should be deliberate. The TUI
+makes it easy to see how much is in flight.
 
-**Workers learn from each other.** When a worker fails, sipag records the reason. The next worker for the same repo reads all previous lessons before starting. This creates a feedback loop where workers improve without human intervention.
-
-**File-based choreography.** Components communicate through files on disk, not RPC or function calls. `~/.sipag/` is the event bus. Writers don't know who reads. Readers don't know who writes. Adding a Slack notifier or monitoring dashboard requires zero changes to sipag.
-
-## sipag is infrastructure, Claude Code is intelligence
-
-This is the core architectural boundary.
-
-**sipag** (the Rust binary) handles everything that isn't thinking: containers, state tracking, heartbeats, back-pressure, lifecycle events.
-
-**Claude Code** (on the host) handles the intelligence: disease analysis, decision-making, PR crafting, review.
-
-**Claude Code** (in Docker) handles implementation: writing code, running tests, committing, pushing.
-
-sipag never decides *what* to do. It decides *when* to dispatch and *what context to provide*.
-
-## Part of the dorky robot stack
+## sipag in the stack
 
 ```
-kubo (think)  →  sipag (do)  →  GitHub PRs (review)
-                    ↑
-tao (decide)  ─────┘
+kubo (think)  →  sipag (board)  →  katulong (sessions)  →  agents do the work
 ```
 
 - **kubo** — chain-of-thought reasoning, breaks problems into steps
-- **tao** — decision ledger, surfaces suspended actions
-- **sipag** — autonomous executor, turns backlog into PRs
+- **sipag** — board + dispatcher, turns backlog into in-flight work
+- **katulong** — long-running terminal sessions for agents
+- **hulma** — scaffolds review agents and slash commands into a project
 
-Each tool is independent. sipag works fine on its own.
+Each tool is independent. sipag works fine on its own; its only runtime
+dependency is a reachable katulong server (configured at
+`~/.katulong/remote.json`).
 
 ## What sipag is not
 
-- **Not a CI/CD pipeline.** sipag creates PRs. Your existing CI runs on those PRs.
-- **Not a code generator.** It installs review tooling and launches workers that use Claude Code's full reasoning capabilities.
-- **Not a chatbot.** sipag is infrastructure — containers, state files, lifecycle tracking.
-- **Not autonomous.** A human starts it, reviews the PRs, and decides what to merge.
-- **Not fast.** It's relentless. One careful cycle at a time, every cycle leaving the project measurably better.
+- **Not a CI/CD pipeline.** sipag dispatches work; your existing CI still runs.
+- **Not a code generator.** It launches sessions that use Claude Code (or
+  whatever the role's command points at).
+- **Not a sandboxer.** Isolation is katulong's job (or the agent's, or the
+  worktree's). sipag does not run containers.
+- **Not a chatbot.** sipag is plumbing — TOML files, an HTTP client, a TUI.
+- **Not autonomous.** A human curates the board, reviews the output, and
+  decides what to merge.
