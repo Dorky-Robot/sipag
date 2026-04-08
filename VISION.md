@@ -6,15 +6,16 @@ Queue up backlog items, go to sleep, wake up to pull requests.
 
 ## What sipag is
 
-sipag is a slow, relentless gardener for codebases. It generates project-aware review agents, ships work through isolated Docker containers, and learns from failures — all powered by Claude Code.
+sipag is a slow, relentless gardener for codebases. It ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
 
-Three commands for humans:
+Two commands for humans:
 
-1. **`sipag configure`** — Analyzes your project and generates tailored review agents and commands for `.claude/`. Re-run as your project evolves.
-2. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-3. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
+2. **`sipag tui`** — Live dashboard for all workers across the host.
 
 Everything else (`sipag ps`, `sipag logs`, `sipag kill`, `sipag doctor`) is for managing workers from the command line.
+
+Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool extracted from sipag in April 2026.
 
 ## The philosophy
 

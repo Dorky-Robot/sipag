@@ -4,11 +4,12 @@ This file primes Claude Code sessions working **on sipag itself**.
 
 ## Project overview
 
-sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures — all powered by Claude Code.
+sipag ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
 
-1. **`sipag configure`** — Analyzes your project and generates tailored review agents and commands for `.claude/`. Re-run as your project evolves.
-2. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-3. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
+2. **`sipag tui`** — Live dashboard for all workers across the host.
+
+Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool that was extracted from sipag in April 2026.
 
 ## Architecture
 
@@ -33,9 +34,7 @@ sipag-core/src/
 
 sipag/src/
 ├── main.rs             # Entry point
-├── cli.rs              # 8 commands: configure, dispatch, ps, logs, kill, tui, doctor, version
-├── configure_project.rs # sipag configure: write templates to .claude/
-└── templates.rs        # Embedded template files (include_str!)
+└── cli.rs              # CLI subcommands: dispatch, ps, logs, kill, tui, doctor, version, ...
 
 sipag-worker/src/
 └── main.rs             # Container-side binary: clone, fetch PR, run Claude Code
@@ -46,16 +45,6 @@ tui/src/
 ├── task.rs             # Task struct (PR-keyed, built from WorkerState)
 └── ui/                 # list.rs (table view), detail.rs (metadata + log)
 ```
-
-### Templates
-
-```
-lib/templates/
-├── agents/             # Review agents (security, architecture, correctness, backlog, issue)
-└── commands/           # Custom commands (dispatch, review, triage, ship-it)
-```
-
-Installed by `sipag configure` into a project's `.claude/` directory.
 
 ### Prompts
 
@@ -87,7 +76,6 @@ Phases: `starting` → `working` → `finished` | `failed`
 ## Commands
 
 ```
-sipag configure [dir] [--static] Configure agents and commands for .claude/
 sipag dispatch <PR_URL>       Launch a Docker worker for a PR
 sipag ps                      List active and recent workers
 sipag logs <id>               Show logs for a worker (PR number or container name)
@@ -166,8 +154,6 @@ SIPAG_IMAGE=sipag-worker:local sipag dispatch https://github.com/owner/repo/pull
 - `sipag-core/src/worker/` — dispatch, lifecycle, GitHub operations
 - `sipag-core/src/state.rs` — state file format and management
 - `sipag/src/cli.rs` — CLI commands
-- `sipag/src/configure_project.rs` — template installer
-- `lib/templates/` — agents, commands
 - `tui/src/` — TUI views and task model
 
 ### PR-only workflow

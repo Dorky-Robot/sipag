@@ -8,10 +8,8 @@ use sipag_core::{
     worker::{dispatch, github, lifecycle},
 };
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-
-use crate::configure_project;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const GIT_HASH: &str = env!("CARGO_GIT_SHA");
@@ -34,18 +32,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    /// Configure Claude Code agents and commands for a project
-    #[command(alias = "config")]
-    Configure {
-        /// Target directory (default: current dir)
-        #[arg(default_value = ".")]
-        dir: PathBuf,
-
-        /// Install generic templates without launching Claude
-        #[arg(long, default_value_t = false)]
-        r#static: bool,
-    },
-
     /// Dispatch a task (by ID) or a Docker worker (by PR URL)
     Dispatch {
         /// Task ID (e.g. 42) or PR URL (https://github.com/owner/repo/pull/42)
@@ -178,10 +164,6 @@ pub enum ProjectAction {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
-        Some(Commands::Configure {
-            dir,
-            r#static: static_only,
-        }) => configure_project::run_configure(&dir, static_only),
         Some(Commands::Tui) => run_tui(),
         Some(Commands::Dispatch {
             target,

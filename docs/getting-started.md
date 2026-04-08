@@ -1,6 +1,8 @@
 # Getting started with sipag
 
-sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures. Re-run `sipag configure` as your project evolves — it analyzes what's there and updates your agents. You create the PR; workers do the work.
+sipag ships work through isolated Docker containers and learns from failures. You create the PR; workers do the work.
+
+To scaffold review agents and slash commands into a project's `.claude/` directory, use the companion tool [hulma](https://github.com/Dorky-Robot/hulma).
 
 ## Prerequisites
 
@@ -85,38 +87,16 @@ sipag doctor
 
 Fix anything marked FAIL or MISSING before proceeding.
 
-## 5. Configure a project
+## 5. (Optional) Scaffold review agents with hulma
 
-Configure review agents and commands for your project:
+If you want project-aware review agents and slash commands in your project's `.claude/` directory, install [hulma](https://github.com/Dorky-Robot/hulma) and run:
 
 ```bash
 cd ~/Projects/my-app
-sipag configure
+hulma configure
 ```
 
-This creates files in `.claude/`:
-
-```
-.claude/
-├── agents/
-│   ├── security-reviewer.md
-│   ├── architecture-reviewer.md
-│   ├── correctness-reviewer.md
-│   ├── root-cause-analyst.md
-│   ├── simplicity-advocate.md
-│   ├── backlog-triager.md
-│   └── issue-analyst.md
-└── commands/
-    ├── dispatch.md
-    ├── review.md
-    ├── triage.md
-    ├── ship-it.md
-    ├── work.md
-    ├── consult.md
-    └── release.md
-```
-
-Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
+This is optional — `sipag dispatch` does not require any `.claude/` setup.
 
 ## 6. Create and dispatch work
 
@@ -235,7 +215,6 @@ Environment variables override config file values: `SIPAG_IMAGE`, `SIPAG_TIMEOUT
 ## Quick reference
 
 ```bash
-sipag configure                          # Configure agents + commands for .claude/
 sipag dispatch <PR_URL>                  # Launch a Docker worker
 sipag doctor                             # Check prerequisites
 sipag tui                                # Interactive worker dashboard

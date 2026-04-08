@@ -1,13 +1,12 @@
 //! Binary smoke tests for the `sipag` CLI.
 //!
 //! These tests use `assert_cmd` to run the actual compiled binary and verify
-//! basic behavior for the CLI (8 commands: configure, dispatch, ps, logs, kill,
-//! tui, doctor, version).
+//! basic behavior for the CLI subcommands (dispatch, ps, logs, kill, tui,
+//! doctor, version).
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 
 #[allow(deprecated)]
@@ -79,15 +78,7 @@ fn help_lists_subcommands() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     for cmd in &[
-        "configure",
-        "dispatch",
-        "up",
-        "ps",
-        "logs",
-        "kill",
-        "tui",
-        "doctor",
-        "version",
+        "dispatch", "up", "ps", "logs", "kill", "tui", "doctor", "version",
     ] {
         assert!(
             stdout.contains(cmd),
@@ -302,150 +293,6 @@ fn logs_falls_back_to_log_file() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Worker output line 1"));
-}
-
-// ── Configure ───────────────────────────────────────────────────────────────
-
-#[test]
-fn configure_static_creates_all_templates() {
-    let dir = TempDir::new().unwrap();
-    // Create a .git dir so the warning doesn't fire.
-    fs::create_dir(dir.path().join(".git")).unwrap();
-
-    sipag()
-        .args(["configure", "--static", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Installed"));
-
-    let claude_dir = dir.path().join(".claude");
-    // Agents
-    assert!(claude_dir.join("agents/security-reviewer.md").exists());
-    assert!(claude_dir.join("agents/architecture-reviewer.md").exists());
-    assert!(claude_dir.join("agents/correctness-reviewer.md").exists());
-    assert!(claude_dir.join("agents/root-cause-analyst.md").exists());
-    assert!(claude_dir.join("agents/simplicity-advocate.md").exists());
-    assert!(claude_dir.join("agents/backlog-triager.md").exists());
-    assert!(claude_dir.join("agents/issue-analyst.md").exists());
-    // Commands
-    assert!(claude_dir.join("commands/dispatch.md").exists());
-    assert!(claude_dir.join("commands/review.md").exists());
-    assert!(claude_dir.join("commands/triage.md").exists());
-    assert!(claude_dir.join("commands/ship-it.md").exists());
-    assert!(claude_dir.join("commands/work.md").exists());
-    assert!(claude_dir.join("commands/consult.md").exists());
-    assert!(claude_dir.join("commands/release.md").exists());
-    // Claude Code hooks installed to .claude/hooks/
-    assert!(
-        claude_dir.join("hooks/katulong-pubsub.sh").exists(),
-        ".claude/hooks/katulong-pubsub.sh should exist"
-    );
-    // katulong-pubsub.sh must be executable
-    let pubsub_meta = fs::metadata(claude_dir.join("hooks/katulong-pubsub.sh")).unwrap();
-    assert!(
-        pubsub_meta.permissions().mode() & 0o111 != 0,
-        "katulong-pubsub.sh should be executable"
-    );
-    // settings.local.json installed to .claude/
-    assert!(
-        claude_dir.join("settings.local.json").exists(),
-        ".claude/settings.local.json should exist"
-    );
-    let settings_content = fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
-    assert!(
-        settings_content.contains("katulong-pubsub.sh"),
-        "settings.local.json should reference katulong-pubsub.sh"
-    );
-
-    // Git hooks installed to .husky/
-    let husky_dir = dir.path().join(".husky");
-    assert!(
-        husky_dir.join("pre-commit").exists(),
-        ".husky/pre-commit should exist"
-    );
-    assert!(
-        husky_dir.join("pre-push").exists(),
-        ".husky/pre-push should exist"
-    );
-
-    // Hook content is non-empty and has expected structure
-    let pre_commit_content = fs::read_to_string(husky_dir.join("pre-commit")).unwrap();
-    assert!(
-        pre_commit_content.contains("#!/usr/bin/env bash"),
-        "pre-commit hook should have bash shebang"
-    );
-    assert!(
-        pre_commit_content.contains("gitleaks"),
-        "pre-commit hook should include gitleaks"
-    );
-    let pre_push_content = fs::read_to_string(husky_dir.join("pre-push")).unwrap();
-    assert!(
-        pre_push_content.contains("#!/usr/bin/env bash"),
-        "pre-push hook should have bash shebang"
-    );
-
-    // Hooks must be executable
-    let pre_commit_perms = fs::metadata(husky_dir.join("pre-commit"))
-        .unwrap()
-        .permissions();
-    assert!(
-        pre_commit_perms.mode() & 0o111 != 0,
-        "pre-commit hook should be executable"
-    );
-    let pre_push_perms = fs::metadata(husky_dir.join("pre-push"))
-        .unwrap()
-        .permissions();
-    assert!(
-        pre_push_perms.mode() & 0o111 != 0,
-        "pre-push hook should be executable"
-    );
-}
-
-#[test]
-fn configure_static_overwrites_existing() {
-    let dir = TempDir::new().unwrap();
-    fs::create_dir(dir.path().join(".git")).unwrap();
-
-    // First run — creates files.
-    sipag()
-        .args(["configure", "--static", dir.path().to_str().unwrap()])
-        .assert()
-        .success();
-
-    // Second run — overwrites existing (no skip behavior).
-    sipag()
-        .args(["configure", "--static", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("overwrite:"));
-}
-
-#[test]
-fn configure_help_shows_static_flag() {
-    sipag()
-        .args(["configure", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--static"));
-}
-
-// ── Configure alias ─────────────────────────────────────────────────────────
-
-#[test]
-fn config_alias_works() {
-    let dir = TempDir::new().unwrap();
-    fs::create_dir(dir.path().join(".git")).unwrap();
-
-    sipag()
-        .args(["config", "--static", dir.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Installed"));
-
-    assert!(dir
-        .path()
-        .join(".claude/agents/security-reviewer.md")
-        .exists());
 }
 
 // ── Dispatch (task-based) ───────────────────────────────────────────────────

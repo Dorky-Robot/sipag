@@ -18,31 +18,16 @@ Run `sipag doctor` to verify everything is ready.
 
 ---
 
-## 1. Configure your project
+## 1. (Optional) Scaffold review agents with hulma
 
-Navigate to your project and run configure:
+Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool. If you want them, install hulma and run:
 
 ```bash
 cd ~/Projects/my-app
-sipag configure
+hulma configure
 ```
 
-This launches Claude to analyze your project and write tailored review agents and commands to `.claude/`. You'll see Claude reading your config files, README, and directory structure, then generating agents specific to your tech stack.
-
-If you want to skip the Claude analysis and install generic templates:
-
-```bash
-sipag configure --static
-```
-
-After it finishes, check what was created:
-
-```bash
-ls .claude/agents/
-ls .claude/commands/
-```
-
-Commit these files to your repo so your team can use them too.
+This is optional — sipag dispatch works without any `.claude/` setup. Skip ahead if you don't need agents.
 
 ---
 

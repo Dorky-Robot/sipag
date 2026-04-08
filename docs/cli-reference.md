@@ -1,34 +1,6 @@
 # CLI Reference
 
-## sipag configure
-
-Configure review agents and custom commands for a project's `.claude/` directory.
-
-```
-sipag configure [DIR] [--static]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `DIR` | `.` (current directory) | Project directory to configure |
-| `--static` | off | Install generic templates without launching Claude |
-
-**Examples:**
-
-```bash
-sipag configure                    # Configure current project (launches Claude)
-sipag configure ~/Projects/my-app  # Configure a specific project
-sipag configure --static           # Install generic templates without Claude
-```
-
-**What gets installed:**
-
-- `.claude/agents/` — 7 review agents (security, architecture, correctness, root-cause, simplicity, backlog, issue)
-- `.claude/commands/` — 7 custom commands (dispatch, review, triage, ship-it, work, consult, release)
-
-Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
-
----
+> **Looking for `sipag configure`?** It moved to a separate tool: [hulma](https://github.com/Dorky-Robot/hulma). Run `hulma configure` to scaffold review agents and slash commands into a project's `.claude/` directory.
 
 ## sipag dispatch
 

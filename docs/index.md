@@ -4,23 +4,22 @@
 
 ---
 
-sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures. You write the assignment; workers do the work.
+sipag ships work through isolated Docker containers and learns from failures. You write the assignment; workers do the work.
 
-## Three commands for humans
+## Two commands for humans
 
 ```bash
-sipag configure                           # Configure agents + commands for .claude/
 sipag dispatch <PR_URL>                   # Launch a Docker worker for a PR
 sipag tui                                 # Monitor all workers
 ```
 
 Everything else (`sipag ps`, `sipag logs`, `sipag kill`) is for managing workers from the command line.
 
+To scaffold review agents and slash commands into a project's `.claude/` directory, use [hulma](https://github.com/Dorky-Robot/hulma).
+
 ## How it works
 
 ```
-sipag configure      Configure review agents + commands
-       ↓
 create PR            Describe the work in the PR body
        ↓
 sipag dispatch       Launch a Docker worker
