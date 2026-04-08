@@ -1,6 +1,5 @@
 .PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness
 
-SHARE_DIR ?= $(HOME)/.sipag/share
 BIN_DIR   ?= $(HOME)/.cargo/bin
 
 build:
@@ -10,16 +9,11 @@ install:
 	@# Rust binaries — sipag is the sole entry point, sipag-tui for the TUI
 	cargo install --path sipag
 	cargo install --path tui
-	cargo install --path sipag-worker
-	@# Prompts — kept in share/ for reference
-	@mkdir -p "$(SHARE_DIR)/lib/prompts"
-	@install -m 644 lib/prompts/*.md "$(SHARE_DIR)/lib/prompts/"
 	@echo ""
 	@echo "sipag installed. Try: sipag version"
 
 uninstall:
 	@rm -f "$(BIN_DIR)/sipag"
-	@rm -rf "$(SHARE_DIR)"
 	@cargo uninstall sipag 2>/dev/null || true
 	@cargo uninstall sipag-tui 2>/dev/null || true
 	@echo "sipag uninstalled."

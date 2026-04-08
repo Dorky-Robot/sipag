@@ -6,18 +6,23 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Autonomous dev agents that evolve with your project.*
+*Board-driven work dispatcher for Claude Code crews.*
 
 </div>
 
 ## What is sipag?
 
-sipag ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
+sipag owns the project board (tasks, statuses, roles) and ships work to
+running terminal sessions managed by [katulong](https://github.com/Dorky-Robot/katulong).
+Each task knows which role it belongs to; dispatching a task tells katulong
+to launch the role's command in the right session.
 
-1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-2. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch <task_id>`** — Sends a task to its role's katulong session
+   and moves it to `in-progress`.
+2. **`sipag tui`** — Live kanban board across all configured projects.
 
-To set up review agents and slash commands in a project's `.claude/` directory, use [hulma](https://github.com/Dorky-Robot/hulma).
+To set up review agents and slash commands in a project's `.claude/`
+directory, use [hulma](https://github.com/Dorky-Robot/hulma).
 
 ## Quick start
 
@@ -28,22 +33,20 @@ To set up review agents and slash commands in a project's `.claude/` directory, 
    brew install sipag
    ```
 
-2. (Optional) Install [hulma](https://github.com/Dorky-Robot/hulma) and configure review agents for your project:
+2. Register a project and add a task:
 
    ```bash
-   cd ~/Projects/my-app
-   hulma configure
+   sipag project add my-app --repo owner/my-app
+   sipag add "Wire up the settings page" --role dev
    ```
 
-3. Create a branch and PR on GitHub describing what needs to happen.
-
-4. Dispatch a Docker worker to implement the PR:
+3. Dispatch the task to its role's katulong session:
 
    ```bash
-   sipag dispatch https://github.com/owner/my-app/pull/42
+   sipag dispatch 1
    ```
 
-5. Monitor workers:
+4. Watch the board:
 
    ```bash
    sipag tui
@@ -52,37 +55,24 @@ To set up review agents and slash commands in a project's `.claude/` directory, 
 ## How it works
 
 ```
-create branch + PR            Describe the work in the PR body
-          ↓
-sipag dispatch <PR_URL>       Launch a Docker worker
-          ↓
-Docker container              clone → read PR body → claude → push → done
-          ↓
-sipag tui / sipag ps          Monitor progress
-          ↓
-review + merge                You decide what ships
+sipag add ...           Title becomes a task on the board
+        ↓
+sipag dispatch <id>     Sends the task to its role's katulong session
+        ↓
+katulong session        Agent runs the role's command, picks up the task
+        ↓
+sipag move <id> review  You move work along as the agent finishes
 ```
 
-### sipag dispatch
-
-Launches an isolated Docker container that:
-
-1. Clones the repo and checks out the PR branch
-2. Reads the PR body as its complete assignment
-3. Reads lessons from past failures for this repo
-4. Runs `claude --dangerously-skip-permissions` to implement the work
-5. Pushes commits to the PR branch
-6. Writes state and lifecycle events to `~/.sipag/`
-
-The container is the safety boundary. Workers have full autonomy inside it.
+sipag itself does not run code — it is a board and a dispatcher. Long-running
+terminal sessions live in katulong; sipag just tells katulong what to do next.
 
 ### sipag tui
 
-Running `sipag` with no arguments (or `sipag tui`) opens the interactive terminal UI:
-
-- Scrollable task list across all states (starting, working, finished, failed)
-- Color-coded by status: yellow=starting, cyan=working, green=finished, red=failed
-- Keyboard navigation: `↑`/`k` up, `↓`/`j` down, `Enter` detail view, `a` attach, `q` quit
+Running `sipag` with no arguments (or `sipag tui`) opens an interactive
+kanban view. Columns reflect the project's configured statuses; arrow keys
+move between cards, and a few hotkeys add/move/dispatch tasks without
+leaving the TUI.
 
 ## Installation
 
@@ -126,54 +116,50 @@ make build
 
 ## Configuration
 
-Create `~/.sipag/config` to override defaults (key=value format):
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker image for workers |
-| `timeout` | `7200` | Worker timeout in seconds (2 hours) |
-| `work_label` | `ready` | Issue label that marks work ready for dispatch |
-| `max_open_prs` | `3` | Max active workers before dispatch is paused |
-| `poll_interval` | `120` | Seconds between polling cycles |
-| `heartbeat_interval` | `30` | Seconds between heartbeat writes |
-| `heartbeat_stale` | `90` | Seconds before a heartbeat is considered stale |
-
-Environment variable overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`, `SIPAG_HEARTBEAT_INTERVAL`, `SIPAG_HEARTBEAT_STALE`.
-
-## File layout
+sipag reads its state from `~/.sipag/` (override with `SIPAG_DIR`):
 
 ```
 ~/.sipag/
-├── config          # Optional key=value config
-├── workers/        # PR-keyed state JSON files + heartbeat files
-├── events/         # Append-only lifecycle events
-├── logs/           # Worker stdout/stderr
-└── lessons/        # Per-repo learning from failures
+├── config.toml                   # default_project, etc.
+└── projects/
+    └── <project>/
+        ├── project.toml          # name, repo, statuses
+        ├── tasks/<id>.toml       # one file per task
+        └── roles/<role>.toml     # role templates (command, worktree)
+```
+
+Dispatch talks to katulong over HTTP; configure the connection at
+`~/.katulong/remote.json`:
+
+```json
+{ "url": "https://katulong.example", "apiKey": "..." }
 ```
 
 ## CLI reference
 
 ```
-sipag dispatch <PR_URL>                 Launch a Docker worker for a PR
-sipag ps [--all]                        List active and recent workers
-sipag logs <id>                         Show logs for a worker (PR number or container name)
-sipag kill <id>                         Kill a running worker
-sipag tui                               Launch interactive TUI (same as no args)
-sipag doctor                            Check system prerequisites
-sipag version                           Print version
+sipag dispatch <TASK_ID>     Dispatch a task to its role's katulong session
+sipag up [project]           Spin up sessions for every role in the project
+sipag tui                    Launch the kanban TUI (same as no args)
+sipag add <title>            Add a task to the board
+sipag list                   List tasks on the board
+sipag move <id> <status>     Move a task to a new status
+sipag projects               List all projects
+sipag project add <name>     Register a project
+sipag sub <topic>            Subscribe to a katulong pub/sub topic
+sipag version                Print version
 ```
 
 ## Part of the dorky robot stack
 
 ```
-kubo (think)  →  sipag (do)  →  GitHub PRs (review)
-                    ↑
-tao (decide)  ─────┘
+kubo (think)  →  sipag (board)  →  katulong (sessions)  →  agents
 ```
 
 - [kubo](https://github.com/Dorky-Robot/kubo) — chain-of-thought reasoning, breaks problems into steps
-- [tao](https://github.com/Dorky-Robot/tao) — decision ledger, surfaces suspended actions
-- **sipag** — autonomous executor, turns backlog into PRs
+- [katulong](https://github.com/Dorky-Robot/katulong) — long-running terminal sessions for agents
+- [hulma](https://github.com/Dorky-Robot/hulma) — scaffolds review agents and slash commands into a project
+- **sipag** — board + dispatcher, turns backlog into in-flight work
 
 ## Development
 
