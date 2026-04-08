@@ -22,6 +22,8 @@ pub const COMMAND_TRIAGE: &str = include_str!("../../lib/templates/commands/tria
 pub const COMMAND_SHIP_IT: &str = include_str!("../../lib/templates/commands/ship-it.md");
 pub const COMMAND_WORK: &str = include_str!("../../lib/templates/commands/work.md");
 pub const COMMAND_CONSULT: &str = include_str!("../../lib/templates/commands/consult.md");
+pub const COMMAND_CONSULT_NO_DIWA: &str =
+    include_str!("../../lib/templates/commands/consult-no-diwa.md");
 pub const COMMAND_RELEASE: &str = include_str!("../../lib/templates/commands/release.md");
 
 // Git hooks

@@ -68,10 +68,8 @@ const TEMPLATES: &[TemplateFile] = &[
         relative_path: "commands/work.md",
         content: templates::COMMAND_WORK,
     },
-    TemplateFile {
-        relative_path: "commands/consult.md",
-        content: templates::COMMAND_CONSULT,
-    },
+    // commands/consult.md is installed separately by install_consult()
+    // because the variant depends on whether `diwa` is available on PATH.
     TemplateFile {
         relative_path: "commands/release.md",
         content: templates::COMMAND_RELEASE,
@@ -144,9 +142,31 @@ fn claude_available() -> bool {
         .unwrap_or(false)
 }
 
+/// True if `diwa` is on PATH. Used to choose the diwa-aware variant of
+/// the /consult command. The diwa-aware variant adds a Phase 0 that
+/// mines git history before the review agents run.
+fn diwa_available() -> bool {
+    Command::new("diwa")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Build the system prompt for the generative configure session.
 /// Replaces placeholder tokens in the template with reference template content.
+/// The `{COMMAND_CONSULT}` reference matches whichever variant would be
+/// installed by the static path: diwa-aware if `diwa` is on PATH, otherwise
+/// the base variant. This keeps the generative output consistent with what
+/// `--static` would produce on the same machine.
 pub(crate) fn build_configure_prompt() -> String {
+    let consult_template = if diwa_available() {
+        templates::COMMAND_CONSULT
+    } else {
+        templates::COMMAND_CONSULT_NO_DIWA
+    };
     CONFIGURE_PROMPT
         .replace(
             "{AGENT_SECURITY_REVIEWER}",
@@ -175,7 +195,7 @@ pub(crate) fn build_configure_prompt() -> String {
         .replace("{COMMAND_TRIAGE}", templates::COMMAND_TRIAGE)
         .replace("{COMMAND_SHIP_IT}", templates::COMMAND_SHIP_IT)
         .replace("{COMMAND_WORK}", templates::COMMAND_WORK)
-        .replace("{COMMAND_CONSULT}", templates::COMMAND_CONSULT)
+        .replace("{COMMAND_CONSULT}", consult_template)
         .replace("{COMMAND_RELEASE}", templates::COMMAND_RELEASE)
         .replace("{HOOK_PRE_COMMIT}", templates::GIT_HOOK_PRE_COMMIT)
         .replace("{HOOK_PRE_PUSH}", templates::GIT_HOOK_PRE_PUSH)
@@ -279,11 +299,13 @@ fn discover_project(dir: &Path) -> String {
 
 fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
     let installed = install_templates(claude_dir, TEMPLATES, ".claude/")?;
+    install_consult(claude_dir)?;
     let claude_hooks_installed = install_claude_hooks(claude_dir)?;
     let settings_installed = install_settings(claude_dir)?;
     let hooks_installed = install_static_hooks(husky_dir)?;
 
-    // Categorize for summary.
+    // Categorize for summary. consult.md is installed separately by
+    // install_consult() but counts as a command.
     let agents = TEMPLATES
         .iter()
         .filter(|t| t.relative_path.starts_with("agents/"))
@@ -291,9 +313,11 @@ fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
     let commands = TEMPLATES
         .iter()
         .filter(|t| t.relative_path.starts_with("commands/"))
-        .count();
+        .count()
+        + 1;
+    let total = installed + 1;
 
-    println!("\nInstalled {installed} files ({agents} agents, {commands} commands) to .claude/");
+    println!("\nInstalled {total} files ({agents} agents, {commands} commands) to .claude/");
     println!("Installed {claude_hooks_installed} Claude Code hooks to .claude/hooks/");
     if settings_installed {
         println!("Installed settings.local.json to .claude/");
@@ -301,6 +325,30 @@ fn install_static_templates(claude_dir: &Path, husky_dir: &Path) -> Result<()> {
     println!("Installed {hooks_installed} git hooks to .husky/");
     println!("\nActivate hooks:  git config core.hooksPath .husky");
 
+    Ok(())
+}
+
+/// Install commands/consult.md, picking the diwa-aware variant if `diwa`
+/// is on PATH and the base variant otherwise. The diwa-aware variant adds
+/// a Phase 0 that mines git history (via the `diwa` skill) before the
+/// review agents run, so they can avoid recommending approaches that
+/// were already tried and reverted.
+fn install_consult(claude_dir: &Path) -> Result<()> {
+    let dest = claude_dir.join("commands/consult.md");
+    let with_diwa = diwa_available();
+    let content = if with_diwa {
+        templates::COMMAND_CONSULT
+    } else {
+        templates::COMMAND_CONSULT_NO_DIWA
+    };
+    let action = if dest.exists() { "overwrite" } else { "create" };
+    fs::write(&dest, content)?;
+    let suffix = if with_diwa {
+        " (diwa-aware variant — diwa detected on PATH)"
+    } else {
+        " (base variant — diwa not on PATH)"
+    };
+    println!("  {action}: .claude/commands/consult.md{suffix}");
     Ok(())
 }
 
