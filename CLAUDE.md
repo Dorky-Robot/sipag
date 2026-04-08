@@ -4,112 +4,91 @@ This file primes Claude Code sessions working **on sipag itself**.
 
 ## Project overview
 
-sipag ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
+sipag is a board-driven work dispatcher for Claude Code crews. It owns the
+project board (tasks, statuses, roles) and ships work to running terminal
+sessions managed by [katulong](https://github.com/Dorky-Robot/katulong).
 
-1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-2. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch <task_id>`** — Sends a task from the board to the role's
+   katulong session and moves it to `in-progress`.
+2. **`sipag tui`** — Live kanban board across all configured projects.
 
-Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool that was extracted from sipag in April 2026.
+Project-aware review agents and slash commands are scaffolded by
+[hulma](https://github.com/Dorky-Robot/hulma), a separate tool that was
+extracted from sipag in April 2026. The legacy v2/v3 Docker dispatch path was
+deleted in April 2026 — sipag no longer launches containers itself.
 
 ## Architecture
 
-### Rust workspace (4 crates)
+### Rust workspace (3 crates)
 
 ```
 sipag-core/src/
-├── lib.rs              # pub mod: auth, config, docker, events, init, lessons, repo, state, worker
-├── auth.rs             # Token resolution (OAuth, API key, GH token)
-├── config.rs           # WorkerConfig (7 fields), Credentials, default_sipag_dir()
-├── docker.rs           # Preflight checks (daemon running, image available)
-├── events.rs           # Append-only lifecycle event bus
-├── init.rs             # Create ~/.sipag/{workers,logs}
-├── lessons.rs          # Per-repo learning from failures
-├── repo.rs             # Git remote resolution (local dir → GitHub owner/repo)
-├── state.rs            # WorkerState, WorkerPhase, PR-keyed JSON state files (atomic writes)
-└── worker/
-    ├── mod.rs           # pub use dispatch, github, lifecycle
-    ├── dispatch.rs      # dispatch_worker() → Docker container
-    ├── github.rs        # list_labeled_issues, count_open_sipag_prs, fetch_open_issues/prs
-    └── lifecycle.rs     # scan_workers (heartbeat-based liveness), cleanup_finished
+├── lib.rs              # pub mod: board, config, katulong
+├── config.rs           # default_sipag_dir() — resolves SIPAG_DIR / ~/.sipag
+├── katulong.rs         # HTTP client for katulong crew API + command builders
+└── board/
+    ├── mod.rs           # BoardConfig, project listing, add/move helpers
+    ├── project.rs       # Project struct + project.toml
+    ├── task.rs          # Task struct + task TOML files
+    └── role.rs          # Role struct + role.toml templates
 
 sipag/src/
 ├── main.rs             # Entry point
-└── cli.rs              # CLI subcommands: dispatch, ps, logs, kill, tui, doctor, version, ...
-
-sipag-worker/src/
-└── main.rs             # Container-side binary: clone, fetch PR, run Claude Code
+└── cli.rs              # CLI subcommands: dispatch, up, tui, add, list, move,
+                        # projects, project, sub, version
 
 tui/src/
-├── main.rs             # Terminal setup, event loop, attach
-├── app.rs              # App state, key handling, task refresh
-├── task.rs             # Task struct (PR-keyed, built from WorkerState)
-└── ui/                 # list.rs (table view), detail.rs (metadata + log)
+├── main.rs             # Terminal setup, event loop
+├── board_app.rs        # BoardApp state (columns, selection, key handling)
+└── ui/board.rs         # Kanban column rendering
 ```
-
-### Prompts
-
-```
-lib/prompts/worker.md         # Worker disposition prompt (embedded via include_str!)
-```
-
-The PR description is the complete assignment. `sipag-worker` reads it via `gh pr view`, appends the disposition from `worker.md`, and passes everything to `claude --dangerously-skip-permissions -p`.
 
 ### State model
 
-All state is PR-keyed JSON at `~/.sipag/workers/{owner}--{repo}--pr-{N}.json`:
+Everything sipag knows lives under `~/.sipag/` as TOML:
 
-```json
-{
-  "repo": "owner/repo",
-  "pr_num": 42,
-  "issues": [10, 11],
-  "branch": "sipag/pr-42",
-  "container_id": "abc123",
-  "phase": "working",
-  "heartbeat": "2026-01-15T10:30:00Z",
-  "started": "2026-01-15T10:30:00Z"
-}
+```
+~/.sipag/
+├── config.toml                        # default_project, etc.
+└── projects/
+    └── <project>/
+        ├── project.toml               # name, repo, statuses
+        ├── tasks/
+        │   └── <id>.toml              # id, title, status, role, labels
+        └── roles/
+            └── <role>.toml            # name, command, worktree
 ```
 
-Phases: `starting` → `working` → `finished` | `failed`
+A task is just a small TOML file. A role is a template that says "when you
+dispatch a task tagged with this role, run this command in that katulong
+session."
 
 ## Commands
 
 ```
-sipag dispatch <PR_URL>       Launch a Docker worker for a PR
-sipag ps                      List active and recent workers
-sipag logs <id>               Show logs for a worker (PR number or container name)
-sipag kill <id>               Kill a running worker
-sipag tui                     Launch interactive TUI (also: run sipag with no args)
-sipag doctor                  Check system prerequisites
-sipag version                 Print version
+sipag dispatch <TASK_ID>    Dispatch a task to its role's katulong session
+sipag up [project]          Spin up sessions for every role in the project
+sipag tui                   Launch the kanban TUI (default when run with no args)
+sipag add <title>           Add a task to the board
+sipag list                  List tasks on the board
+sipag move <id> <status>    Move a task to a new status
+sipag projects              List all projects
+sipag project add <name>    Register a project
+sipag sub <topic>           Subscribe to a katulong pub/sub topic
+sipag version               Print version
 ```
 
-## Config
+## Dependencies on katulong
 
-`~/.sipag/config` (optional, key=value):
+sipag dispatches by talking to a katulong server over HTTP. The connection
+details live at `~/.katulong/remote.json`:
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image` | `ghcr.io/dorky-robot/sipag-worker:latest` | Docker image |
-| `timeout` | `7200` | Worker timeout in seconds |
-| `work_label` | `ready` | Issue label gate |
-| `max_open_prs` | `3` | Back-pressure limit |
-| `poll_interval` | `120` | Seconds between polling cycles |
-| `heartbeat_interval` | `30` | Seconds between heartbeat writes |
-| `heartbeat_stale` | `90` | Seconds before a heartbeat is considered stale |
-
-Environment overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABEL`, `SIPAG_MAX_OPEN_PRS`, `SIPAG_DIR`, `SIPAG_HEARTBEAT_INTERVAL`, `SIPAG_HEARTBEAT_STALE`.
-
-## File layout (~/.sipag/)
-
+```json
+{ "url": "https://katulong.example", "apiKey": "..." }
 ```
-workers/     # PR-keyed state JSON + heartbeat files
-events/      # Append-only lifecycle events (the event bus)
-logs/        # Worker stdout/stderr ({owner}--{repo}--pr-{N}.log)
-lessons/     # Per-repo learning from failures ({owner}--{repo}.md)
-config       # Optional config file
-```
+
+`sipag-core/src/katulong.rs` is the only place that knows the wire format —
+keep API calls funneled through it.
 
 ## Conventions
 
@@ -138,41 +117,20 @@ make install-hooks
 - **Never use `--no-verify`**. Fix the issue instead.
 - Run `make dev` before opening or updating PRs.
 
-### Docker image
-
-Worker containers use `ghcr.io/dorky-robot/sipag-worker:latest`, published via GitHub Actions.
-
-```bash
-docker build -t sipag-worker:local .
-SIPAG_IMAGE=sipag-worker:local sipag dispatch https://github.com/owner/repo/pull/N
-```
-
 ## Working on sipag
 
 ### What changes most
 
-- `sipag-core/src/worker/` — dispatch, lifecycle, GitHub operations
-- `sipag-core/src/state.rs` — state file format and management
-- `sipag/src/cli.rs` — CLI commands
-- `tui/src/` — TUI views and task model
-
-### PR-only workflow
-
-The host machine is for **conversation and commands only**. All code changes happen through PRs built inside Docker workers.
-
-1. Identify the need in conversation
-2. Create or update a GitHub issue
-3. Label the issue `ready`
-4. Main Claude Code crafts a PR with architectural context
-5. `sipag dispatch` launches a Docker worker
-6. Review the PR, merge or close
+- `sipag-core/src/board/` — task/project/role schema and helpers
+- `sipag-core/src/katulong.rs` — katulong client + command builders
+- `sipag/src/cli.rs` — CLI surface
+- `tui/src/board_app.rs`, `tui/src/ui/board.rs` — kanban view
 
 ### Part of the dorky robot stack
 
 ```
-kubo (think)  →  sipag (do)  →  GitHub PRs (review)
-                    ↑
-tao (decide)  ─────┘
+kubo (think)  →  sipag (board)  →  katulong (sessions)  →  agents do the work
 ```
 
-sipag is the execution layer. kubo handles chain-of-thought planning; tao surfaces suspended decisions.
+sipag is the dispatcher. kubo handles chain-of-thought planning; katulong
+hosts the long-running terminal sessions where agents run.

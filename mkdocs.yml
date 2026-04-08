@@ -1,6 +1,6 @@
 site_name: sipag
 site_url: https://sipag.dev
-site_description: Autonomous dev agents that evolve with your project.
+site_description: Board-driven work dispatcher for Claude Code crews.
 site_author: Dorky-Robot
 
 repo_url: https://github.com/Dorky-Robot/sipag
@@ -46,16 +46,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
-  - How It Works: how-it-works.md
-  - Concepts: concepts.md
-  - Architecture: architecture.md
-  - Configuration: configuration.md
   - CLI Reference: cli-reference.md
-  - Guides:
-      - Your First Session: guides/first-session.md
-      - Setting Up a New Repo: guides/new-repo-setup.md
-      - Running sipag in CI: guides/ci-integration.md
-  - FAQ: faq.md
 
 extra_css:
   - assets/css/dorkyrobot-theme.css

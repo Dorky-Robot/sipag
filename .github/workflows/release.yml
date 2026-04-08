@@ -59,13 +59,10 @@ jobs:
           ARCHIVE="sipag-${VERSION}-${TARGET}.tar.gz"
 
           # Staging directory
-          mkdir -p "dist/sipag-${VERSION}-${TARGET}/lib/prompts"
+          mkdir -p "dist/sipag-${VERSION}-${TARGET}"
 
           # Binary
           cp "target/${TARGET}/release/sipag" "dist/sipag-${VERSION}-${TARGET}/"
-
-          # Prompts
-          cp lib/prompts/*.md "dist/sipag-${VERSION}-${TARGET}/lib/prompts/"
 
           # Create tarball
           cd dist
@@ -139,12 +136,10 @@ jobs:
           mkdir -p homebrew-tap/Formula
           {
             echo 'class Sipag < Formula'
-            echo '  desc "Autonomous dev agent powered by Claude Code"'
+            echo '  desc "Board-driven work dispatcher for Claude Code crews"'
             echo '  homepage "https://github.com/Dorky-Robot/sipag"'
             echo "  version \"${VERSION_CLEAN}\""
             echo '  license "MIT"'
-            echo ''
-            echo '  depends_on "gh"'
             echo ''
             echo '  on_macos do'
             echo '    if Hardware::CPU.arm?'
@@ -158,7 +153,6 @@ jobs:
             echo ''
             echo '  def install'
             echo '    bin.install "sipag"'
-            echo '    lib.install Dir["lib/*"]'
             echo '  end'
             echo ''
             echo '  test do'

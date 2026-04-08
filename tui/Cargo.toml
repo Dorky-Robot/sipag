@@ -12,7 +12,7 @@ path = "src/main.rs"
 sipag-core = { path = "../sipag-core" }
 ratatui = "0.30"
 anyhow = "1"
-chrono = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
 [dev-dependencies]
 tempfile = "3"

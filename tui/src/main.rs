@@ -1,8 +1,4 @@
-#[allow(dead_code)]
-mod app;
 mod board_app;
-#[allow(dead_code)]
-mod task;
 mod ui;
 
 use anyhow::Result;
