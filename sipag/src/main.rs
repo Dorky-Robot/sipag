@@ -1,6 +1,4 @@
 mod cli;
-mod configure_project;
-mod templates;
 
 use clap::Parser;
 

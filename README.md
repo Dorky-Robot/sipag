@@ -12,11 +12,12 @@
 
 ## What is sipag?
 
-sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures — all powered by Claude Code.
+sipag ships work through isolated Docker containers and learns from failures — all powered by Claude Code.
 
-1. **`sipag configure`** — Analyzes your project and generates tailored review agents and commands for `.claude/`. Re-run as your project evolves — it reads what's there and updates it.
-2. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
-3. **`sipag tui`** — Live dashboard for all workers across the host.
+1. **`sipag dispatch`** — Launches an isolated Docker container that reads a PR description and implements it autonomously.
+2. **`sipag tui`** — Live dashboard for all workers across the host.
+
+To set up review agents and slash commands in a project's `.claude/` directory, use [hulma](https://github.com/Dorky-Robot/hulma).
 
 ## Quick start
 
@@ -27,11 +28,11 @@ sipag generates project-aware review agents, ships work through isolated Docker 
    brew install sipag
    ```
 
-2. Configure review agents and commands for your project:
+2. (Optional) Install [hulma](https://github.com/Dorky-Robot/hulma) and configure review agents for your project:
 
    ```bash
    cd ~/Projects/my-app
-   sipag configure
+   hulma configure
    ```
 
 3. Create a branch and PR on GitHub describing what needs to happen.
@@ -51,8 +52,6 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 ## How it works
 
 ```
-sipag configure               Configure agents + commands for .claude/
-          ↓
 create branch + PR            Describe the work in the PR body
           ↓
 sipag dispatch <PR_URL>       Launch a Docker worker
@@ -63,17 +62,6 @@ sipag tui / sipag ps          Monitor progress
           ↓
 review + merge                You decide what ships
 ```
-
-### sipag configure
-
-Generates project-specific review agents and commands into `.claude/`. By default it launches Claude to analyze your project and write tailored agents. Use `--static` to install generic templates without Claude.
-
-| Category | Files |
-|----------|-------|
-| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `root-cause-analyst`, `simplicity-advocate`, `backlog-triager`, `issue-analyst` |
-| Commands | `dispatch`, `review`, `triage`, `ship-it`, `work`, `consult`, `release` |
-
-Re-run `sipag configure` as your project evolves — it reads existing files and updates them.
 
 ### sipag dispatch
 
@@ -166,7 +154,6 @@ Environment variable overrides: `SIPAG_IMAGE`, `SIPAG_TIMEOUT`, `SIPAG_WORK_LABE
 ## CLI reference
 
 ```
-sipag configure [dir] [--static]        Configure agents and commands for .claude/
 sipag dispatch <PR_URL>                 Launch a Docker worker for a PR
 sipag ps [--all]                        List active and recent workers
 sipag logs <id>                         Show logs for a worker (PR number or container name)

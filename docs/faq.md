@@ -59,19 +59,15 @@ The worker:
 6. A supervision loop monitors Claude, writes heartbeats, and checks PR state on GitHub
 7. After Claude exits, the worker verifies commits were actually pushed
 
-## What does `sipag configure` actually do?
+## Where did `sipag configure` go?
 
-By default, it launches Claude Code to analyze your project (directory listing, config files, README, existing CLAUDE.md) and generate tailored review agents and commands written specifically for your codebase. The agents reference your actual file paths, tech stack, and patterns.
-
-With `--static`, it installs generic templates without running Claude — useful when you don't have Claude available or want a quick baseline.
-
-Both modes write to `.claude/agents/` and `.claude/commands/` and install git hooks to `.husky/`.
+The project scaffolder was extracted into a separate tool, [hulma](https://github.com/Dorky-Robot/hulma), in April 2026. To install review agents and slash commands into a project's `.claude/` directory, run `hulma configure` instead. sipag now focuses purely on dispatching work.
 
 ## Do I need Docker?
 
 Yes. Docker is required for `sipag dispatch`. The container is the safety boundary that allows Claude Code to run with full permissions without risking your host machine.
 
-`sipag configure` and the TUI do not require Docker.
+The TUI does not require Docker.
 
 ## What permissions does the GitHub token need?
 

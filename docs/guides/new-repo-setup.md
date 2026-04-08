@@ -47,16 +47,16 @@ Workers read this file when they start. The more accurate it is, the better work
 
 ---
 
-## 2. Configure agents and commands
+## 2. (Optional) Configure agents and commands with hulma
 
-Run sipag configure to generate project-specific review agents:
+Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool. If you want them, install hulma and run:
 
 ```bash
 cd ~/Projects/my-repo
-sipag configure
+hulma configure
 ```
 
-This creates `.claude/agents/` and `.claude/commands/` tailored to your project. Commit these files so they're available inside worker containers.
+This creates `.claude/agents/` and `.claude/commands/` tailored to your project. Commit these files so they're available inside worker containers. This step is optional — `sipag dispatch` works without any `.claude/` setup.
 
 ---
 

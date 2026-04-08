@@ -170,7 +170,6 @@ post_install() {
   fi
 
   log "Get started:"
-  log "  sipag configure    # set up review agents for your project"
   log "  sipag doctor       # check all prerequisites"
 }
 

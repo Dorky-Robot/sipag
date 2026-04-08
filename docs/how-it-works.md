@@ -1,19 +1,14 @@
 # How It Works
 
-sipag generates project-aware review agents, ships work through isolated Docker containers, and learns from failures. This document walks through every stage.
+sipag ships work through isolated Docker containers and learns from failures. This document walks through every stage.
+
+> Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool. This page focuses on sipag's dispatch lifecycle.
 
 ---
 
 ## The big picture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  sipag configure                                      │
-│  Configures agents and commands                       │
-│  for your project's .claude/ directory                │
-└──────────────────────────┬───────────────────────────┘
-                           │
-                           v
 ┌──────────────────────────────────────────────────────┐
 │  You create a branch + PR on GitHub                   │
 │  PR body = the complete assignment for the worker     │
@@ -45,19 +40,6 @@ sipag generates project-aware review agents, ships work through isolated Docker 
 │  Monitor worker progress, view logs, kill workers     │
 └──────────────────────────────────────────────────────┘
 ```
-
----
-
-## sipag configure
-
-`sipag configure` generates project-specific agents and commands for your project's `.claude/` directory:
-
-| Category | Files | Purpose |
-|----------|-------|---------|
-| Agents | `security-reviewer`, `architecture-reviewer`, `correctness-reviewer`, `root-cause-analyst`, `simplicity-advocate`, `backlog-triager`, `issue-analyst` | Specialized review agents usable via Claude Code's Task tool |
-| Commands | `dispatch`, `review`, `triage`, `ship-it`, `work`, `consult`, `release` | Custom slash commands for Claude Code |
-
-By default, it launches Claude to analyze your project and write tailored agents. Use `--static` to install generic templates without Claude. Re-run as your project evolves.
 
 ---
 
