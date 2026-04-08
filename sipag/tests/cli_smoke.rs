@@ -170,6 +170,63 @@ fn up_with_no_roles() {
         .stdout(predicate::str::contains("No roles configured"));
 }
 
+// ── Feature store ──────────────────────────────────────────────────────────
+
+fn setup_project(dir: &TempDir) {
+    let project_dir = dir.path().join("projects/testproj");
+    fs::create_dir_all(project_dir.join("tasks")).unwrap();
+    fs::create_dir_all(project_dir.join("roles")).unwrap();
+    fs::write(
+        project_dir.join("project.toml"),
+        "name = \"testproj\"\nrepo = \"a/b\"\nstatuses = [\"todo\", \"done\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        "default_project = \"testproj\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn feature_add_help_works() {
+    sipag()
+        .args(["feature", "add", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("raw idea"));
+}
+
+#[test]
+fn feature_add_succeeds_and_prints_id() {
+    let dir = temp_sipag_dir();
+    setup_project(&dir);
+    sipag()
+        .args(["feature", "add", "wire up the new dispatcher"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("f-"));
+}
+
+#[test]
+fn feature_list_shows_added_feature() {
+    let dir = temp_sipag_dir();
+    setup_project(&dir);
+    sipag()
+        .args(["feature", "add", "do the new thing"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success();
+    sipag()
+        .args(["feature", "list"])
+        .env("SIPAG_DIR", dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("do the new thing"))
+        .stdout(predicate::str::contains("raw"));
+}
+
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
 #[test]

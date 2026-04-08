@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sipag_core::{board, config::default_sipag_dir, katulong};
+use sipag_core::{board, config::default_sipag_dir, feature, katulong};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Command;
@@ -101,6 +101,12 @@ pub enum Commands {
         action: ProjectAction,
     },
 
+    /// Manage dispatch features (raw ideas, refinement queue)
+    Feature {
+        #[command(subcommand)]
+        action: FeatureAction,
+    },
+
     /// Subscribe to katulong pub/sub topic and print events
     Sub {
         /// Pub/sub topic (e.g. crew/katulong/dev/agent-done)
@@ -132,6 +138,44 @@ pub enum ProjectAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum FeatureAction {
+    /// Add a raw feature idea to the dispatch store
+    Add {
+        /// The raw idea text (body of the feature)
+        text: String,
+
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Comma-separated list of projects this feature should target
+        #[arg(long, value_delimiter = ',')]
+        projects: Vec<String>,
+    },
+
+    /// List features in the dispatch store
+    List {
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Filter by status (raw, grouped, refined, needs-info, active)
+        #[arg(long)]
+        status: Option<String>,
+    },
+
+    /// Show a single feature (frontmatter + body)
+    Show {
+        /// Feature id (e.g. f-...)
+        id: String,
+
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
+    },
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => run_tui(),
@@ -157,6 +201,17 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Commands::Projects) => run_projects(),
         Some(Commands::Project { action }) => match action {
             ProjectAction::Add { name, repo } => run_project_add(&name, &repo),
+        },
+        Some(Commands::Feature { action }) => match action {
+            FeatureAction::Add {
+                text,
+                project,
+                projects,
+            } => run_feature_add(&text, project.as_deref(), &projects),
+            FeatureAction::List { project, status } => {
+                run_feature_list(project.as_deref(), status.as_deref())
+            }
+            FeatureAction::Show { id, project } => run_feature_show(&id, project.as_deref()),
         },
         Some(Commands::Sub {
             topic,
@@ -365,6 +420,63 @@ fn run_projects() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── Feature store handlers ────────────────────────────────────────────────
+
+fn run_feature_add(text: &str, project: Option<&str>, projects: &[String]) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+    let projects_opt = if projects.is_empty() {
+        None
+    } else {
+        Some(projects.to_vec())
+    };
+    let f = feature::Feature::add(&sipag_dir, &project_name, text, projects_opt)?;
+    println!("{}", f.id);
+    Ok(())
+}
+
+fn run_feature_list(project: Option<&str>, status: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+    let features = feature::Feature::list(&sipag_dir, &project_name, status)?;
+
+    if features.is_empty() {
+        if let Some(s) = status {
+            println!("No {s} features in {project_name}.");
+        } else {
+            println!("No features in {project_name}.");
+        }
+        return Ok(());
+    }
+
+    println!("{:<40} {:<12} FIRST LINE", "ID", "STATUS");
+    println!("{}", "-".repeat(72));
+    for f in &features {
+        let first_line = f.body.lines().next().unwrap_or("").trim();
+        let display = if first_line.len() > 36 {
+            format!("{}...", &first_line[..33])
+        } else {
+            first_line.to_string()
+        };
+        println!("{:<40} {:<12} {}", f.id, f.status, display);
+    }
+    println!("\n{} features in {project_name}", features.len());
+    Ok(())
+}
+
+fn run_feature_show(id: &str, project: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+    // Validate it exists and parses cleanly first.
+    feature::Feature::get(&sipag_dir, &project_name, id)?
+        .with_context(|| format!("feature {id} not found in project {project_name}"))?;
+    let path = feature::Feature::path(&sipag_dir, &project_name, id);
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    println!("{content}");
     Ok(())
 }
 
