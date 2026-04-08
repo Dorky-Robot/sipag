@@ -70,7 +70,9 @@ fn help_lists_subcommands() {
     let output = sipag().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    for cmd in &["dispatch", "up", "tui", "add", "list", "move", "version"] {
+    for cmd in &[
+        "dispatch", "up", "tui", "add", "list", "move", "refine", "version",
+    ] {
         assert!(
             stdout.contains(cmd),
             "Help text should mention '{cmd}' subcommand"
@@ -225,6 +227,27 @@ fn feature_list_shows_added_feature() {
         .success()
         .stdout(predicate::str::contains("do the new thing"))
         .stdout(predicate::str::contains("raw"));
+}
+
+// ── Refine ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn refine_help_works() {
+    sipag()
+        .args(["refine", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Refine"))
+        .stdout(predicate::str::contains("FEATURE_ID"));
+}
+
+#[test]
+fn refine_requires_feature_id() {
+    sipag()
+        .arg("refine")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("FEATURE_ID"));
 }
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────

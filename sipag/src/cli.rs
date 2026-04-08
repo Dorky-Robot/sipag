@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sipag_core::{board, config::default_sipag_dir, feature, katulong};
+use sipag_core::{board, config::default_sipag_dir, feature, katulong, refine};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::Command;
@@ -105,6 +105,17 @@ pub enum Commands {
     Feature {
         #[command(subcommand)]
         action: FeatureAction,
+    },
+
+    /// Refine one or more raw features into actionable tickets
+    Refine {
+        /// Feature IDs to refine (one or more)
+        #[arg(value_name = "FEATURE_ID", required = true, num_args = 1..)]
+        feature_ids: Vec<String>,
+
+        /// Project name (default: from config)
+        #[arg(short, long)]
+        project: Option<String>,
     },
 
     /// Subscribe to katulong pub/sub topic and print events
@@ -213,6 +224,10 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             FeatureAction::Show { id, project } => run_feature_show(&id, project.as_deref()),
         },
+        Some(Commands::Refine {
+            feature_ids,
+            project,
+        }) => run_refine(&feature_ids, project.as_deref()),
         Some(Commands::Sub {
             topic,
             from_seq,
@@ -477,6 +492,49 @@ fn run_feature_show(id: &str, project: Option<&str>) -> Result<()> {
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     println!("{content}");
+    Ok(())
+}
+
+fn run_refine(feature_ids: &[String], project: Option<&str>) -> Result<()> {
+    let sipag_dir = default_sipag_dir();
+    let project_name = resolve_project(project)?;
+
+    // Progress callback prints one bullet per line to stderr so refinement
+    // activity is visible in a long-running terminal without polluting
+    // stdout (which we reserve for the final ticket list).
+    let mut opts = refine::RefineOptions {
+        on_progress: Some(Box::new(|bullet: &str| {
+            eprintln!("  - {bullet}");
+        })),
+        ..Default::default()
+    };
+
+    let refiner = refine::Refiner::new();
+    let created = match refiner.refine_batch(&sipag_dir, &project_name, feature_ids, &mut opts) {
+        Ok(c) => c,
+        Err(e) => {
+            // Never leak `e.detail` to user output — it can contain raw
+            // subprocess stderr (internal paths, uncooked claude output).
+            // Callers that need the detail can set RUST_LOG=debug in a
+            // future commit; for now the detail is dropped at the CLI
+            // layer by design.
+            let _ = e.detail;
+            eprintln!("error: {}", e.public);
+            std::process::exit(1);
+        }
+    };
+
+    println!(
+        "Refined {} features into {} tickets:",
+        feature_ids.len(),
+        created.len()
+    );
+    for f in &created {
+        let proj = f.project.as_deref().unwrap_or("-");
+        let title = f.body.lines().next().unwrap_or("").trim();
+        println!("  {} [{}] {}", f.id, proj, title);
+    }
+
     Ok(())
 }
 
