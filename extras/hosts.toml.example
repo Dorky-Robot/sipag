@@ -1,0 +1,19 @@
+# sipag mesh config — copy to ~/.sipag/hosts.toml and fill in each host's
+# API key. The key for each mac lives at ~/.katulong/remote.json on that
+# mac (`jq -r .apiKey ~/.katulong/remote.json`). sipag keeps these
+# server-side; the browser never sees them.
+
+[[host]]
+id     = "mini"
+url    = "https://katulong-mini.felixflor.es"
+apiKey = "paste-from-mini's-~/.katulong/remote.json"
+
+[[host]]
+id     = "prime"
+url    = "https://katulong-prime.felixflor.es"
+apiKey = "paste-from-mac2024's-~/.katulong/remote.json"
+
+[[host]]
+id     = "og"
+url    = "https://katulong-og.felixflor.es"
+apiKey = "paste-from-mac2019's-~/.katulong/remote.json"

@@ -1,4 +1,4 @@
-.PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness
+.PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness web-install web-watch web-build web-clean serve
 
 BIN_DIR   ?= $(HOME)/.cargo/bin
 
@@ -46,6 +46,23 @@ dev: fmt lint test
 
 clean:
 	cargo clean
+
+# ── Web spike (Week 1) ────────────────────────────────────────────────────────
+# ClojureScript SPA served by `sipag serve`. See web/README.md.
+web-install:
+	cd web && npm install
+
+web-watch:
+	cd web && npm run watch
+
+web-build:
+	cd web && npm run release
+
+web-clean:
+	cd web && npm run clean
+
+serve:
+	cargo run -p sipag -- serve --port 7100
 
 # ── Hook installation ─────────────────────────────────────────────────────────
 # Run once after cloning to activate pre-commit and pre-push quality gates.

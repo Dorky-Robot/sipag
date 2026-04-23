@@ -1,0 +1,18 @@
+;; shadow-cljs config for the sipag agent-manager SPA.
+;;
+;; One build: `app`, compiling src/sipag/app.cljs to public/js/app.js.
+;; `sipag serve` (Rust) serves ./public at port 7100 and proxies
+;; /api/* to the three katulongs defined in ~/.sipag/hosts.toml.
+
+{:source-paths ["src"]
+
+ :dependencies []   ; vanilla cljs — no Reagent, no re-frame, no libs
+
+ :builds
+ {:app
+  {:target :browser
+   :output-dir "public/js"
+   :asset-path "/js"
+   :modules {:app {:init-fn sipag.app/init}}
+   :devtools {:watch-dir "public"
+              :preloads []}}}}

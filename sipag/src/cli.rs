@@ -132,6 +132,20 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Run the agent-manager web server (Week-1 spike)
+    ///
+    /// Serves the ClojureScript SPA and proxies the katulong mesh defined
+    /// in ~/.sipag/hosts.toml. API keys stay server-side.
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 7100)]
+        port: u16,
+
+        /// Directory holding the compiled cljs SPA (index.html + assets)
+        #[arg(long, default_value = "web/public")]
+        web_root: std::path::PathBuf,
+    },
+
     /// Print version
     Version,
 }
@@ -233,6 +247,7 @@ pub fn run(cli: Cli) -> Result<()> {
             from_seq,
             json,
         }) => run_sub(&topic, from_seq, json),
+        Some(Commands::Serve { port, web_root }) => crate::serve::run(port, web_root),
         Some(Commands::Version) => run_version(),
     }
 }

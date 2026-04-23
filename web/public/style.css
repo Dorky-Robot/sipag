@@ -1,0 +1,111 @@
+/* Minimal dark theme for the Week-1 spike. Will match katulong's
+   OKLCH palette later; for now, just readable over Cmd+/-in-a-tile. */
+
+:root {
+  --bg: #0e1013;
+  --surface: #171b20;
+  --border: #262c34;
+  --text: #e6e8eb;
+  --subtle: #8a929d;
+  --accent: #7aa2f7;
+  --ok: #9ece6a;
+  --warn: #e0af68;
+  --err: #f7768e;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: 0.02em;
+}
+
+.subtle { color: var(--subtle); font-size: 12px; }
+
+#board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.host {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.host-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.host-id { font-weight: 600; font-size: 14px; }
+.host-url {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crew {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #0b0d10;
+}
+
+.project-name { font-family: var(--mono); font-size: 12px; }
+
+.worker {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--subtle);
+}
+
+.worker.active { color: var(--ok); }
+.worker.idle   { color: var(--subtle); }
+.worker.exited { color: var(--err); }
+
+.err {
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11px;
+}
