@@ -1,4 +1,5 @@
 [package]
+license = "MIT OR Apache-2.0"
 name = "sipag"
 version = "3.0.10"
 edition = "2021"
