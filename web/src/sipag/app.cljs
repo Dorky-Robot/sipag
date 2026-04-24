@@ -1,17 +1,28 @@
 (ns sipag.app
-  "Vanilla ClojureScript entry point for the agent-manager SPA.
+  "Objective-focused agent manager SPA.
 
-   No Reagent, no re-frame — direct DOM interop via goog.dom, fetch()
-   for HTTP, and a tiny render loop over an atom holding the last known
-   state.
+   Philosophy: we optimize *for* something (the objective); everything
+   we're doing right now lives under its objective; ideas (things we
+   might pick up later) sit in a parked idea-box off the main surface.
+   No kanban funnel, no backlog → todo → doing → done columns — if it
+   is happening, it shows; if it is not happening, it is either an
+   idea or archived.
 
-   The server (Rust `sipag serve`) owns:
-     - GET /api/hosts                           → [{id, url}]
-     - GET /api/hosts/:id/sessions              → proxied katulong /sessions
+   Status mapping (read-only, server stays compatible with the CLI's
+   full status vocabulary):
+     backlog             → idea box
+     todo | in-progress  → active under objective
+     review              → active under objective
+     done                → hidden (archived)
 
-   Katulong session names follow the `<project>--<worker>` convention
-   when crewed; this view groups by that prefix so a katulong spawned
-   with `crew spawn myapp frontend` renders under a `myapp` column."
+   Data from the server:
+     GET /api/projects           → [{name, repo, statuses, tasks}]
+     GET /api/hosts              → [{id, url}]
+     GET /api/hosts/:id/sessions → katulong /sessions proxied
+
+   Cross-referencing which host is running a task is best-effort and
+   lives in a small footnote on active items; it never dominates the
+   view."
   (:require
     [clojure.string :as str]
     [goog.dom :as gdom]))
@@ -19,11 +30,12 @@
 ;; ── state ───────────────────────────────────────────────────────────
 
 (defonce state
-  (atom {:hosts    []       ; [{id, url}]
-         :sessions {}       ; host-id → vec of session maps
-         :err      {}       ; host-id → last error string
-         :phase    :boot
-         :boot-err nil}))
+  (atom {:projects       []     ; [{name, repo, statuses, tasks}]
+         :hosts          []     ; [{id, url}]
+         :sessions       {}     ; host-id → [sessions]
+         :idea-box-open? false
+         :err            nil
+         :phase          :boot}))
 
 ;; ── fetch helpers ───────────────────────────────────────────────────
 
@@ -35,58 +47,48 @@
                  (throw (ex-info (str "HTTP " (.-status resp)) {:url url})))))
       (.then #(js->clj % :keywordize-keys true))))
 
+(defn- load-projects! []
+  (-> (fetch-json "/api/projects")
+      (.then (fn [ps] (swap! state assoc :projects ps :phase :ready)))
+      (.catch (fn [err] (swap! state assoc :err (.-message err) :phase :error)))))
+
 (defn- load-hosts! []
   (-> (fetch-json "/api/hosts")
-      (.then (fn [hosts]
-               (swap! state assoc :hosts hosts :phase :ready)))
-      (.catch (fn [err]
-                (swap! state assoc :phase :error :boot-err (.-message err))))))
+      (.then (fn [hs] (swap! state assoc :hosts hs)))
+      (.catch (fn [_err] nil))))
 
 (defn- load-sessions! [host-id]
   (-> (fetch-json (str "/api/hosts/" host-id "/sessions"))
-      (.then (fn [body]
-               (swap! state (fn [s]
-                              (-> s
-                                  (assoc-in [:sessions host-id] body)
-                                  (assoc-in [:err host-id] nil))))))
-      (.catch (fn [err]
-                (swap! state assoc-in [:err host-id] (.-message err))))))
+      (.then (fn [ss] (swap! state assoc-in [:sessions host-id] ss)))
+      (.catch (fn [_err] nil))))
 
 (defn- refresh-all! []
+  (load-projects!)
   (doseq [{:keys [id]} (:hosts @state)]
     (load-sessions! id)))
 
-;; ── deriving crew structure ─────────────────────────────────────────
+;; ── classification ──────────────────────────────────────────────────
 
-(defn- session-state [sess]
-  (cond
-    (not (:alive sess))          "exited"
-    (:hasChildProcesses sess)    "active"
-    :else                        "idle"))
+(def ^:private active-statuses #{"todo" "in-progress" "review"})
+(def ^:private idea-statuses   #{"backlog"})
+(def ^:private archived-statuses #{"done"})
 
-(defn- crew-key
-  "Split a session name on `--` into [project worker]. Un-crewed
-   sessions — those without the separator — land in a synthetic
-   '_loose_' bucket so they still appear in the view."
-  [sess]
-  (let [name (or (:name sess) "")
-        idx (str/index-of name "--")]
-    (if idx
-      [(subs name 0 idx) (subs name (+ idx 2))]
-      ["_loose_" name])))
+(defn- active? [t]  (contains? active-statuses (:status t)))
+(defn- idea?   [t]  (contains? idea-statuses (:status t)))
 
-(defn- group-by-project [sessions]
-  (->> sessions
-       (map (fn [s]
-              (let [[proj worker] (crew-key s)]
-                (assoc s ::project proj ::worker worker))))
-       (group-by ::project)))
+(defn- task-running-on
+  "Return the host id currently running this task's dispatch session,
+   or nil. Match on the katulong crew naming convention:
+   `<project>--<role>`. Best-effort; the view never fails if this
+   returns nil."
+  [task project-name sessions-by-host]
+  (let [needle (str project-name "--" (:role task))]
+    (some (fn [[host-id sessions]]
+            (when (some #(= needle (:name %)) sessions)
+              host-id))
+          sessions-by-host)))
 
 ;; ── rendering ───────────────────────────────────────────────────────
-;;
-;; Plain string templating, full innerHTML replace per tick. Small tree,
-;; not worth a diff — and keeps the spike honest about what the data
-;; path costs.
 
 (defn- escape-html [s]
   (when s
@@ -96,65 +98,125 @@
         (.replace (js/RegExp ">" "g") "&gt;")
         (.replace (js/RegExp "\"" "g") "&quot;"))))
 
-(defn- render-worker [sess]
-  (let [st    (session-state sess)
-        label (escape-html (or (::worker sess) (:name sess)))
-        kids  (or (:childCount sess) 0)]
-    (str "<div class=\"worker " st "\">"
-         "<span>" label "</span>"
-         "<span>" st (when (pos? kids) (str " · " kids)) "</span>"
-         "</div>")))
+(defn- render-labels [labels]
+  (when (seq labels)
+    (str "<span class=\"labels\">"
+         (apply str (for [l labels]
+                      (str "<span class=\"label\">" (escape-html l) "</span>")))
+         "</span>")))
 
-(defn- render-project [[project-name sessions]]
-  (str "<div class=\"project\">"
-       "<div class=\"project-name\">" (escape-html project-name) "</div>"
-       (apply str (map render-worker sessions))
-       "</div>"))
-
-(defn- render-host [{:keys [id url]} sessions err]
-  (let [projects (group-by-project (or sessions []))
-        proj-count (count projects)]
-    (str "<section class=\"host\">"
-         "<header class=\"host-head\">"
-         "<div class=\"host-id\">" (escape-html id)
-         " <span class=\"subtle\">(" (count sessions) ")</span></div>"
-         "<div class=\"host-url\">" (escape-html url) "</div>"
-         "</header>"
-         (cond
-           err
-           (str "<div class=\"err\">" (escape-html err) "</div>")
-
-           (zero? proj-count)
-           "<div class=\"subtle\">no sessions</div>"
-
-           :else
-           (str "<div class=\"crew\">"
-                (apply str (map render-project projects))
+(defn- render-active-task [task project-name sessions]
+  (let [host (task-running-on task project-name sessions)
+        status (:status task)
+        status-chip (when (not= status "todo")
+                      (str "<span class=\"status-chip " status "\">"
+                           (escape-html status) "</span>"))]
+    (str "<li class=\"task\">"
+         "<div class=\"task-head\">"
+         "<span class=\"task-id\">#" (:id task) "</span>"
+         "<span class=\"task-title\">" (escape-html (:title task)) "</span>"
+         status-chip
+         (render-labels (:labels task))
+         "</div>"
+         (when host
+           (str "<div class=\"task-foot\">"
+                "▸ running on " (escape-html host)
                 "</div>"))
+         "</li>")))
+
+(defn- render-objective [{:keys [name tasks] :as proj} sessions]
+  (let [active (filter active? tasks)]
+    (str "<section class=\"objective\">"
+         "<header class=\"objective-head\">"
+         "<h2>" (escape-html name) "</h2>"
+         "<span class=\"subtle\">"
+         (count active) " active · " (count tasks) " total"
+         "</span>"
+         "</header>"
+         (if (empty? active)
+           "<div class=\"objective-empty\">nothing now</div>"
+           (str "<ul class=\"tasks\">"
+                (apply str (map #(render-active-task % name sessions) active))
+                "</ul>"))
          "</section>")))
 
-(defn- render! [{:keys [hosts sessions err phase boot-err]}]
-  (let [status-el (gdom/getElement "status")
-        board-el  (gdom/getElement "board")]
-    (when status-el
-      (set! (.-textContent status-el)
-            (case phase
-              :boot   "loading…"
-              :ready  (str (count hosts) " host(s)")
-              :error  (str "error: " boot-err))))
-    (when board-el
-      (set! (.-innerHTML board-el)
-            (apply str (map #(render-host % (get sessions (:id %)) (get err (:id %))) hosts))))))
+(defn- render-idea [task proj-name]
+  (str "<li class=\"idea\">"
+       "<span class=\"task-id\">#" (:id task) "</span>"
+       "<span class=\"task-title\">" (escape-html (:title task)) "</span>"
+       "<span class=\"subtle\"> · " (escape-html proj-name) "</span>"
+       (render-labels (:labels task))
+       "</li>"))
+
+(defn- render-idea-box [projects open?]
+  (let [all-ideas (mapcat (fn [p] (map #(vector % (:name p)) (filter idea? (:tasks p))))
+                          projects)]
+    (if (empty? all-ideas)
+      "<aside class=\"idea-box\"><button class=\"idea-toggle\" disabled>idea box · empty</button></aside>"
+      (str "<aside class=\"idea-box" (when open? " open") "\">"
+           "<button class=\"idea-toggle\" data-action=\"toggle-ideas\">"
+           (if open? "▾" "▸") " idea box · " (count all-ideas)
+           "</button>"
+           (when open?
+             (str "<ul class=\"ideas\">"
+                  (apply str (map (fn [[t pn]] (render-idea t pn)) all-ideas))
+                  "</ul>"))
+           "</aside>"))))
+
+(defn- render-topbar [{:keys [hosts projects phase err]}]
+  (let [total-active (count (mapcat #(filter active? (:tasks %)) projects))
+        host-count (count hosts)]
+    (str "<header class=\"topbar\">"
+         "<h1>sipag</h1>"
+         "<span class=\"subtle\"> · what are we optimizing for</span>"
+         "<span class=\"spacer\"></span>"
+         (case phase
+           :boot   "<span class=\"subtle\">loading…</span>"
+           :error  (str "<span class=\"err-chip\">error: " (escape-html err) "</span>")
+           (str "<span class=\"mesh-chip\" title=\"mesh\">" host-count
+                (if (= 1 host-count) " host" " hosts")
+                "</span>"
+                "<span class=\"subtle\"> · " total-active " active</span>"))
+         "</header>")))
+
+(defn- render! [{:keys [projects sessions idea-box-open?] :as s}]
+  (let [root (gdom/getElement "app")]
+    (when root
+      (set! (.-innerHTML root)
+            (str (render-topbar s)
+                 "<main class=\"board\">"
+                 (cond
+                   (empty? projects)
+                   (str "<div class=\"empty-state\">"
+                        "<h2>no objectives yet</h2>"
+                        "<p>what are you optimizing for?</p>"
+                        "<pre><code>sipag project add &lt;name&gt; --repo owner/repo\nsipag add &quot;first thing to ship&quot;</code></pre>"
+                        "</div>")
+
+                   :else
+                   (apply str (map #(render-objective % sessions) projects)))
+                 "</main>"
+                 (render-idea-box projects idea-box-open?))))))
+
+;; ── events ──────────────────────────────────────────────────────────
+
+(defn- handle-click [ev]
+  (let [t (.-target ev)
+        btn (.closest t "[data-action]")]
+    (when btn
+      (let [action (.getAttribute btn "data-action")]
+        (case action
+          "toggle-ideas" (swap! state update :idea-box-open? not)
+          nil)))))
 
 ;; ── wiring ──────────────────────────────────────────────────────────
 
 (defn init
   "Entry point. shadow-cljs calls this from :init-fn."
   []
-  (add-watch state ::render
-             (fn [_ _ _ new-state]
-               (render! new-state)))
+  (add-watch state ::render (fn [_ _ _ ns] (render! ns)))
   (render! @state)
+  (.addEventListener js/document "click" handle-click)
   (.then (load-hosts!)
          (fn [_]
            (refresh-all!)

@@ -22,6 +22,8 @@ use axum::{
     Router,
 };
 use serde::Serialize;
+use sipag_core::board::{list_project_names, list_tasks, load_project};
+use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,6 +90,9 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
             "/api/hosts/:id/sessions/by-id/:sid/status",
             get(proxy_session_status),
         )
+        // Board (objectives + tasks) — the primary surface. Mesh above
+        // is background context.
+        .route("/api/projects", get(list_projects))
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .with_state(state);
 
@@ -131,6 +136,73 @@ async fn shutdown_signal() {
 struct HostSummary {
     id: String,
     url: String,
+}
+
+// ── board handlers ────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct TaskView {
+    id: u64,
+    title: String,
+    status: String,
+    role: String,
+    labels: Vec<String>,
+    created: String,
+    updated: String,
+}
+
+#[derive(Serialize)]
+struct ProjectView {
+    name: String,
+    repo: String,
+    statuses: Vec<String>,
+    tasks: Vec<TaskView>,
+}
+
+async fn list_projects() -> Response {
+    let dir = default_sipag_dir();
+    let names = match list_project_names(&dir) {
+        Ok(n) => n,
+        Err(e) => {
+            warn!("list_project_names failed: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("board error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut out: Vec<ProjectView> = Vec::with_capacity(names.len());
+    for name in names {
+        let project = match load_project(&dir, &name) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("load_project({}) failed: {}", name, e);
+                continue;
+            }
+        };
+        let tasks = list_tasks(&dir, &name, None).unwrap_or_default();
+        let tasks_view = tasks
+            .into_iter()
+            .map(|t| TaskView {
+                id: t.id,
+                title: t.title,
+                status: t.status.to_string(),
+                role: t.role,
+                labels: t.labels,
+                created: t.created,
+                updated: t.updated,
+            })
+            .collect();
+        out.push(ProjectView {
+            name: project.name,
+            repo: project.repo,
+            statuses: project.statuses,
+            tasks: tasks_view,
+        });
+    }
+    Json(out).into_response()
 }
 
 async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostSummary>> {
