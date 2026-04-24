@@ -80,8 +80,14 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
 
     let app = Router::new()
         .route("/api/hosts", get(list_hosts))
-        .route("/api/hosts/:id/crew/list", get(proxy_crew_list))
-        .route("/api/hosts/:id/crew/status", get(proxy_crew_status))
+        // Katulong has no /crew HTTP routes — `crew` is a naming
+        // convention on /sessions. We expose /sessions verbatim, plus
+        // the per-id status endpoint used to derive worker state.
+        .route("/api/hosts/:id/sessions", get(proxy_sessions))
+        .route(
+            "/api/hosts/:id/sessions/by-id/:sid/status",
+            get(proxy_session_status),
+        )
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .with_state(state);
 
@@ -140,18 +146,25 @@ async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostSummary>> {
     Json(summaries)
 }
 
-async fn proxy_crew_list(
+async fn proxy_sessions(
     AxumPath(id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Response {
-    proxy_get(&state, &id, "/crew/list").await
+    proxy_get(&state, &id, "/sessions").await
 }
 
-async fn proxy_crew_status(
-    AxumPath(id): AxumPath<String>,
+async fn proxy_session_status(
+    AxumPath((id, sid)): AxumPath<(String, String)>,
     State(state): State<AppState>,
 ) -> Response {
-    proxy_get(&state, &id, "/crew/status").await
+    // Katulong session IDs are URL-safe nanoids so we pass them
+    // through verbatim. Reject anything with a slash or control char
+    // so an exotic id can't escape the template.
+    if sid.chars().any(|c| c == '/' || c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
+    }
+    let path = format!("/sessions/by-id/{}/status", sid);
+    proxy_get(&state, &id, &path).await
 }
 
 async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {

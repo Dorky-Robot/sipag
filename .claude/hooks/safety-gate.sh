@@ -255,8 +255,10 @@ Bash)
 		check_rm_safe "$cmd"
 	fi
 
-	# SSH to known trusted hosts is allowed.
-	if echo "$cmd" | grep -qE '^ssh (mini|mac-2019) '; then
+	# SSH to known trusted hosts is allowed. Kept inclusive to cover the
+	# aliases actually present in the author's ~/.ssh/config (mini,
+	# mac2019, mac2024) and historical hyphenated spellings.
+	if echo "$cmd" | grep -qE '^ssh (mini|mac2019|mac2024|mac-2019) '; then
 		allow "SSH to trusted host"
 	fi
 
