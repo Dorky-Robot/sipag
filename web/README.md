@@ -1,12 +1,13 @@
 # sipag web — Week-1 agent-manager spike
 
 Vanilla ClojureScript SPA, served by `sipag serve`. Displays live crew
-status across the three-mac mesh defined in `~/.sipag/hosts.toml`.
+status across whatever katulong instances you list in `~/.sipag/hosts.toml`
+— one, several, or many.
 
 ## Stack
 
-- **shadow-cljs** via npm — Java required (already present on macOS with
-  Xcode; otherwise `brew install openjdk`).
+- **shadow-cljs** via npm — Java required (`brew install openjdk` if
+  you don't have one).
 - **Vanilla ClojureScript** — no Reagent, no re-frame, no libs. Direct
   DOM interop through `goog.dom`. One atom + `add-watch` → re-render.
 - **Rust `sipag serve`** — axum + reqwest; proxies to each katulong with
@@ -15,13 +16,17 @@ status across the three-mac mesh defined in `~/.sipag/hosts.toml`.
 ## One-time setup
 
 ```sh
-# 1. Copy the hosts template and fill in API keys for mini/prime/og.
-cp extras/hosts.toml.example ~/.sipag/hosts.toml
+# 1. Copy the hosts template and fill in one entry per katulong you
+#    want sipag to manage.
+mkdir -p ~/.sipag && cp extras/hosts.toml.example ~/.sipag/hosts.toml
+chmod 600 ~/.sipag/hosts.toml    # it contains API keys
 
-# On each host, pull the apiKey and paste it in:
-#   ssh mini   'jq -r .apiKey ~/.katulong/remote.json'
-#   ssh mac2024 'jq -r .apiKey ~/.katulong/remote.json'
-#   ssh mac2019 'jq -r .apiKey ~/.katulong/remote.json'
+# Each katulong stores its own key at ~/.katulong/remote.json on that
+# host. For a remote host:
+#   ssh <your-host> 'jq -r .apiKey ~/.katulong/remote.json'
+# For the local host:
+#   jq -r .apiKey ~/.katulong/remote.json
+# Paste each value into the matching `apiKey` field in hosts.toml.
 
 # 2. Install shadow-cljs + its deps.
 cd web
@@ -39,14 +44,15 @@ npm run watch        # shadow-cljs watch app → public/js/app.js
 cargo run -p sipag -- serve --port 7100
 ```
 
-Open <http://localhost:7100>. You should see one column per host with
-its projects and worker statuses. Everything is real — the browser
-talks to a Rust server, which talks to three real katulongs.
+Open <http://localhost:7100>. You should see one column per host you
+configured, each showing its projects and worker statuses. Everything
+is real — the browser talks to a Rust server, which talks to each
+configured katulong.
 
 ## What this proves
 
 - End-to-end pipe from a cljs SPA through a Rust proxy to live katulong
-  APIs across the mesh.
+  APIs across any number of hosts.
 - API keys never leave the Rust process.
 - Zero katulong changes — the browser tile in katulong can point at
   <http://localhost:7100> today.

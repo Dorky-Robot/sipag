@@ -1,19 +1,20 @@
-# sipag mesh config — copy to ~/.sipag/hosts.toml and fill in each host's
-# API key. The key for each mac lives at ~/.katulong/remote.json on that
-# mac (`jq -r .apiKey ~/.katulong/remote.json`). sipag keeps these
-# server-side; the browser never sees them.
+# sipag mesh config — copy to ~/.sipag/hosts.toml and fill in one entry
+# per katulong instance you want to manage.
+#
+# Each katulong host stores its own API key at ~/.katulong/remote.json on
+# that host. Copy the `apiKey` value (`jq -r .apiKey ~/.katulong/remote.json`)
+# into the apiKey field here. sipag keeps these server-side; the browser
+# never sees them. `chmod 600 ~/.sipag/hosts.toml` is recommended.
+#
+# You can list one host, three hosts, or a dozen — the id/url/apiKey
+# triple is the only contract.
 
 [[host]]
-id     = "mini"
-url    = "https://katulong-mini.felixflor.es"
-apiKey = "paste-from-mini's-~/.katulong/remote.json"
+id     = "host-a"
+url    = "https://katulong-a.example.com"
+apiKey = "<paste-from-host-a's-~/.katulong/remote.json>"
 
 [[host]]
-id     = "prime"
-url    = "https://katulong-prime.felixflor.es"
-apiKey = "paste-from-mac2024's-~/.katulong/remote.json"
-
-[[host]]
-id     = "og"
-url    = "https://katulong-og.felixflor.es"
-apiKey = "paste-from-mac2019's-~/.katulong/remote.json"
+id     = "host-b"
+url    = "https://katulong-b.example.com"
+apiKey = "<paste-from-host-b's-~/.katulong/remote.json>"
