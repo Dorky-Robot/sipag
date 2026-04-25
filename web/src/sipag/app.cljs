@@ -688,6 +688,30 @@
 
 ;; ── wiring ─────────────────────────────────────────────────────────
 
+(defn- forward-shortcut-to-host!
+  "When sipag is iframed inside katulong, keydowns hit *this* window
+   first; katulong's window-level shortcut handler never sees them.
+   Re-dispatch known katulong shortcuts on window.parent so things
+   like Cmd+/ (the tile picker) still work while sipag has focus.
+   Same-origin via katulong's /_proxy/ keeps the parent reachable;
+   wrapped in try/catch in case we end up cross-origin or top-level."
+  [ev]
+  (when (and (.-metaKey ev)
+             (= "/" (.-key ev))
+             (not (.-shiftKey ev))
+             ;; Only forward when actually iframed.
+             (not (identical? js/window (.-parent js/window))))
+    (try
+      (let [synthetic (js/KeyboardEvent.
+                        "keydown"
+                        #js {:key      "/"
+                             :code     "Slash"
+                             :metaKey  true
+                             :bubbles  true
+                             :cancelable true})]
+        (.dispatchEvent (.-parent js/window) synthetic))
+      (catch :default _e nil))))
+
 (defn init
   "Entry point. shadow-cljs calls this from :init-fn."
   []
@@ -707,6 +731,9 @@
   (.addEventListener js/document "click" handle-click)
   (.addEventListener js/document "input" handle-input)
   (.addEventListener js/document "keydown" handle-keydown)
+  ;; Capture-phase so we see the keystroke before any sipag-internal
+  ;; handlers eat it.
+  (.addEventListener js/window "keydown" forward-shortcut-to-host! true)
   (.then (load-hosts!)
          (fn [_]
            (refresh-all!)
