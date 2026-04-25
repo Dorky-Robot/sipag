@@ -187,6 +187,23 @@ pub fn list_roles(sipag_dir: &Path, project: &str) -> Result<Vec<Role>> {
     Role::list(sipag_dir, project)
 }
 
+/// Delete a project — recursively removes its directory under
+/// `<sipag_dir>/projects/<name>/`. No-op when the directory is
+/// already gone. Loud when the parent directory is missing or
+/// the path resolves outside `<sipag_dir>/projects/`.
+pub fn delete_project(sipag_dir: &Path, name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        anyhow::bail!("invalid project name: {name}");
+    }
+    let path = projects_dir(sipag_dir).join(name);
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&path)
+        .with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(())
+}
+
 /// Atomic write: write to a temp file in the same directory, then rename.
 pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;

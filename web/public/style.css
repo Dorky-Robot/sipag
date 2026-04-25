@@ -136,6 +136,55 @@ html, body {
   border-top: 1px dashed var(--border);
 }
 
+/* ── delete buttons ─────────────────────────────────── */
+
+/* Hover-revealed × on each row. Visible always on touch devices
+   (no hover) so they're not unreachable on iPad. */
+.row-delete {
+  background: transparent;
+  border: none;
+  color: var(--subtle);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.task:hover .row-delete,
+.kr-head:hover .row-delete,
+.objective-head:hover .row-delete,
+.idea:hover .row-delete {
+  opacity: 1;
+}
+.row-delete:hover { color: var(--red); background: rgba(247,118,142,0.1); }
+@media (pointer: coarse) {
+  .row-delete { opacity: 0.6; }
+}
+
+/* ── idea activate ──────────────────────────────────── */
+
+.idea-activate {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.idea:hover .idea-activate { opacity: 1; }
+.idea-activate:hover { background: var(--accent); color: var(--bg); }
+@media (pointer: coarse) {
+  .idea-activate { opacity: 1; }
+}
+
 /* ── KR row ─────────────────────────────────────────── */
 
 .kr {
@@ -143,6 +192,13 @@ html, body {
   border-bottom: 1px dashed var(--border);
 }
 .kr:last-of-type { border-bottom: none; }
+
+.kr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.kr-head .kr-title { flex: 1; }
 
 .kr-stance {
   display: inline-block;
@@ -211,16 +267,29 @@ html, body {
   font-family: var(--mono);
 }
 
+/* Status chip is a real button now — clicking cycles the task's
+   status. Border-less, low-key, but reveals it's interactive on
+   hover. */
 .status-chip {
   font-size: 11px;
   text-transform: lowercase;
   padding: 1px 6px;
   border-radius: 4px;
   font-family: var(--mono);
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font: inherit;
+  font-size: 11px;
 }
+.status-chip:hover { border-color: var(--border); }
 .status-chip.in-progress { color: var(--green);  background: rgba(158,206,106,0.12); }
 .status-chip.review      { color: var(--yellow); background: rgba(224,175,104,0.12); }
+.status-chip.done        { color: var(--done);   background: rgba(122,162,247,0.12); }
 .status-chip.todo        { color: var(--dim);    background: var(--bg); }
+.status-chip.backlog     { color: var(--subtle); background: var(--bg); }
 
 .labels {
   display: inline-flex;

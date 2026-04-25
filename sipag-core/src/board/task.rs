@@ -132,6 +132,17 @@ impl Task {
         let max_id = tasks.iter().map(|t| t.id).max().unwrap_or(0);
         Ok(max_id + 1)
     }
+
+    /// Delete a task file. Returns Ok(()) when it's already gone.
+    pub fn delete(sipag_dir: &Path, project: &str, id: u64) -> Result<()> {
+        let path = Self::file_path(sipag_dir, project, id);
+        if !path.exists() {
+            return Ok(());
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

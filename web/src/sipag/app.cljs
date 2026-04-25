@@ -116,6 +116,14 @@
   ;; Click cycles: green → yellow → red → done → green
   {"green" "yellow", "yellow" "red", "red" "done", "done" "green"})
 
+(def ^:private status-cycle
+  ;; Click cycles: todo → in-progress → review → done → backlog → todo
+  {"todo"        "in-progress"
+   "in-progress" "review"
+   "review"      "done"
+   "done"        "backlog"
+   "backlog"     "todo"})
+
 ;; ── escaping + small DOM helpers ───────────────────────────────────
 
 (defn- escape-html [s]
@@ -140,14 +148,27 @@
 (defn- render-task [task project-name sessions-by-host]
   (let [host (task-running-on task project-name sessions-by-host)
         status (:status task)
-        chip (when (not= "todo" status)
-               (str "<span class=\"status-chip " status "\">" status "</span>"))]
+        ;; Status chip is always rendered now — it's a clickable
+        ;; cycle button. Hidden-by-default `todo` becomes visible
+        ;; so the user has a target to click on.
+        chip (str "<button class=\"status-chip " status "\""
+                  " data-action=\"cycle-status\""
+                  " data-project=\"" (attr project-name) "\""
+                  " data-task=\"" (:id task) "\""
+                  " data-status=\"" status "\""
+                  " title=\"" status " — click to cycle\">"
+                  status "</button>")]
     (str "<li class=\"task\">"
          "<div class=\"task-head\">"
          "<span class=\"task-id\">#" (:id task) "</span>"
          "<span class=\"task-title\">" (escape-html (:title task)) "</span>"
          chip
          (render-labels (:labels task))
+         "<button class=\"row-delete\""
+         " data-action=\"delete-task\""
+         " data-project=\"" (attr project-name) "\""
+         " data-task=\"" (:id task) "\""
+         " title=\"delete task\">×</button>"
          "</div>"
          (when host
            (str "<div class=\"task-foot\">▸ running on " (escape-html host) "</div>"))
@@ -165,6 +186,7 @@
 
 (defn- render-kr-row [kr proj-name kr-tasks sessions]
   (str "<div class=\"kr\">"
+       "<div class=\"kr-head\">"
        "<button class=\"kr-stance " (escape-html (:stance kr)) "\""
        " data-action=\"cycle-stance\""
        " data-project=\"" (attr proj-name) "\""
@@ -173,6 +195,12 @@
        (stance-symbol (:stance kr))
        "</button>"
        "<span class=\"kr-title\">" (escape-html (:title kr)) "</span>"
+       "<button class=\"row-delete\""
+       " data-action=\"delete-kr\""
+       " data-project=\"" (attr proj-name) "\""
+       " data-kr=\"" (:id kr) "\""
+       " title=\"delete KR\">×</button>"
+       "</div>"
        (when (seq kr-tasks)
          (str "<ul class=\"tasks kr-tasks\">"
               (apply str (map #(render-task % proj-name sessions) kr-tasks))
@@ -231,6 +259,10 @@
          (count active-tasks) " active · " (count key_results) " KR"
          (when (not= 1 (count key_results)) "s")
          "</span>"
+         "<button class=\"row-delete\""
+         " data-action=\"delete-project\""
+         " data-project=\"" (attr name) "\""
+         " title=\"delete objective\">×</button>"
          "</header>"
 
          (if (empty? key_results)
@@ -273,6 +305,10 @@
          "<header class=\"objective-head\">"
          "<h2>" (escape-html name) "</h2>"
          "<span class=\"subtle\">" (count active-tasks) " active</span>"
+         "<button class=\"row-delete\""
+         " data-action=\"delete-project\""
+         " data-project=\"" (attr name) "\""
+         " title=\"delete standing\">×</button>"
          "</header>"
          (if (empty? active-tasks)
            "<div class=\"objective-empty\">nothing now</div>"
@@ -324,6 +360,16 @@
                                 "<span class=\"task-id\">#" (:id t) "</span>"
                                 "<span class=\"task-title\">" (escape-html (:title t)) "</span>"
                                 "<span class=\"subtle\"> · " (escape-html pn) "</span>"
+                                "<button class=\"idea-activate\""
+                                " data-action=\"activate-idea\""
+                                " data-project=\"" (attr pn) "\""
+                                " data-task=\"" (:id t) "\""
+                                " title=\"promote to active\">→ activate</button>"
+                                "<button class=\"row-delete\""
+                                " data-action=\"delete-task\""
+                                " data-project=\"" (attr pn) "\""
+                                " data-task=\"" (:id t) "\""
+                                " title=\"delete\">×</button>"
                                 "</li>")))
                   "</ul>"))
            "</aside>"))))
@@ -469,6 +515,52 @@
         (.catch (fn [err]
                   (js/alert (str "stance update failed: " (.-message err))))))))
 
+(defn- handle-cycle-status [proj task-id current]
+  (let [next-status (get status-cycle current "todo")]
+    (-> (send-json "PATCH"
+                   (str "/api/projects/" (js/encodeURIComponent proj)
+                        "/tasks/" task-id)
+                   {:status next-status})
+        (.then (fn [_] (after-mutation!)))
+        (.catch (fn [err]
+                  (js/alert (str "status update failed: " (.-message err))))))))
+
+(defn- delete-with-confirm
+  [method url confirm-msg]
+  (when (js/confirm confirm-msg)
+    (-> (js/fetch url #js {:method method})
+        (.then (fn [resp]
+                 (if (.-ok resp)
+                   (after-mutation!)
+                   (.then (.text resp)
+                          (fn [t] (js/alert (str "delete failed: " t))))))))))
+
+(defn- handle-delete-project [proj]
+  (delete-with-confirm "DELETE"
+                       (str "/api/projects/" (js/encodeURIComponent proj))
+                       (str "Delete '" proj "'? This removes all KRs and tasks under it.")))
+
+(defn- handle-delete-kr [proj kr-id]
+  (delete-with-confirm "DELETE"
+                       (str "/api/projects/" (js/encodeURIComponent proj)
+                            "/key-results/" kr-id)
+                       "Delete this key result? Tasks attached to it will become loose."))
+
+(defn- handle-delete-task [proj task-id]
+  (delete-with-confirm "DELETE"
+                       (str "/api/projects/" (js/encodeURIComponent proj)
+                            "/tasks/" task-id)
+                       "Delete this task?"))
+
+(defn- handle-activate-idea [proj task-id]
+  (-> (send-json "PATCH"
+                 (str "/api/projects/" (js/encodeURIComponent proj)
+                      "/tasks/" task-id)
+                 {:status "todo"})
+      (.then (fn [_] (after-mutation!)))
+      (.catch (fn [err]
+                (js/alert (str "activate failed: " (.-message err)))))))
+
 (defn- handle-click [ev]
   (let [t (.-target ev)
         btn (.closest t "[data-action]")]
@@ -476,17 +568,24 @@
       (let [action (.getAttribute btn "data-action")
             form (.getAttribute btn "data-form")
             project (.getAttribute btn "data-project")
-            kr (.getAttribute btn "data-kr")]
+            kr (.getAttribute btn "data-kr")
+            task (.getAttribute btn "data-task")
+            status (.getAttribute btn "data-status")]
         (case action
-          "toggle-ideas"   (swap! state update :idea-box-open? not)
-          "open-form"      (open-form! form)
-          "close-form"     (close-form! form)
+          "toggle-ideas"     (swap! state update :idea-box-open? not)
+          "open-form"        (open-form! form)
+          "close-form"       (close-form! form)
           "submit-objective" (handle-submit-objective form)
           "submit-standing"  (handle-submit-standing form)
           "submit-kr"        (handle-submit-kr form)
           "submit-task"      (handle-submit-task form)
           "cycle-stance"     (handle-cycle-stance project kr)
-          "form-input"       nil ; handled separately below
+          "cycle-status"     (handle-cycle-status project task status)
+          "delete-project"   (handle-delete-project project)
+          "delete-kr"        (handle-delete-kr project kr)
+          "delete-task"      (handle-delete-task project task)
+          "activate-idea"    (handle-activate-idea project task)
+          "form-input"       nil
           nil)))))
 
 (defn- handle-input [ev]

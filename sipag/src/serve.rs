@@ -18,13 +18,13 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use sipag_core::board::{
-    add_task, create_project_with_kind, list_project_names, list_tasks, load_project, move_task,
-    KeyResult, KrStance, ProjectKind, Task,
+    add_task, create_project_with_kind, delete_project, list_project_names, list_tasks,
+    load_project, move_task, KeyResult, KrStance, ProjectKind, Task,
 };
 use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
@@ -97,12 +97,16 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
         // Mesh above is background context.
         .route("/api/projects", get(list_projects).post(create_project_handler))
         .route(
+            "/api/projects/:name",
+            delete(delete_project_handler),
+        )
+        .route(
             "/api/projects/:name/key-results",
             post(create_kr_handler),
         )
         .route(
             "/api/projects/:name/key-results/:id",
-            patch(update_kr_handler),
+            patch(update_kr_handler).delete(delete_kr_handler),
         )
         .route(
             "/api/projects/:name/tasks",
@@ -110,7 +114,7 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
         )
         .route(
             "/api/projects/:name/tasks/:id",
-            patch(update_task_handler),
+            patch(update_task_handler).delete(delete_task_handler),
         )
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .with_state(state);
@@ -416,6 +420,30 @@ struct UpdateTaskBody {
     labels: Option<Vec<String>>,
     #[serde(default)]
     key_results: Option<Vec<u64>>,
+}
+
+async fn delete_project_handler(AxumPath(name): AxumPath<String>) -> Response {
+    let dir = default_sipag_dir();
+    match delete_project(&dir, &name) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+async fn delete_kr_handler(AxumPath((name, id)): AxumPath<(String, u64)>) -> Response {
+    let dir = default_sipag_dir();
+    match KeyResult::delete(&dir, &name, id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+async fn delete_task_handler(AxumPath((name, id)): AxumPath<(String, u64)>) -> Response {
+    let dir = default_sipag_dir();
+    match Task::delete(&dir, &name, id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
 }
 
 async fn update_task_handler(

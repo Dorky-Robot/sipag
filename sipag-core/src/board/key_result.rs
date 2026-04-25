@@ -120,6 +120,17 @@ impl KeyResult {
         let existing = Self::list(sipag_dir, project)?;
         Ok(existing.iter().map(|k| k.id).max().map(|m| m + 1).unwrap_or(1))
     }
+
+    /// Delete a KR file. Returns Ok(()) when it's already gone.
+    pub fn delete(sipag_dir: &Path, project: &str, id: u64) -> Result<()> {
+        let path = Self::file_path(sipag_dir, project, id);
+        if !path.exists() {
+            return Ok(());
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
