@@ -24,8 +24,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, list_project_names, list_tasks,
-    load_project, move_task, KeyResult, KrStance, ProjectKind, Task,
+    load_project, move_task, KeyResult, KrStance, ProjectKind, Role, Task,
 };
+use sipag_core::katulong::session_name;
 use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
 use std::net::SocketAddr;
@@ -115,6 +116,10 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
         .route(
             "/api/projects/:name/tasks/:id",
             patch(update_task_handler).delete(delete_task_handler),
+        )
+        .route(
+            "/api/projects/:name/tasks/:id/dispatch",
+            post(dispatch_task_handler),
         )
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .with_state(state);
@@ -444,6 +449,201 @@ async fn delete_task_handler(AxumPath((name, id)): AxumPath<(String, u64)>) -> R
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     }
+}
+
+// ── dispatch ──────────────────────────────────────────────────────────
+//
+// `POST /api/projects/:n/tasks/:id/dispatch` is the seam where the
+// board (objectives + KRs + tasks) meets the mesh (katulong hosts).
+//
+// Body:
+//   { "host": "mini" }      // optional; defaults to first in hosts.toml
+//
+// Flow:
+//   1. Load task + role (or default).
+//   2. POST <host>/sessions  → idempotent create, returns {id, name}.
+//   3. POST <host>/sessions/by-id/<id>/exec
+//      with the agent command derived from role.command + task title.
+//   4. Move task to in-progress.
+//   5. Return { task, host, session_id }.
+//
+// Deliberately *not* doing here:
+//   - worktree setup (the existing helper assumes /work/<project> docker
+//     paths, which don't fit a real-mac dispatch path; revisit when we
+//     have a host-specific worktree scheme)
+//   - kill-then-respawn on a task that's already running (out of scope)
+
+#[derive(Deserialize)]
+struct DispatchBody {
+    #[serde(default)]
+    host: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DispatchResponse {
+    task: TaskView,
+    host: String,
+    /// Katulong session id for the spawned worker.
+    session_id: Option<String>,
+    session_name: String,
+}
+
+async fn dispatch_task_handler(
+    AxumPath((project_name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+    body: Option<Json<DispatchBody>>,
+) -> Response {
+    let dir = default_sipag_dir();
+    let want_host = body.as_ref().and_then(|b| b.0.host.clone());
+
+    // Resolve target host: explicit body.host > first in hosts.toml.
+    let host = match want_host {
+        Some(id) => match state.hosts.find(&id) {
+            Some(h) => h,
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("unknown host: {id}"))
+                    .into_response()
+            }
+        },
+        None => match state.hosts.hosts.first() {
+            Some(h) => h,
+            None => {
+                return (
+                    StatusCode::CONFLICT,
+                    "no hosts configured — populate ~/.sipag/hosts.toml",
+                )
+                    .into_response()
+            }
+        },
+    };
+
+    // Load task.
+    let task = match Task::load(&dir, &project_name, id) {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::NOT_FOUND, "task not found").into_response(),
+    };
+
+    // Load role (fall back to a default — agentic dispatch shouldn't fail
+    // just because a role.toml hasn't been written yet).
+    let role_command = Role::load(&dir, &project_name, &task.role)
+        .map(|r| r.command)
+        .unwrap_or_else(|_| "claude".to_string());
+
+    // Build agent command. Title is JSON-encoded so embedded quotes,
+    // backslashes, and newlines escape correctly when the shell sees it.
+    let title_quoted = serde_json::to_string(&task.title)
+        .unwrap_or_else(|_| format!("\"task #{id}\""));
+    let agent_cmd = format!(
+        "{} -p {}",
+        role_command,
+        title_quoted
+    );
+    let session = session_name(&project_name, &task.role);
+
+    // 1. Create session (idempotent).
+    let create_url = format!("{}/sessions", host.base_url());
+    let create_resp = match state
+        .http
+        .post(&create_url)
+        .bearer_auth(&host.api_key)
+        .json(&serde_json::json!({ "name": session }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "POST /sessions failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("create session on {}: {e}", host.id),
+            )
+                .into_response();
+        }
+    };
+    if !create_resp.status().is_success() {
+        let st = create_resp.status();
+        let body = create_resp.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("create session on {}: HTTP {st}: {body}", host.id),
+        )
+            .into_response();
+    }
+
+    // Capture session id when present (idempotent create returns it).
+    #[derive(Deserialize)]
+    struct SessionCreated {
+        #[serde(default)]
+        id: Option<String>,
+    }
+    let session_id = create_resp
+        .json::<SessionCreated>()
+        .await
+        .ok()
+        .and_then(|s| s.id);
+
+    // 2. Exec the agent command.
+    let exec_url = if let Some(sid) = session_id.as_ref() {
+        format!("{}/sessions/by-id/{}/exec", host.base_url(), sid)
+    } else {
+        // Fall back to name-keyed exec if the create response didn't
+        // include an id (older katulong builds).
+        format!(
+            "{}/sessions/{}/exec",
+            host.base_url(),
+            session
+        )
+    };
+    let exec_resp = match state
+        .http
+        .post(&exec_url)
+        .bearer_auth(&host.api_key)
+        .json(&serde_json::json!({ "input": agent_cmd }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "POST exec failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("exec on {}: {e}", host.id),
+            )
+                .into_response();
+        }
+    };
+    if !exec_resp.status().is_success() {
+        let st = exec_resp.status();
+        let body = exec_resp.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_GATEWAY,
+            format!("exec on {}: HTTP {st}: {body}", host.id),
+        )
+            .into_response();
+    }
+
+    // 3. Move task to in-progress.
+    if let Err(e) = move_task(&dir, &project_name, id, "in-progress") {
+        warn!(
+            project = %project_name,
+            task = id,
+            error = %e,
+            "task moved to in-progress failed (worker already running on katulong)"
+        );
+    }
+
+    // 4. Return the updated task + dispatch metadata.
+    let updated = match Task::load(&dir, &project_name, id) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    Json(DispatchResponse {
+        task: TaskView::from(updated),
+        host: host.id.clone(),
+        session_id,
+        session_name: session,
+    })
+    .into_response()
 }
 
 async fn update_task_handler(

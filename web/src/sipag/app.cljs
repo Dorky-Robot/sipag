@@ -145,24 +145,39 @@
                       (str "<span class=\"label\">" (escape-html l) "</span>")))
          "</span>")))
 
-(defn- render-task [task project-name sessions-by-host]
-  (let [host (task-running-on task project-name sessions-by-host)
+(defn- render-task [task project-name sessions-by-host hosts]
+  (let [running-on (task-running-on task project-name sessions-by-host)
         status (:status task)
-        ;; Status chip is always rendered now — it's a clickable
-        ;; cycle button. Hidden-by-default `todo` becomes visible
-        ;; so the user has a target to click on.
         chip (str "<button class=\"status-chip " status "\""
                   " data-action=\"cycle-status\""
                   " data-project=\"" (attr project-name) "\""
                   " data-task=\"" (:id task) "\""
                   " data-status=\"" status "\""
                   " title=\"" status " — click to cycle\">"
-                  status "</button>")]
+                  status "</button>")
+        dispatchable? (and (seq hosts) (nil? running-on))
+        dispatch-btn
+        (when dispatchable?
+          (if (= 1 (count hosts))
+            ;; single host — one click ships it
+            (str "<button class=\"dispatch-btn\""
+                 " data-action=\"dispatch-task\""
+                 " data-project=\"" (attr project-name) "\""
+                 " data-task=\"" (:id task) "\""
+                 " data-host=\"" (attr (:id (first hosts))) "\""
+                 " title=\"dispatch on " (attr (:id (first hosts))) "\">▷</button>")
+            ;; multi-host — toggles a tiny inline picker
+            (str "<button class=\"dispatch-btn\""
+                 " data-action=\"open-dispatch\""
+                 " data-project=\"" (attr project-name) "\""
+                 " data-task=\"" (:id task) "\""
+                 " title=\"dispatch…\">▷</button>")))]
     (str "<li class=\"task\">"
          "<div class=\"task-head\">"
          "<span class=\"task-id\">#" (:id task) "</span>"
          "<span class=\"task-title\">" (escape-html (:title task)) "</span>"
          chip
+         dispatch-btn
          (render-labels (:labels task))
          "<button class=\"row-delete\""
          " data-action=\"delete-task\""
@@ -170,8 +185,8 @@
          " data-task=\"" (:id task) "\""
          " title=\"delete task\">×</button>"
          "</div>"
-         (when host
-           (str "<div class=\"task-foot\">▸ running on " (escape-html host) "</div>"))
+         (when running-on
+           (str "<div class=\"task-foot\">▸ running on " (escape-html running-on) "</div>"))
          "</li>")))
 
 ;; ── rendering: KR row ──────────────────────────────────────────────
@@ -184,7 +199,7 @@
     "done"   "✓"
     "·"))
 
-(defn- render-kr-row [kr proj-name kr-tasks sessions]
+(defn- render-kr-row [kr proj-name kr-tasks sessions hosts]
   (str "<div class=\"kr\">"
        "<div class=\"kr-head\">"
        "<button class=\"kr-stance " (escape-html (:stance kr)) "\""
@@ -203,7 +218,7 @@
        "</div>"
        (when (seq kr-tasks)
          (str "<ul class=\"tasks kr-tasks\">"
-              (apply str (map #(render-task % proj-name sessions) kr-tasks))
+              (apply str (map #(render-task % proj-name sessions hosts) kr-tasks))
               "</ul>"))
        "</div>"))
 
@@ -239,7 +254,7 @@
 
 ;; ── rendering: objective card ──────────────────────────────────────
 
-(defn- render-objective [{:keys [name tasks key_results]} sessions forms]
+(defn- render-objective [{:keys [name tasks key_results]} sessions hosts forms]
   (let [active-tasks (filter active? tasks)
         kr-form-key (str ":new-kr::" name)
         task-form-key (str ":new-task::" name)
@@ -269,13 +284,13 @@
            "<div class=\"objective-empty\">no key results yet — what does success look like?</div>"
            (apply str
                   (for [kr key_results]
-                    (render-kr-row kr name (get kr-bucket (:id kr)) sessions))))
+                    (render-kr-row kr name (get kr-bucket (:id kr)) sessions hosts))))
 
          (when (seq loose)
            (str "<div class=\"loose\">"
                 "<div class=\"loose-head\">loose <span class=\"subtle\">no KR</span></div>"
                 "<ul class=\"tasks\">"
-                (apply str (map #(render-task % name sessions) loose))
+                (apply str (map #(render-task % name sessions hosts) loose))
                 "</ul>"
                 "</div>"))
 
@@ -297,7 +312,7 @@
 
 ;; ── rendering: standing card ───────────────────────────────────────
 
-(defn- render-standing [{:keys [name tasks]} sessions forms]
+(defn- render-standing [{:keys [name tasks]} sessions hosts forms]
   (let [active-tasks (filter active? tasks)
         task-form-key (str ":new-task::" name)
         task-form-open? (contains? forms (keyword task-form-key))]
@@ -313,7 +328,7 @@
          (if (empty? active-tasks)
            "<div class=\"objective-empty\">nothing now</div>"
            (str "<ul class=\"tasks\">"
-                (apply str (map #(render-task % name sessions) active-tasks))
+                (apply str (map #(render-task % name sessions hosts) active-tasks))
                 "</ul>"))
          "<div class=\"objective-actions\">"
          (render-form task-form-key task-form-open?
@@ -384,7 +399,35 @@
 
 ;; ── top-level render ───────────────────────────────────────────────
 
-(defn- render! [{:keys [projects sessions idea-box-open? forms] :as s}]
+(defn- render-dispatch-picker [pick hosts]
+  (when (and pick (seq hosts))
+    (str "<div class=\"dispatch-picker-backdrop\" data-action=\"close-dispatch\">"
+         "<div class=\"dispatch-picker\">"
+         "<div class=\"dispatch-picker-head\">dispatch task #" (:task pick)
+         " on…</div>"
+         "<ul>"
+         (apply str
+                (for [h hosts]
+                  (str "<li>"
+                       "<button data-action=\"dispatch-task\""
+                       " data-project=\"" (attr (:project pick)) "\""
+                       " data-task=\"" (:task pick) "\""
+                       " data-host=\"" (attr (:id h)) "\">"
+                       (escape-html (:id h))
+                       " <span class=\"subtle\">" (escape-html (:url h)) "</span>"
+                       "</button>"
+                       "</li>")))
+         "</ul>"
+         "<button class=\"dispatch-picker-cancel\""
+         " data-action=\"close-dispatch\">cancel</button>"
+         "</div>"
+         "</div>")))
+
+(defn- render-toast [toast]
+  (when toast
+    (str "<div class=\"toast\">" (escape-html toast) "</div>")))
+
+(defn- render! [{:keys [projects sessions hosts idea-box-open? forms toast dispatch-pick] :as s}]
   (let [root (gdom/getElement "app")
         objs (filter objective? projects)
         stand (filter standing? projects)
@@ -399,7 +442,7 @@
                  "<div class=\"section-head\">objectives</div>"
                  (if (empty? objs)
                    (render-empty)
-                   (apply str (map #(render-objective % sessions forms) objs)))
+                   (apply str (map #(render-objective % sessions hosts forms) objs)))
                  "<div class=\"section-actions\">"
                  (render-form ":new-objective" new-obj-form-open?
                               [{:name "name" :label "name"
@@ -413,7 +456,7 @@
                  "<div class=\"section-head\">standing</div>"
                  (if (empty? stand)
                    "<div class=\"objective-empty subtle\">no standing concerns yet</div>"
-                   (apply str (map #(render-standing % sessions forms) stand)))
+                   (apply str (map #(render-standing % sessions hosts forms) stand)))
                  "<div class=\"section-actions\">"
                  (render-form ":new-standing" new-standing-form-open?
                               [{:name "name" :label "name"
@@ -422,7 +465,9 @@
                  "</div>"
 
                  "</main>"
-                 (render-idea-box projects idea-box-open?))))))
+                 (render-idea-box projects idea-box-open?)
+                 (render-dispatch-picker dispatch-pick hosts)
+                 (render-toast toast))))))
 
 ;; ── form input handling ────────────────────────────────────────────
 
@@ -561,6 +606,34 @@
       (.catch (fn [err]
                 (js/alert (str "activate failed: " (.-message err)))))))
 
+;; ── dispatch ──────────────────────────────────────────────────────
+
+(defn- show-toast! [text]
+  (swap! state assoc :toast text)
+  (js/setTimeout (fn [] (swap! state dissoc :toast)) 4000))
+
+(defn- handle-dispatch [proj task-id host]
+  (let [body (cond-> {} host (assoc :host host))]
+    (-> (send-json "POST"
+                   (str "/api/projects/" (js/encodeURIComponent proj)
+                        "/tasks/" task-id "/dispatch")
+                   body)
+        (.then (fn [resp]
+                 (show-toast! (str "dispatched #" task-id " on "
+                                   (or (:host resp) host) " · "
+                                   (:session_name resp)))
+                 (after-mutation!)
+                 (refresh-all!)))
+        (.catch (fn [err]
+                  (js/alert (str "dispatch failed: " (.-message err))))))))
+
+(defn- handle-open-dispatch [proj task-id]
+  ;; Toggle a tiny state flag so render can show the per-host picker.
+  (swap! state assoc :dispatch-pick {:project proj :task (js/parseInt task-id 10)}))
+
+(defn- handle-close-dispatch []
+  (swap! state dissoc :dispatch-pick))
+
 (defn- handle-click [ev]
   (let [t (.-target ev)
         btn (.closest t "[data-action]")]
@@ -585,6 +658,9 @@
           "delete-kr"        (handle-delete-kr project kr)
           "delete-task"      (handle-delete-task project task)
           "activate-idea"    (handle-activate-idea project task)
+          "dispatch-task"    (handle-dispatch project task (.getAttribute btn "data-host"))
+          "open-dispatch"    (handle-open-dispatch project task)
+          "close-dispatch"   (handle-close-dispatch)
           "form-input"       nil
           nil)))))
 
@@ -619,9 +695,11 @@
              (fn [_ _ old new]
                ;; Skip a re-render if only :sessions changed (form
                ;; inputs would lose focus). Compare everything except
-               ;; :sessions and :forms detail.
-               (when (or (not= (dissoc old :sessions)
-                               (dissoc new :sessions))
+               ;; :sessions; :forms is compared by count so typing
+               ;; inside an open form doesn't blow away focus, but
+               ;; opening or closing one does.
+               (when (or (not= (dissoc old :sessions :forms)
+                               (dissoc new :sessions :forms))
                          (not= (count (:forms old))
                                (count (:forms new))))
                  (render! new))))
