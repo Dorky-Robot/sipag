@@ -13,13 +13,15 @@
 //!         001.toml
 //! ```
 
+mod key_result;
 mod project;
 mod role;
 mod task;
 
-pub use project::Project;
+pub use project::{Project, ProjectKind};
 pub use role::Role;
 pub use task::{Task, TaskStatus};
+pub use key_result::{KeyResult, KrStance};
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -126,6 +128,7 @@ pub fn add_task(
         status: default_status,
         role: role.unwrap_or("dev").to_string(),
         labels: labels.to_vec(),
+        key_results: Vec::new(),
         created: now.clone(),
         updated: now,
     };
@@ -143,16 +146,28 @@ pub fn move_task(sipag_dir: &Path, project: &str, task_id: u64, new_status: &str
     Ok(task)
 }
 
-/// Create a new project.
+/// Create a new project. Defaults to ProjectKind::Objective.
 pub fn create_project(
     sipag_dir: &Path,
     name: &str,
     repo: &str,
     statuses: Option<Vec<String>>,
 ) -> Result<Project> {
+    create_project_with_kind(sipag_dir, name, repo, ProjectKind::Objective, statuses)
+}
+
+/// Create a new project with an explicit kind (objective vs standing).
+pub fn create_project_with_kind(
+    sipag_dir: &Path,
+    name: &str,
+    repo: &str,
+    kind: ProjectKind,
+    statuses: Option<Vec<String>>,
+) -> Result<Project> {
     let project = Project {
         name: name.to_string(),
         repo: repo.to_string(),
+        kind,
         statuses: statuses.unwrap_or_else(|| {
             vec![
                 "backlog".to_string(),

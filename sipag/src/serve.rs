@@ -18,11 +18,14 @@ use axum::{
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, patch, post},
     Router,
 };
-use serde::Serialize;
-use sipag_core::board::{list_project_names, list_tasks, load_project};
+use serde::{Deserialize, Serialize};
+use sipag_core::board::{
+    add_task, create_project_with_kind, list_project_names, list_tasks, load_project, move_task,
+    KeyResult, KrStance, ProjectKind, Task,
+};
 use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
 use std::net::SocketAddr;
@@ -90,9 +93,25 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
             "/api/hosts/:id/sessions/by-id/:sid/status",
             get(proxy_session_status),
         )
-        // Board (objectives + tasks) — the primary surface. Mesh above
-        // is background context.
-        .route("/api/projects", get(list_projects))
+        // Board (objectives + KRs + tasks) — the primary surface.
+        // Mesh above is background context.
+        .route("/api/projects", get(list_projects).post(create_project_handler))
+        .route(
+            "/api/projects/:name/key-results",
+            post(create_kr_handler),
+        )
+        .route(
+            "/api/projects/:name/key-results/:id",
+            patch(update_kr_handler),
+        )
+        .route(
+            "/api/projects/:name/tasks",
+            post(create_task_handler),
+        )
+        .route(
+            "/api/projects/:name/tasks/:id",
+            patch(update_task_handler),
+        )
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .with_state(state);
 
@@ -147,15 +166,52 @@ struct TaskView {
     status: String,
     role: String,
     labels: Vec<String>,
+    key_results: Vec<u64>,
     created: String,
     updated: String,
+}
+
+impl From<Task> for TaskView {
+    fn from(t: Task) -> Self {
+        Self {
+            id: t.id,
+            title: t.title,
+            status: t.status.to_string(),
+            role: t.role,
+            labels: t.labels,
+            key_results: t.key_results,
+            created: t.created,
+            updated: t.updated,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct KrView {
+    id: u64,
+    title: String,
+    stance: String,
+    created: String,
+}
+
+impl From<KeyResult> for KrView {
+    fn from(k: KeyResult) -> Self {
+        Self {
+            id: k.id,
+            title: k.title,
+            stance: k.stance.to_string(),
+            created: k.created,
+        }
+    }
 }
 
 #[derive(Serialize)]
 struct ProjectView {
     name: String,
     repo: String,
+    kind: String,
     statuses: Vec<String>,
+    key_results: Vec<KrView>,
     tasks: Vec<TaskView>,
 }
 
@@ -183,26 +239,227 @@ async fn list_projects() -> Response {
             }
         };
         let tasks = list_tasks(&dir, &name, None).unwrap_or_default();
-        let tasks_view = tasks
-            .into_iter()
-            .map(|t| TaskView {
-                id: t.id,
-                title: t.title,
-                status: t.status.to_string(),
-                role: t.role,
-                labels: t.labels,
-                created: t.created,
-                updated: t.updated,
-            })
-            .collect();
+        let krs = KeyResult::list(&dir, &name).unwrap_or_default();
         out.push(ProjectView {
             name: project.name,
             repo: project.repo,
+            kind: match project.kind {
+                ProjectKind::Objective => "objective".into(),
+                ProjectKind::Standing => "standing".into(),
+            },
             statuses: project.statuses,
-            tasks: tasks_view,
+            key_results: krs.into_iter().map(KrView::from).collect(),
+            tasks: tasks.into_iter().map(TaskView::from).collect(),
         });
     }
     Json(out).into_response()
+}
+
+// ── write endpoints ───────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CreateProjectBody {
+    name: String,
+    #[serde(default)]
+    repo: String,
+    /// "objective" or "standing"; defaults to "objective".
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+async fn create_project_handler(Json(body): Json<CreateProjectBody>) -> Response {
+    let dir = default_sipag_dir();
+    let kind = match body.kind.as_deref().unwrap_or("objective") {
+        "objective" => ProjectKind::Objective,
+        "standing" => ProjectKind::Standing,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("unknown kind: {other}"),
+            )
+                .into_response()
+        }
+    };
+    if body.name.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "name is required").into_response();
+    }
+    match create_project_with_kind(&dir, &body.name, &body.repo, kind, None) {
+        Ok(p) => Json(ProjectView {
+            name: p.name,
+            repo: p.repo,
+            kind: match p.kind {
+                ProjectKind::Objective => "objective".into(),
+                ProjectKind::Standing => "standing".into(),
+            },
+            statuses: p.statuses,
+            key_results: vec![],
+            tasks: vec![],
+        })
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateKrBody {
+    title: String,
+}
+
+async fn create_kr_handler(
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<CreateKrBody>,
+) -> Response {
+    let dir = default_sipag_dir();
+    if body.title.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "title is required").into_response();
+    }
+    if load_project(&dir, &name).is_err() {
+        return (StatusCode::NOT_FOUND, format!("project '{name}' not found")).into_response();
+    }
+    let id = match KeyResult::next_id(&dir, &name) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let kr = KeyResult {
+        id,
+        title: body.title,
+        stance: KrStance::Green,
+        created: chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+    };
+    if let Err(e) = kr.save(&dir, &name) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
+    }
+    Json(KrView::from(kr)).into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateKrBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    stance: Option<String>,
+}
+
+async fn update_kr_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    Json(body): Json<UpdateKrBody>,
+) -> Response {
+    let dir = default_sipag_dir();
+    let mut kr = match KeyResult::load(&dir, &name, id) {
+        Ok(k) => k,
+        Err(_) => return (StatusCode::NOT_FOUND, "KR not found").into_response(),
+    };
+    if let Some(t) = body.title {
+        kr.title = t;
+    }
+    if let Some(s) = body.stance {
+        match KrStance::parse(&s) {
+            Some(parsed) => kr.stance = parsed,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown stance: {s} (expected green|yellow|red|done)"),
+                )
+                    .into_response()
+            }
+        }
+    }
+    if let Err(e) = kr.save(&dir, &name) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
+    }
+    Json(KrView::from(kr)).into_response()
+}
+
+#[derive(Deserialize)]
+struct CreateTaskBody {
+    title: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    key_results: Vec<u64>,
+}
+
+async fn create_task_handler(
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<CreateTaskBody>,
+) -> Response {
+    let dir = default_sipag_dir();
+    if body.title.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "title is required").into_response();
+    }
+    let mut task = match add_task(&dir, &name, &body.title, body.role.as_deref(), &body.labels) {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    if !body.key_results.is_empty() {
+        task.key_results = body.key_results;
+        if let Err(e) = task.save(&dir, &name) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
+        }
+    }
+    Json(TaskView::from(task)).into_response()
+}
+
+#[derive(Deserialize)]
+struct UpdateTaskBody {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    labels: Option<Vec<String>>,
+    #[serde(default)]
+    key_results: Option<Vec<u64>>,
+}
+
+async fn update_task_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    Json(body): Json<UpdateTaskBody>,
+) -> Response {
+    let dir = default_sipag_dir();
+    // For status changes we use move_task to keep the timestamp logic
+    // consistent with the CLI; everything else we apply directly.
+    if let Some(s) = body.status.as_deref() {
+        if let Err(e) = move_task(&dir, &name, id, s) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
+        }
+    }
+    let mut task = match Task::load(&dir, &name, id) {
+        Ok(t) => t,
+        Err(_) => return (StatusCode::NOT_FOUND, "task not found").into_response(),
+    };
+    let mut dirty = false;
+    if let Some(t) = body.title {
+        task.title = t;
+        dirty = true;
+    }
+    if let Some(r) = body.role {
+        task.role = r;
+        dirty = true;
+    }
+    if let Some(l) = body.labels {
+        task.labels = l;
+        dirty = true;
+    }
+    if let Some(krs) = body.key_results {
+        task.key_results = krs;
+        dirty = true;
+    }
+    if dirty {
+        task.updated = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        if let Err(e) = task.save(&dir, &name) {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
+        }
+    }
+    Json(TaskView::from(task)).into_response()
 }
 
 async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostSummary>> {

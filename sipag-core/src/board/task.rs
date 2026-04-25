@@ -62,6 +62,10 @@ pub struct Task {
     pub role: String,
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Key-result ids inside the same project that this task advances.
+    /// Empty means "loose" — not laddered to any KR.
+    #[serde(default)]
+    pub key_results: Vec<u64>,
     pub created: String,
     pub updated: String,
 }
@@ -170,6 +174,7 @@ mod tests {
             status: TaskStatus::Todo,
             role: "dev".to_string(),
             labels: vec!["bug".to_string()],
+            key_results: vec![],
             created: "2026-04-01T12:00:00Z".to_string(),
             updated: "2026-04-01T12:00:00Z".to_string(),
         };
@@ -209,6 +214,7 @@ mod tests {
             status: TaskStatus::Done,
             role: "dev".to_string(),
             labels: vec![],
+            key_results: vec![],
             created: "2026-01-01T00:00:00Z".to_string(),
             updated: "2026-01-01T00:00:00Z".to_string(),
         };

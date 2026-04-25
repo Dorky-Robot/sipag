@@ -1,6 +1,6 @@
-/* sipag — objective-focused view.
-   Single-column, generous whitespace, machinery demoted to small
-   footnotes and chips. No kanban, no columns. */
+/* sipag — OKR-shaped view.
+   Three sections (objectives, standing, ideas), traffic-light KRs,
+   inline + buttons that expand into small forms. No kanban. */
 
 :root {
   --bg:      #0e1013;
@@ -11,25 +11,24 @@
   --dim:     #9aa3ae;
   --subtle:  #6b7380;
   --accent:  #7aa2f7;
-  --ok:      #9ece6a;
-  --warn:    #e0af68;
-  --err:     #f7768e;
+  --green:   #9ece6a;
+  --yellow:  #e0af68;
+  --red:     #f7768e;
+  --done:    #7aa2f7;
   --mono:    ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 * { box-sizing: border-box; }
 
 html, body {
-  margin: 0;
-  padding: 0;
-  background: var(--bg);
-  color: var(--text);
+  margin: 0; padding: 0;
+  background: var(--bg); color: var(--text);
   font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
   min-height: 100vh;
 }
 
 #app {
-  max-width: 820px;
+  max-width: 860px;
   margin: 0 auto;
   padding: 24px 20px 140px;
   display: flex;
@@ -37,28 +36,26 @@ html, body {
   min-height: 100vh;
 }
 
-/* ── topbar ─────────────────────────────────────────────────────── */
+/* ── topbar ─────────────────────────────────────────── */
 
 .topbar {
   display: flex;
   align-items: baseline;
   gap: 8px;
   padding: 6px 0 18px;
-  margin-bottom: 8px;
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   background: var(--bg);
   z-index: 2;
+  margin-bottom: 18px;
 }
-
 .topbar h1 {
   margin: 0;
   font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
-
 .subtle  { color: var(--subtle); font-size: 13px; }
 .spacer  { flex: 1; }
 
@@ -70,51 +67,112 @@ html, body {
   border-radius: 999px;
   padding: 2px 10px;
 }
-
 .err-chip {
-  color: var(--err);
+  color: var(--red);
   font-size: 12px;
   font-family: var(--mono);
 }
 
-/* ── board ─────────────────────────────────────────────────────── */
+/* ── sections ───────────────────────────────────────── */
 
 .board {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 12px;
   flex: 1;
 }
 
-/* ── objective ─────────────────────────────────────────────────── */
+.section-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--subtle);
+  margin: 18px 0 6px;
+}
+.section-head:first-child { margin-top: 0; }
 
-.objective {
-  padding: 4px 0;
+.section-actions {
+  margin-bottom: 18px;
+}
+
+/* ── objective / standing card ─────────────────────── */
+
+.objective, .standing {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
 }
 
 .objective-head {
   display: flex;
   align-items: baseline;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
 
 .objective-head h2 {
   margin: 0;
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
-  color: var(--text);
 }
 
 .objective-empty {
   color: var(--subtle);
   font-style: italic;
-  padding: 2px 0 6px;
+  padding: 4px 0;
   font-size: 14px;
 }
 
-/* ── tasks ─────────────────────────────────────────────────────── */
+.objective-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+/* ── KR row ─────────────────────────────────────────── */
+
+.kr {
+  padding: 8px 0 10px;
+  border-bottom: 1px dashed var(--border);
+}
+.kr:last-of-type { border-bottom: none; }
+
+.kr-stance {
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-right: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  vertical-align: -3px;
+}
+.kr-stance:hover { background: var(--elev); }
+.kr-stance.green  { color: var(--green); }
+.kr-stance.yellow { color: var(--yellow); }
+.kr-stance.red    { color: var(--red); }
+.kr-stance.done   { color: var(--done); }
+
+.kr-title {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.kr-tasks {
+  margin-top: 6px;
+  margin-left: 32px;
+}
+
+/* ── tasks ──────────────────────────────────────────── */
 
 .tasks {
   list-style: none;
@@ -126,10 +184,10 @@ html, body {
 }
 
 .task {
-  background: var(--surface);
+  background: var(--elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 6px;
+  padding: 8px 10px;
 }
 
 .task-head {
@@ -145,22 +203,14 @@ html, body {
   font-size: 12px;
   min-width: 2.5em;
 }
-
-.task-title {
-  color: var(--text);
-  font-weight: 500;
-  flex: 1;
-  min-width: 0;
-}
-
+.task-title { color: var(--text); flex: 1; min-width: 0; }
 .task-foot {
-  margin-top: 6px;
-  color: var(--ok);
+  margin-top: 4px;
+  color: var(--green);
   font-size: 12px;
   font-family: var(--mono);
 }
 
-/* status chip — only appears when ≠ todo (so the common case stays clean) */
 .status-chip {
   font-size: 11px;
   text-transform: lowercase;
@@ -168,11 +218,10 @@ html, body {
   border-radius: 4px;
   font-family: var(--mono);
 }
-.status-chip.in-progress { color: var(--ok);     background: rgba(158,206,106,0.12); }
-.status-chip.review      { color: var(--warn);   background: rgba(224,175,104,0.12); }
-.status-chip.todo        { color: var(--dim);    background: var(--elev); }
+.status-chip.in-progress { color: var(--green);  background: rgba(158,206,106,0.12); }
+.status-chip.review      { color: var(--yellow); background: rgba(224,175,104,0.12); }
+.status-chip.todo        { color: var(--dim);    background: var(--bg); }
 
-/* labels */
 .labels {
   display: inline-flex;
   flex-wrap: wrap;
@@ -181,29 +230,95 @@ html, body {
 .label {
   font-size: 11px;
   color: var(--dim);
-  background: var(--elev);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 1px 6px;
   font-family: var(--mono);
 }
 
-/* ── idea box ──────────────────────────────────────────────────── */
+/* ── loose bucket ───────────────────────────────────── */
+
+.loose {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.loose-head {
+  font-size: 12px;
+  color: var(--subtle);
+  margin-bottom: 6px;
+}
+
+/* ── inline forms ───────────────────────────────────── */
+
+.form { display: inline-flex; }
+.form.open { display: block; flex-basis: 100%; }
+
+.form-toggle {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--dim);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.form-toggle:hover { color: var(--text); border-style: solid; }
+
+.form-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.form-input {
+  background: var(--elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.form-input:focus { border-color: var(--accent); }
+
+.form-actions {
+  display: flex;
+  gap: 6px;
+}
+.form-submit, .form-cancel {
+  background: var(--elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.form-submit { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.form-submit:hover { filter: brightness(1.1); }
+.form-cancel { color: var(--dim); }
+.form-cancel:hover { color: var(--text); }
+
+/* ── idea box (bottom drawer) ───────────────────────── */
 
 .idea-box {
   position: fixed;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  left: 0; right: 0; bottom: 0;
   background: var(--surface);
   border-top: 1px solid var(--border);
-  padding: 10px 20px;
+  padding: 8px 20px;
   max-height: 50vh;
   overflow-y: auto;
 }
-.idea-box.open {
-  box-shadow: 0 -8px 24px rgba(0,0,0,0.4);
-}
+.idea-box.open { box-shadow: 0 -8px 24px rgba(0,0,0,0.4); }
 
 .idea-toggle {
   background: transparent;
@@ -237,24 +352,25 @@ html, body {
 }
 .idea:hover { color: var(--text); }
 
-/* ── empty state ───────────────────────────────────────────────── */
+/* ── empty state ────────────────────────────────────── */
 
 .empty-state {
-  padding: 40px 20px;
+  padding: 28px 20px;
   border: 1px dashed var(--border);
   border-radius: 12px;
   background: var(--surface);
+  margin-bottom: 18px;
 }
 .empty-state h2 {
   margin: 0 0 8px;
-  font-size: 18px;
+  font-size: 16px;
 }
 .empty-state p {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   color: var(--dim);
 }
 .empty-state pre {
-  margin: 0;
+  margin: 0 0 8px;
   padding: 12px;
   background: var(--bg);
   border: 1px solid var(--border);

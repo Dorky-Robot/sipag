@@ -5,11 +5,32 @@ use std::path::Path;
 
 use super::atomic_write;
 
+/// What kind of top-level container this project is.
+///
+/// `Objective` (the default) is the OKR-shaped container: holds key
+/// results and outcome-driven tasks. `Standing` is for perpetual
+/// upkeep — architecture reviews, dep audits, one-off firefights —
+/// work that doesn't ladder up to an outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectKind {
+    Objective,
+    Standing,
+}
+
+impl Default for ProjectKind {
+    fn default() -> Self {
+        Self::Objective
+    }
+}
+
 /// A project on the board.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub name: String,
     pub repo: String,
+    #[serde(default)]
+    pub kind: ProjectKind,
     #[serde(default = "default_statuses")]
     pub statuses: Vec<String>,
 }
@@ -58,6 +79,7 @@ mod tests {
         let project = Project {
             name: "katulong".to_string(),
             repo: "dorky-robot/katulong".to_string(),
+            kind: ProjectKind::Objective,
             statuses: default_statuses(),
         };
         project.save(dir.path()).unwrap();
@@ -66,6 +88,20 @@ mod tests {
         assert_eq!(loaded.name, "katulong");
         assert_eq!(loaded.repo, "dorky-robot/katulong");
         assert_eq!(loaded.statuses.len(), 5);
+        assert_eq!(loaded.kind, ProjectKind::Objective);
+    }
+
+    #[test]
+    fn project_kind_defaults_to_objective_when_missing() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("projects/legacy/project.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // TOML without `kind` — represents projects from before this field existed.
+        std::fs::write(&path, "name = \"legacy\"\nrepo = \"a/b\"\nstatuses = [\"todo\"]\n")
+            .unwrap();
+
+        let loaded = Project::load(dir.path(), "legacy").unwrap();
+        assert_eq!(loaded.kind, ProjectKind::Objective);
     }
 
     #[test]
@@ -74,6 +110,7 @@ mod tests {
         let project = Project {
             name: "newproj".to_string(),
             repo: "a/b".to_string(),
+            kind: ProjectKind::Standing,
             statuses: vec!["open".to_string(), "closed".to_string()],
         };
         project.save(dir.path()).unwrap();
