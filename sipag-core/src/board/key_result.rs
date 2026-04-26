@@ -14,19 +14,16 @@ use std::path::{Path, PathBuf};
 use super::atomic_write;
 
 /// Traffic light for a key result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum KrStance {
+    #[default]
     Green,
     Yellow,
     Red,
     Done,
-}
-
-impl Default for KrStance {
-    fn default() -> Self {
-        Self::Green
-    }
 }
 
 impl KrStance {

@@ -11,17 +11,14 @@ use super::atomic_write;
 /// results and outcome-driven tasks. `Standing` is for perpetual
 /// upkeep — architecture reviews, dep audits, one-off firefights —
 /// work that doesn't ladder up to an outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectKind {
+    #[default]
     Objective,
     Standing,
-}
-
-impl Default for ProjectKind {
-    fn default() -> Self {
-        Self::Objective
-    }
 }
 
 /// A project on the board.

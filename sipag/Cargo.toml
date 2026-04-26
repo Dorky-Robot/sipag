@@ -27,6 +27,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 
+# Track A — WebAuthn auth for sipag's standalone subdomain. We host
+# our own credential store + session store; no third-party identity
+# provider. Mirrors katulong's pattern (per-entity TOML files).
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+tower-cookies = "0.10"
+rand = "0.8"
+url = "2"
+base64 = "0.22"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"

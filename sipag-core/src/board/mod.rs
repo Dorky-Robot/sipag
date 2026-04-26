@@ -205,7 +205,11 @@ pub fn delete_project(sipag_dir: &Path, name: &str) -> Result<()> {
 }
 
 /// Atomic write: write to a temp file in the same directory, then rename.
-pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+///
+/// Promoted to `pub` so the auth modules can persist credential/
+/// session/setup-token files using the same crash-safe pattern as the
+/// board records.
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
