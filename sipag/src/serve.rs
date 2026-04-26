@@ -22,19 +22,25 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use sipag_core::auth::{SetupPurpose, SetupToken};
+use sipag_core::auth::{
+    random_token, sessions_dir, Credential, Session, SetupPurpose, SetupToken, User,
+};
 use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, list_project_names, list_tasks,
     load_project, move_task, KeyResult, KrStance, ProjectKind, Role, Task,
 };
-use sipag_core::katulong::session_name;
 use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
+use sipag_core::katulong::session_name;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tower_cookies::{cookie::SameSite, Cookie, CookieManagerLayer, Cookies};
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
+use webauthn_rs::prelude::*;
+use webauthn_rs::Webauthn;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -48,9 +54,41 @@ pub(crate) struct AppState {
     /// External base URL for minting links the user opens in a
     /// browser (setup-token URLs, the eventual install redirects).
     /// `SIPAG_PUBLIC_URL` env var > `http://localhost:<port>` default.
-    /// Read by the WebAuthn endpoints landing in task #36.
-    #[allow(dead_code)]
     pub(crate) public_url: String,
+    /// WebAuthn relying-party context. Built from `public_url` at
+    /// startup; rp_id is the URL's host, origin is the URL itself.
+    webauthn: Arc<Webauthn>,
+    /// Server-side state for in-flight registration ceremonies. Keyed
+    /// by a fresh state_id minted at register/begin and echoed by the
+    /// client at register/finish. Carries the setup_token so finish
+    /// can consume it on success.
+    pending_register: Arc<Mutex<HashMap<String, PendingRegister>>>,
+    /// Server-side state for in-flight authentication ceremonies.
+    /// Keyed by a fresh state_id minted at assert/begin.
+    pending_auth: Arc<Mutex<HashMap<String, PasskeyAuthentication>>>,
+}
+
+struct PendingRegister {
+    state: PasskeyRegistration,
+    setup_token: String,
+}
+
+/// Build a `Webauthn` from a public URL like `http://localhost:7100`
+/// or `https://sipag.felixflor.es`. RP ID is the URL's host, origin
+/// is the URL itself.
+pub(crate) fn build_webauthn(public_url: &str) -> Result<Webauthn> {
+    let url = ::url::Url::parse(public_url)
+        .with_context(|| format!("invalid public_url: {public_url}"))?;
+    let rp_id = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("public_url has no host: {public_url}"))?
+        .to_string();
+    let webauthn = WebauthnBuilder::new(&rp_id, &url)
+        .context("WebauthnBuilder::new failed")?
+        .rp_name("Sipag")
+        .build()
+        .context("WebauthnBuilder::build failed")?;
+    Ok(webauthn)
 }
 
 /// Construct a router pointing at the given sipag dir, with empty
@@ -61,11 +99,17 @@ pub fn build_test_router(
     sipag_dir: std::path::PathBuf,
     public_url: String,
 ) -> Router {
+    let webauthn = Arc::new(
+        build_webauthn(&public_url).expect("build_webauthn for tests"),
+    );
     let state = AppState {
         hosts: Arc::new(HostsConfig::default()),
         http: reqwest::Client::new(),
         sipag_dir,
         public_url,
+        webauthn,
+        pending_register: Arc::new(Mutex::new(HashMap::new())),
+        pending_auth: Arc::new(Mutex::new(HashMap::new())),
     };
     // Tests don't need a real web_root — point at a directory that
     // exists (the project root) so ServeDir doesn't panic on init.
@@ -80,6 +124,7 @@ pub fn build_test_router(
 /// pointing at a tempdir and exercise the routes without binding a
 /// real port.
 pub(crate) fn build_router(state: AppState, web_root: std::path::PathBuf) -> Router {
+    let auth_state = state.clone();
     Router::new()
         .route("/api/hosts", get(list_hosts))
         .route("/api/hosts/:id/sessions", get(proxy_sessions))
@@ -111,8 +156,91 @@ pub(crate) fn build_router(state: AppState, web_root: std::path::PathBuf) -> Rou
         )
         // Track A — passkey enrollment bootstrap.
         .route("/setup", get(setup_get_handler))
+        .route("/login", get(login_get_handler))
+        // Track A — WebAuthn ceremony.
+        .route("/api/auth/register/begin", post(register_begin))
+        .route("/api/auth/register/finish", post(register_finish))
+        .route("/api/auth/assert/begin", post(assert_begin))
+        .route("/api/auth/assert/finish", post(assert_finish))
+        .route("/api/auth/logout", post(logout_handler))
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            auth_middleware,
+        ))
+        .layer(CookieManagerLayer::new())
         .with_state(state)
+}
+
+// ── auth middleware ──────────────────────────────────────────────────
+//
+// Decides whether an inbound request reaches the route handler:
+//
+//   1. Public path? (login / setup / auth ceremony / static assets)
+//      → through, no checks.
+//   2. `Host` header is localhost / 127.0.0.1 / ::1?
+//      → through (dev convenience). The Host header survives
+//        cloudflared end-to-end, so a tunneled request carries
+//        the public hostname (e.g. sipag.felixflor.es) and falls
+//        out of this branch.
+//   3. Has a `sipag_session` cookie pointing at a non-expired
+//      Session record? → through, refresh `last_active`.
+//   4. Otherwise:
+//      - /api/* → 401 JSON
+//      - else  → 302 → /login
+
+fn is_public_path(path: &str) -> bool {
+    if path.starts_with("/api/auth/") {
+        return true;
+    }
+    matches!(path, "/login" | "/setup" | "/style.css" | "/favicon.ico")
+        || path.starts_with("/js/")
+}
+
+fn host_header_is_local(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers.get(axum::http::header::HOST).and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let hostname = host.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+    matches!(hostname.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = request.uri().path().to_string();
+
+    if is_public_path(&path) || host_header_is_local(request.headers()) {
+        return next.run(request).await;
+    }
+
+    // Session cookie path.
+    if let Some(cookie) = cookies.get(SESSION_COOKIE) {
+        let token = cookie.value().to_string();
+        if let Ok(mut session) = Session::load(&state.sipag_dir, &token) {
+            if !session.is_expired() {
+                // Sliding expiry — touch best-effort.
+                session.touch();
+                let _ = session.save(&state.sipag_dir);
+                return next.run(request).await;
+            }
+        }
+    }
+
+    // Not authenticated.
+    if path.starts_with("/api/") {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            "auth.required",
+            "Sign in at /login to use this endpoint.",
+        )
+    } else {
+        axum::response::Redirect::to("/login").into_response()
+    }
 }
 
 /// Entry point — called from the `Serve` CLI branch.
@@ -156,11 +284,17 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
     let public_url = std::env::var("SIPAG_PUBLIC_URL")
         .unwrap_or_else(|_| format!("http://localhost:{port}"));
 
+    let webauthn =
+        Arc::new(build_webauthn(&public_url).context("WebAuthn init failed")?);
+
     let state = AppState {
         hosts: Arc::new(hosts),
         http,
         sipag_dir: sipag_core::config::default_sipag_dir(),
         public_url,
+        webauthn,
+        pending_register: Arc::new(Mutex::new(HashMap::new())),
+        pending_auth: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let app = build_router(state, web_root.clone());
@@ -541,26 +675,103 @@ fn setup_register_page(token: &str) -> Response {
          max-width: 460px; margin: 80px auto; padding: 24px; }}
   h1 {{ font-size: 18px; font-weight: 600; margin: 0 0 12px; }}
   p  {{ color: #9aa3ae; margin: 0 0 16px; }}
+  label {{ display: block; color: #9aa3ae; margin-bottom: 4px; font-size: 13px; }}
+  input {{ width: 100%; background: #1a1f26; border: 1px solid #262c34;
+           color: #e6e8eb; padding: 8px 10px; border-radius: 4px;
+           font: inherit; margin-bottom: 16px; box-sizing: border-box; }}
+  input:focus {{ border-color: #7aa2f7; outline: none; }}
   button {{ background: #7aa2f7; color: #0e1013; border: none;
             padding: 10px 18px; border-radius: 6px; font: inherit;
             font-size: 14px; cursor: pointer; }}
   button:hover {{ filter: brightness(1.1); }}
-  .err {{ color: #f7768e; margin-top: 12px; font-family: ui-monospace, monospace; font-size: 13px; }}
+  button:disabled {{ opacity: 0.5; cursor: progress; }}
+  .err {{ color: #f7768e; margin-top: 12px;
+          font-family: ui-monospace, monospace; font-size: 13px;
+          word-break: break-word; }}
 </style>
 </head>
 <body>
 <h1>Register your passkey</h1>
-<p>You're enrolling the first passkey for this sipag instance. Click the button below and use your device's biometric or hardware key.</p>
+<p>You're enrolling the first passkey for this sipag. Use your device's biometric or hardware key.</p>
+<label for="label">Label (optional)</label>
+<input id="label" placeholder="e.g. felix-iphone" autocomplete="off">
 <button id="register">Register passkey</button>
 <div class="err" id="err"></div>
 <script>
-  // The actual register-begin / register-finish wiring lands in task #36.
-  // For now, this page is the proof that the setup token consume flow
-  // works end-to-end: only a valid token reaches this HTML.
   const TOKEN = {token_json};
-  document.getElementById('register').addEventListener('click', () => {{
-    document.getElementById('err').textContent =
-      'WebAuthn register endpoint not wired yet (task #36). Token: ' + TOKEN.slice(0,8) + '…';
+  const btn = document.getElementById('register');
+  const errEl = document.getElementById('err');
+  const labelEl = document.getElementById('label');
+
+  function b64urlToBytes(s) {{
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }}
+  function bytesToB64url(buf) {{
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }}
+
+  btn.addEventListener('click', async () => {{
+    btn.disabled = true;
+    errEl.textContent = '';
+    try {{
+      const beginResp = await fetch('/api/auth/register/begin', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ setup_token: TOKEN }}),
+      }});
+      if (!beginResp.ok) {{
+        const t = await beginResp.text();
+        throw new Error('register/begin: HTTP ' + beginResp.status + ' ' + t);
+      }}
+      const {{ state_id, challenge }} = await beginResp.json();
+
+      const opts = challenge.publicKey;
+      opts.challenge = b64urlToBytes(opts.challenge);
+      opts.user.id = b64urlToBytes(opts.user.id);
+      if (Array.isArray(opts.excludeCredentials)) {{
+        for (const c of opts.excludeCredentials) c.id = b64urlToBytes(c.id);
+      }}
+
+      const cred = await navigator.credentials.create({{ publicKey: opts }});
+
+      const credentialJson = {{
+        id: cred.id,
+        rawId: bytesToB64url(cred.rawId),
+        type: cred.type,
+        response: {{
+          attestationObject: bytesToB64url(cred.response.attestationObject),
+          clientDataJSON: bytesToB64url(cred.response.clientDataJSON),
+        }},
+        extensions: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {{}},
+      }};
+
+      const finResp = await fetch('/api/auth/register/finish', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{
+          state_id,
+          credential: credentialJson,
+          label: labelEl.value || '',
+        }}),
+      }});
+      if (!finResp.ok) {{
+        const t = await finResp.text();
+        throw new Error('register/finish: HTTP ' + finResp.status + ' ' + t);
+      }}
+
+      window.location = '/';
+    }} catch (e) {{
+      btn.disabled = false;
+      errEl.textContent = String(e && e.message || e);
+    }}
   }});
 </script>
 </body>
@@ -614,6 +825,548 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+// ── auth: /login HTML ────────────────────────────────────────────────
+//
+// Branches on whether any credentials are enrolled:
+//   - empty store → directs user to `sipag setup-token` for first
+//     enrollment
+//   - with credentials → "Sign in with passkey" UI that drives the
+//     assert/begin → navigator.credentials.get() → assert/finish flow
+
+async fn login_get_handler(State(state): State<AppState>) -> Response {
+    let has_creds = Credential::list(&state.sipag_dir)
+        .map(|c| !c.is_empty())
+        .unwrap_or(false);
+    let html = if has_creds {
+        login_signin_page()
+    } else {
+        login_empty_page()
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+fn login_empty_page() -> String {
+    r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · sipag</title>
+<style>
+  body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+         background: #0e1013; color: #e6e8eb;
+         max-width: 460px; margin: 80px auto; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
+  p  { color: #9aa3ae; margin: 0 0 16px; }
+  pre { background: #14181d; padding: 12px; border-radius: 6px;
+        font-family: ui-monospace, monospace; font-size: 13px;
+        overflow-x: auto; margin: 0; }
+  code { color: #7aa2f7; }
+</style>
+</head>
+<body>
+<h1>No passkeys yet</h1>
+<p>This sipag instance hasn't been bootstrapped. On the host running sipag, mint a setup token and open the printed URL on a trusted device:</p>
+<pre><code>sipag setup-token</code></pre>
+</body>
+</html>"#
+        .to_string()
+}
+
+fn login_signin_page() -> String {
+    // The whole flow:
+    //   1. POST /api/auth/assert/begin          → { state_id, challenge }
+    //   2. navigator.credentials.get(challenge) → PublicKeyCredential
+    //   3. POST /api/auth/assert/finish         → { ok, credential_id } + cookie
+    //   4. window.location = '/'
+    //
+    // Base64URL ↔ ArrayBuffer helpers inlined so the page is
+    // dependency-free.
+    r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · sipag</title>
+<style>
+  body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+         background: #0e1013; color: #e6e8eb;
+         max-width: 460px; margin: 80px auto; padding: 24px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 12px; }
+  p  { color: #9aa3ae; margin: 0 0 16px; }
+  button { background: #7aa2f7; color: #0e1013; border: none;
+           padding: 10px 18px; border-radius: 6px; font: inherit;
+           font-size: 14px; cursor: pointer; }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.5; cursor: progress; }
+  .err { color: #f7768e; margin-top: 12px;
+         font-family: ui-monospace, monospace; font-size: 13px;
+         word-break: break-word; }
+</style>
+</head>
+<body>
+<h1>Sign in</h1>
+<p>Use the passkey enrolled with this sipag.</p>
+<button id="signin">Sign in with passkey</button>
+<div class="err" id="err"></div>
+<script>
+  const btn = document.getElementById('signin');
+  const errEl = document.getElementById('err');
+
+  function b64urlToBytes(s) {
+    s = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    const bin = atob(s);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  function bytesToB64url(buf) {
+    const bytes = new Uint8Array(buf);
+    let s = '';
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    errEl.textContent = '';
+    try {
+      const beginResp = await fetch('/api/auth/assert/begin', { method: 'POST' });
+      if (!beginResp.ok) throw new Error('assert/begin: HTTP ' + beginResp.status);
+      const { state_id, challenge } = await beginResp.json();
+
+      const opts = challenge.publicKey;
+      opts.challenge = b64urlToBytes(opts.challenge);
+      if (Array.isArray(opts.allowCredentials)) {
+        for (const c of opts.allowCredentials) c.id = b64urlToBytes(c.id);
+      }
+
+      const cred = await navigator.credentials.get({ publicKey: opts });
+
+      const credentialJson = {
+        id: cred.id,
+        rawId: bytesToB64url(cred.rawId),
+        type: cred.type,
+        response: {
+          authenticatorData: bytesToB64url(cred.response.authenticatorData),
+          clientDataJSON: bytesToB64url(cred.response.clientDataJSON),
+          signature: bytesToB64url(cred.response.signature),
+          userHandle: cred.response.userHandle ? bytesToB64url(cred.response.userHandle) : null,
+        },
+        extensions: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+      };
+
+      const finResp = await fetch('/api/auth/assert/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state_id, credential: credentialJson }),
+      });
+      if (!finResp.ok) {
+        const t = await finResp.text();
+        throw new Error('assert/finish: HTTP ' + finResp.status + ' ' + t);
+      }
+
+      window.location = '/';
+    } catch (e) {
+      btn.disabled = false;
+      errEl.textContent = String(e && e.message || e);
+    }
+  });
+</script>
+</body>
+</html>"#
+        .to_string()
+}
+
+// ── auth: WebAuthn ceremony ───────────────────────────────────────────
+//
+// Four endpoints, two ceremonies:
+//
+//   register: setup_token → begin → (browser does WebAuthn) → finish
+//             → Credential persisted, setup_token consumed,
+//               session cookie set
+//
+//   assert:   begin (looks up enrolled credentials) → (browser asserts)
+//             → finish → session cookie set
+//
+// Plus /api/auth/logout to clear the cookie + session record.
+//
+// Server-side state for in-flight ceremonies lives in two HashMaps in
+// AppState. Each entry is keyed by a fresh `state_id` we mint at begin
+// and the client echoes at finish. Lost on process restart — the user
+// just retries. For a single-user system, this is fine.
+
+const SESSION_COOKIE: &str = "sipag_session";
+
+fn json_error(status: StatusCode, code: &str, detail: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "error": code, "detail": detail })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct RegisterBeginBody {
+    setup_token: String,
+}
+
+#[derive(Serialize)]
+struct RegisterBeginResponse {
+    state_id: String,
+    challenge: CreationChallengeResponse,
+}
+
+async fn register_begin(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterBeginBody>,
+) -> Response {
+    if body.setup_token.is_empty() {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "setup_token.required",
+            "setup_token is required",
+        );
+    }
+    let stored = match SetupToken::load(&state.sipag_dir, &body.setup_token) {
+        Ok(t) => t,
+        Err(_) => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "setup_token.unknown",
+                "setup token not found",
+            );
+        }
+    };
+    if stored.purpose != SetupPurpose::EnrollPasskey {
+        return json_error(
+            StatusCode::GONE,
+            "setup_token.wrong_purpose",
+            "setup token is for a different flow",
+        );
+    }
+    if stored.is_expired() {
+        return json_error(
+            StatusCode::GONE,
+            "setup_token.expired",
+            "setup token expired",
+        );
+    }
+
+    // Bootstrap the user record on first use.
+    let user = match User::load_or_create("Sipag Owner") {
+        Ok(u) => u,
+        Err(e) => {
+            warn!("user::load_or_create failed: {e}");
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, "user.io", &e.to_string());
+        }
+    };
+
+    // No existing credentials to exclude on first enrollment, but we
+    // pass the IDs of any already-stored creds so a re-enroll re-uses
+    // the same authenticator only if the user actually wants that.
+    let exclude: Option<Vec<CredentialID>> = Credential::list(&state.sipag_dir)
+        .ok()
+        .map(|creds| {
+            creds
+                .into_iter()
+                .filter_map(|c| {
+                    serde_json::from_value::<Passkey>(c.passkey)
+                        .ok()
+                        .map(|pk| pk.cred_id().clone())
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|v: &Vec<_>| !v.is_empty());
+
+    let (challenge, reg_state) = match state.webauthn.start_passkey_registration(
+        user.id,
+        &user.display_name,
+        &user.display_name,
+        exclude,
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("start_passkey_registration failed: {e}");
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webauthn.start_register",
+                &e.to_string(),
+            );
+        }
+    };
+
+    let state_id = random_token(16);
+    state
+        .pending_register
+        .lock()
+        .expect("pending_register mutex poisoned")
+        .insert(
+            state_id.clone(),
+            PendingRegister {
+                state: reg_state,
+                setup_token: body.setup_token,
+            },
+        );
+
+    Json(RegisterBeginResponse {
+        state_id,
+        challenge,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct RegisterFinishBody {
+    state_id: String,
+    credential: RegisterPublicKeyCredential,
+    #[serde(default)]
+    label: String,
+}
+
+#[derive(Serialize)]
+struct AuthSuccess {
+    ok: bool,
+    credential_id: String,
+}
+
+async fn register_finish(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Json(body): Json<RegisterFinishBody>,
+) -> Response {
+    let pending = match state
+        .pending_register
+        .lock()
+        .expect("pending_register mutex poisoned")
+        .remove(&body.state_id)
+    {
+        Some(p) => p,
+        None => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "register.state_unknown",
+                "registration state not found; restart enrollment",
+            );
+        }
+    };
+
+    let passkey = match state
+        .webauthn
+        .finish_passkey_registration(&body.credential, &pending.state)
+    {
+        Ok(pk) => pk,
+        Err(e) => {
+            warn!("finish_passkey_registration failed: {e}");
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                "webauthn.finish_register",
+                &e.to_string(),
+            );
+        }
+    };
+
+    // Burn the setup token now — registration succeeded.
+    if let Err(e) =
+        SetupToken::consume(&state.sipag_dir, &pending.setup_token, SetupPurpose::EnrollPasskey)
+    {
+        warn!("setup_token consume failed after register: {e}");
+        // Continue — credential is valid; an unconsumed token at worst
+        // wastes a 10-minute window.
+    }
+
+    let cred_id_b64 = url_safe_base64(passkey.cred_id().as_ref());
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let cred = Credential {
+        id: cred_id_b64.clone(),
+        label: body.label,
+        created: now.clone(),
+        last_used: Some(now),
+        passkey: serde_json::to_value(&passkey).unwrap_or(serde_json::Value::Null),
+    };
+    if let Err(e) = cred.save(&state.sipag_dir) {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "credential.save",
+            &e.to_string(),
+        );
+    }
+
+    issue_session_cookie(&state, &cookies, &cred_id_b64);
+
+    Json(AuthSuccess {
+        ok: true,
+        credential_id: cred_id_b64,
+    })
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct AssertBeginResponse {
+    state_id: String,
+    challenge: RequestChallengeResponse,
+}
+
+async fn assert_begin(State(state): State<AppState>) -> Response {
+    let creds = match Credential::list(&state.sipag_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "credential.list",
+                &e.to_string(),
+            );
+        }
+    };
+    if creds.is_empty() {
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "credential.none",
+            "no credentials enrolled — run `sipag setup-token`",
+        );
+    }
+    let passkeys: Vec<Passkey> = creds
+        .into_iter()
+        .filter_map(|c| serde_json::from_value::<Passkey>(c.passkey).ok())
+        .collect();
+    if passkeys.is_empty() {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "credential.unparseable",
+            "stored credentials could not be deserialized",
+        );
+    }
+
+    let (challenge, auth_state) = match state.webauthn.start_passkey_authentication(&passkeys) {
+        Ok(t) => t,
+        Err(e) => {
+            return json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webauthn.start_assert",
+                &e.to_string(),
+            );
+        }
+    };
+
+    let state_id = random_token(16);
+    state
+        .pending_auth
+        .lock()
+        .expect("pending_auth mutex poisoned")
+        .insert(state_id.clone(), auth_state);
+
+    Json(AssertBeginResponse {
+        state_id,
+        challenge,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct AssertFinishBody {
+    state_id: String,
+    credential: PublicKeyCredential,
+}
+
+async fn assert_finish(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Json(body): Json<AssertFinishBody>,
+) -> Response {
+    let auth_state = match state
+        .pending_auth
+        .lock()
+        .expect("pending_auth mutex poisoned")
+        .remove(&body.state_id)
+    {
+        Some(s) => s,
+        None => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                "assert.state_unknown",
+                "authentication state not found; retry login",
+            );
+        }
+    };
+
+    let result = match state
+        .webauthn
+        .finish_passkey_authentication(&body.credential, &auth_state)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("finish_passkey_authentication failed: {e}");
+            return json_error(
+                StatusCode::UNAUTHORIZED,
+                "webauthn.finish_assert",
+                &e.to_string(),
+            );
+        }
+    };
+
+    let cred_id_b64 = url_safe_base64(result.cred_id().as_ref());
+
+    // Best-effort touch: load the credential record, bump last_used,
+    // and (later) update the passkey if its counter changed.
+    if let Ok(mut rec) = Credential::load(&state.sipag_dir, &cred_id_b64) {
+        rec.last_used = Some(chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        if let Err(e) = rec.save(&state.sipag_dir) {
+            warn!("credential touch save failed: {e}");
+        }
+    }
+
+    issue_session_cookie(&state, &cookies, &cred_id_b64);
+
+    Json(AuthSuccess {
+        ok: true,
+        credential_id: cred_id_b64,
+    })
+    .into_response()
+}
+
+async fn logout_handler(State(state): State<AppState>, cookies: Cookies) -> Response {
+    if let Some(c) = cookies.get(SESSION_COOKIE) {
+        let _ = Session::delete(&state.sipag_dir, c.value());
+    }
+    let mut clear = Cookie::new(SESSION_COOKIE, "");
+    clear.set_path("/");
+    cookies.remove(clear);
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+/// Mint a Session, persist it, and set the session cookie on the
+/// response. Caller has already verified the user.
+fn issue_session_cookie(state: &AppState, cookies: &Cookies, credential_id: &str) {
+    let token = random_token(32);
+    let session = Session::new(token.clone(), credential_id.to_string());
+    if let Err(e) = session.save(&state.sipag_dir) {
+        warn!("session save failed: {e}");
+        // We still set the cookie — the next request will fail to load
+        // the session and the user will get redirected to /login.
+    }
+    let secure = state.public_url.starts_with("https://");
+    let cookie = Cookie::build((SESSION_COOKIE, token))
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .build();
+    cookies.add(cookie);
+    let _ = sessions_dir(&state.sipag_dir);
+}
+
+fn url_safe_base64(bytes: &[u8]) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 async fn delete_project_handler(AxumPath(name): AxumPath<String>) -> Response {
