@@ -626,7 +626,117 @@ A host MUST refuse install if `protocol` major version is unknown.
  └────────────────────────────────────────────────────────────┘
 ```
 
-## Appendix B — Reference error responses
+## Appendix B — Sequence diagrams
+
+Mermaid sequence diagrams of the four major message flows. The
+vertical flow in Appendix A is the user-facing ceremony; these
+are the engineer-facing message exchanges.
+
+### B.1 Install (the double-passkey ceremony)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Browser
+    participant Host as Host (katulong)
+    participant App as App (sipag)
+
+    User->>Browser: clicks "Install app", enters app URL
+    Browser->>Host: POST /apps/install (url)
+    Host->>Browser: prompt passkey (host origin)
+    Browser->>User: Face ID #1
+    User-->>Host: assertion (host owner proven)
+    Host->>App: GET /.well-known/katulong-app/manifest
+    App-->>Host: 200 { manifest }
+    Note over Host: mint apiKey,<br/>create intent record,<br/>generate state
+    Host->>Browser: 302 → app/install?<br/>intent_token=…&state=…<br/>&return_to=…&host_url=…
+    Browser->>App: GET /.well-known/katulong-app/install?…
+    App->>Host: POST /.well-known/katulong-host/intent/:token
+    Host-->>App: 200 { intent record + apiKey }
+    App-->>Browser: render consent UI
+    Browser->>User: "Install Sipag in mini's katulong?"
+    User->>Browser: Confirm
+    Browser->>App: prompt passkey (app origin)
+    Browser->>User: Face ID #2
+    User-->>App: assertion (app owner proven)
+    Note over App: write katulongs.toml row<br/>(katulong id, url, apiKey, scope)
+    App->>Host: POST /.well-known/katulong-host/intent/:token/consume
+    Host-->>App: 204
+    App->>Browser: 302 → return_to?state=…&result=ok
+    Browser->>Host: GET /apps/install/callback?state=…&result=ok
+    Note over Host: validate state,<br/>confirm intent consumed,<br/>write apps.toml row
+    Host-->>Browser: render success
+    Browser-->>User: ✓ Sipag installed
+```
+
+### B.2 Uninstall (initiated from host)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Host as Host (katulong)
+    participant App as App (sipag)
+
+    User->>Host: katulong app uninstall sipag
+    Host->>User: prompt passkey
+    User-->>Host: assertion
+    Host->>App: DELETE /.well-known/katulong-app/install<br/>Authorization: Bearer <apiKey>
+    Note over App: remove katulongs.toml row<br/>for this host
+    App-->>Host: 204
+    Note over Host: revoke apiKey,<br/>remove apps.toml row
+    Host-->>User: ✓ sipag uninstalled
+```
+
+### B.3 Runtime call — app dispatches via host
+
+The "live" path the install enables. After install, the app's
+backend uses the stored apiKey to call the host's API, on behalf
+of a user action in the embedded app UI.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant AppUI as App UI<br/>(iframe at app origin)
+    participant App as App server
+    participant Host as Host
+
+    User->>AppUI: clicks ▷ dispatch on task #N
+    AppUI->>App: POST /api/projects/:p/tasks/:N/dispatch
+    Note over App: load task, role; pick host
+    App->>Host: POST /sessions {name}<br/>Authorization: Bearer <apiKey>
+    Host-->>App: 200 { id, name }
+    App->>Host: POST /sessions/by-id/:id/exec {input}<br/>Authorization: Bearer <apiKey>
+    Host-->>App: 200
+    Note over App: move task to in-progress
+    App-->>AppUI: 200 { task, host, session_name }
+    AppUI-->>User: toast "dispatched #N on mini"
+```
+
+### B.4 Runtime shortcut — postMessage from app to host
+
+The mechanism that fixes the iframe-eats-keyboard problem cleanly:
+the embedded app re-publishes known shortcuts as postMessage events;
+the host listens, validates origin and action, and runs them.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant AppUI as App UI<br/>(iframe at app origin)
+    participant Host as Host<br/>(parent window)
+
+    User->>AppUI: presses Cmd+/
+    AppUI->>Host: window.parent.postMessage(<br/>  {type:"katulong.shortcut", action:"openPicker"},<br/>  hostOrigin)
+    Note over Host: validate event.origin against<br/>installed apps' origins,<br/>action against embed.shortcuts
+    Host->>Host: openTilePicker()
+    Host-->>User: picker visible
+```
+
+---
+
+## Appendix C — Reference error responses
 
 All endpoints return JSON errors with shape `{ "error": "<code>", "detail": "<human-readable>" }`.
 
@@ -645,7 +755,7 @@ All endpoints return JSON errors with shape `{ "error": "<code>", "detail": "<hu
 
 ---
 
-## Appendix C — Implementation order (suggested)
+## Appendix D — Implementation order (suggested)
 
 1. **B0 (this doc)** — settle the spec on review.
 2. **App side: sipag implements the four endpoints** + a small
