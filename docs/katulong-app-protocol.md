@@ -626,93 +626,82 @@ A host MUST refuse install if `protocol` major version is unknown.
  └────────────────────────────────────────────────────────────┘
 ```
 
-## Appendix B — Sequence diagrams
+## Appendix B — Sequence diagrams (text)
 
-Mermaid sequence diagrams of the four major message flows. The
-vertical flow in Appendix A is the user-facing ceremony; these
-are the engineer-facing message exchanges.
+Numbered message sequences for the four major flows. The vertical
+flow in Appendix A is the user-facing ceremony; these are the
+engineer-facing message exchanges. Plain text so they render in any
+markdown viewer; we can add a Mermaid sibling appendix later when
+diagram rendering is available.
 
-### B.1 Install (the double-passkey ceremony)
+### B.1 Install — the double-passkey ceremony
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Browser
-    participant Host as Host (katulong)
-    participant App as App (sipag)
+Participants: **User** · **Browser** · **Host** (katulong) · **App** (sipag)
 
-    User->>Browser: clicks "Install app", enters app URL
-    Browser->>Host: POST /apps/install (url)
-    Host->>Browser: prompt passkey (host origin)
-    Browser->>User: Face ID #1
-    User-->>Host: assertion (host owner proven)
-    Host->>App: GET /.well-known/katulong-app/manifest
-    App-->>Host: 200 { manifest }
-    Note over Host: mint apiKey,<br/>create intent record,<br/>generate state
-    Host->>Browser: 302 → app/install?<br/>intent_token=…&state=…<br/>&return_to=…&host_url=…
-    Browser->>App: GET /.well-known/katulong-app/install?…
-    App->>Host: POST /.well-known/katulong-host/intent/:token
-    Host-->>App: 200 { intent record + apiKey }
-    App-->>Browser: render consent UI
-    Browser->>User: "Install Sipag in mini's katulong?"
-    User->>Browser: Confirm
-    Browser->>App: prompt passkey (app origin)
-    Browser->>User: Face ID #2
-    User-->>App: assertion (app owner proven)
-    Note over App: write katulongs.toml row<br/>(katulong id, url, apiKey, scope)
-    App->>Host: POST /.well-known/katulong-host/intent/:token/consume
-    Host-->>App: 204
-    App->>Browser: 302 → return_to?state=…&result=ok
-    Browser->>Host: GET /apps/install/callback?state=…&result=ok
-    Note over Host: validate state,<br/>confirm intent consumed,<br/>write apps.toml row
-    Host-->>Browser: render success
-    Browser-->>User: ✓ Sipag installed
+```
+ 1. User    → Host        POST /apps/install (url)
+ 2. Host    → User        prompt passkey (host origin)
+ 3. User    → Host        assertion (Face ID #1) — host owner proven
+ 4. Host    → App         GET /.well-known/katulong-app/manifest
+ 5. App     → Host        200 { manifest }
+ 6. Host                  mint apiKey, create intent record, generate state
+ 7. Host    → Browser     302 → <app>/.well-known/katulong-app/install
+                                ?intent_token=…&state=…
+                                 &return_to=…&host_url=…
+ 8. Browser → App         GET <app>/.well-known/katulong-app/install?…
+ 9. App     → Host        POST <host>/.well-known/katulong-host/intent/<token>
+10. Host    → App         200 { intent record + apiKey }
+11. App     → User        render consent screen
+12. User    → App         Confirm
+13. App     → User        prompt passkey (app origin)
+14. User    → App         assertion (Face ID #2) — app owner proven
+15. App                   write ~/<app>/katulongs.toml row
+16. App     → Host        POST <host>/.well-known/katulong-host/intent/<token>/consume
+17. Host    → App         204
+18. App     → Browser     302 → <return_to>?state=…&result=ok
+19. Browser → Host        GET <host>/apps/install/callback?state=…&result=ok
+20. Host                  validate state, confirm intent consumed,
+                          write ~/.katulong/apps.toml row
+21. Host    → User        ✓ Sipag installed
 ```
 
-### B.2 Uninstall (initiated from host)
+### B.2 Uninstall — initiated from host
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Host as Host (katulong)
-    participant App as App (sipag)
+Participants: **User** · **Host** (katulong) · **App** (sipag)
 
-    User->>Host: katulong app uninstall sipag
-    Host->>User: prompt passkey
-    User-->>Host: assertion
-    Host->>App: DELETE /.well-known/katulong-app/install<br/>Authorization: Bearer <apiKey>
-    Note over App: remove katulongs.toml row<br/>for this host
-    App-->>Host: 204
-    Note over Host: revoke apiKey,<br/>remove apps.toml row
-    Host-->>User: ✓ sipag uninstalled
+```
+1. User → Host       katulong app uninstall sipag
+2. Host → User       prompt passkey (host owner only)
+3. User → Host       assertion
+4. Host → App        DELETE <app>/.well-known/katulong-app/install
+                     Authorization: Bearer <apiKey>
+5. App               remove ~/<app>/katulongs.toml row for this host
+6. App  → Host       204
+7. Host              revoke apiKey, remove ~/.katulong/apps.toml row
+8. Host → User       ✓ sipag uninstalled
 ```
 
 ### B.3 Runtime call — app dispatches via host
 
 The "live" path the install enables. After install, the app's
-backend uses the stored apiKey to call the host's API, on behalf
-of a user action in the embedded app UI.
+backend uses the stored apiKey to call the host's API on behalf of
+a user action in the embedded app UI.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant AppUI as App UI<br/>(iframe at app origin)
-    participant App as App server
-    participant Host as Host
+Participants: **User** · **App UI** (iframe) · **App server** · **Host**
 
-    User->>AppUI: clicks ▷ dispatch on task #N
-    AppUI->>App: POST /api/projects/:p/tasks/:N/dispatch
-    Note over App: load task, role; pick host
-    App->>Host: POST /sessions {name}<br/>Authorization: Bearer <apiKey>
-    Host-->>App: 200 { id, name }
-    App->>Host: POST /sessions/by-id/:id/exec {input}<br/>Authorization: Bearer <apiKey>
-    Host-->>App: 200
-    Note over App: move task to in-progress
-    App-->>AppUI: 200 { task, host, session_name }
-    AppUI-->>User: toast "dispatched #N on mini"
+```
+1. User    → App UI      clicks ▷ dispatch on task #N
+2. App UI  → App server  POST /api/projects/<p>/tasks/<N>/dispatch
+3. App server            load task, role; pick host
+4. App     → Host        POST /sessions { name }
+                         Authorization: Bearer <apiKey>
+5. Host    → App         200 { id, name }
+6. App     → Host        POST /sessions/by-id/<id>/exec { input }
+                         Authorization: Bearer <apiKey>
+7. Host    → App         200
+8. App                   move task to in-progress
+9. App     → App UI      200 { task, host, session_name }
+10. App UI → User        toast "dispatched #N on mini"
 ```
 
 ### B.4 Runtime shortcut — postMessage from app to host
@@ -721,17 +710,17 @@ The mechanism that fixes the iframe-eats-keyboard problem cleanly:
 the embedded app re-publishes known shortcuts as postMessage events;
 the host listens, validates origin and action, and runs them.
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant AppUI as App UI<br/>(iframe at app origin)
-    participant Host as Host<br/>(parent window)
+Participants: **User** · **App UI** (iframe at app origin) · **Host** (parent window)
 
-    User->>AppUI: presses Cmd+/
-    AppUI->>Host: window.parent.postMessage(<br/>  {type:"katulong.shortcut", action:"openPicker"},<br/>  hostOrigin)
-    Note over Host: validate event.origin against<br/>installed apps' origins,<br/>action against embed.shortcuts
-    Host->>Host: openTilePicker()
-    Host-->>User: picker visible
+```
+1. User   → App UI    presses Cmd+/
+2. App UI → Host      window.parent.postMessage(
+                        { type: "katulong.shortcut", action: "openPicker" },
+                        hostOrigin)
+3. Host               validate event.origin against installed apps' origins,
+                      validate action against embed.shortcuts
+4. Host               openTilePicker()
+5. Host  → User       picker visible
 ```
 
 ---
