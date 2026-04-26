@@ -22,6 +22,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use sipag_core::auth::{SetupPurpose, SetupToken};
 use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, list_project_names, list_tasks,
     load_project, move_task, KeyResult, KrStance, ProjectKind, Role, Task,
@@ -36,9 +37,82 @@ use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     hosts: Arc<HostsConfig>,
     http: reqwest::Client,
+    /// Sipag data dir — `~/.sipag` by default, overridable for tests
+    /// via `SIPAG_DIR`. New handlers (auth) read this; older board
+    /// handlers still use `default_sipag_dir()` directly until they
+    /// earn a refactor.
+    pub(crate) sipag_dir: std::path::PathBuf,
+    /// External base URL for minting links the user opens in a
+    /// browser (setup-token URLs, the eventual install redirects).
+    /// `SIPAG_PUBLIC_URL` env var > `http://localhost:<port>` default.
+    /// Read by the WebAuthn endpoints landing in task #36.
+    #[allow(dead_code)]
+    pub(crate) public_url: String,
+}
+
+/// Construct a router pointing at the given sipag dir, with empty
+/// hosts and a stub web_root. For integration tests that want to
+/// exercise routes without binding a real port and without touching
+/// the user's `~/.sipag`.
+pub fn build_test_router(
+    sipag_dir: std::path::PathBuf,
+    public_url: String,
+) -> Router {
+    let state = AppState {
+        hosts: Arc::new(HostsConfig::default()),
+        http: reqwest::Client::new(),
+        sipag_dir,
+        public_url,
+    };
+    // Tests don't need a real web_root — point at a directory that
+    // exists (the project root) so ServeDir doesn't panic on init.
+    // Real HTML responses come from the routes, not from static files.
+    let web_root = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    build_router(state, web_root)
+}
+
+/// Build the axum router for tests and `serve`. Kept separate from
+/// `async_run` so integration tests can hand-construct an `AppState`
+/// pointing at a tempdir and exercise the routes without binding a
+/// real port.
+pub(crate) fn build_router(state: AppState, web_root: std::path::PathBuf) -> Router {
+    Router::new()
+        .route("/api/hosts", get(list_hosts))
+        .route("/api/hosts/:id/sessions", get(proxy_sessions))
+        .route(
+            "/api/hosts/:id/sessions/by-id/:sid/status",
+            get(proxy_session_status),
+        )
+        .route(
+            "/api/projects",
+            get(list_projects).post(create_project_handler),
+        )
+        .route("/api/projects/:name", delete(delete_project_handler))
+        .route(
+            "/api/projects/:name/key-results",
+            post(create_kr_handler),
+        )
+        .route(
+            "/api/projects/:name/key-results/:id",
+            patch(update_kr_handler).delete(delete_kr_handler),
+        )
+        .route("/api/projects/:name/tasks", post(create_task_handler))
+        .route(
+            "/api/projects/:name/tasks/:id",
+            patch(update_task_handler).delete(delete_task_handler),
+        )
+        .route(
+            "/api/projects/:name/tasks/:id/dispatch",
+            post(dispatch_task_handler),
+        )
+        // Track A — passkey enrollment bootstrap.
+        .route("/setup", get(setup_get_handler))
+        .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
+        .with_state(state)
 }
 
 /// Entry point — called from the `Serve` CLI branch.
@@ -79,50 +153,17 @@ async fn async_run(port: u16, web_root: std::path::PathBuf) -> Result<()> {
         .build()
         .context("failed to build reqwest client")?;
 
+    let public_url = std::env::var("SIPAG_PUBLIC_URL")
+        .unwrap_or_else(|_| format!("http://localhost:{port}"));
+
     let state = AppState {
         hosts: Arc::new(hosts),
         http,
+        sipag_dir: sipag_core::config::default_sipag_dir(),
+        public_url,
     };
 
-    let app = Router::new()
-        .route("/api/hosts", get(list_hosts))
-        // Katulong has no /crew HTTP routes — `crew` is a naming
-        // convention on /sessions. We expose /sessions verbatim, plus
-        // the per-id status endpoint used to derive worker state.
-        .route("/api/hosts/:id/sessions", get(proxy_sessions))
-        .route(
-            "/api/hosts/:id/sessions/by-id/:sid/status",
-            get(proxy_session_status),
-        )
-        // Board (objectives + KRs + tasks) — the primary surface.
-        // Mesh above is background context.
-        .route("/api/projects", get(list_projects).post(create_project_handler))
-        .route(
-            "/api/projects/:name",
-            delete(delete_project_handler),
-        )
-        .route(
-            "/api/projects/:name/key-results",
-            post(create_kr_handler),
-        )
-        .route(
-            "/api/projects/:name/key-results/:id",
-            patch(update_kr_handler).delete(delete_kr_handler),
-        )
-        .route(
-            "/api/projects/:name/tasks",
-            post(create_task_handler),
-        )
-        .route(
-            "/api/projects/:name/tasks/:id",
-            patch(update_task_handler).delete(delete_task_handler),
-        )
-        .route(
-            "/api/projects/:name/tasks/:id/dispatch",
-            post(dispatch_task_handler),
-        )
-        .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
-        .with_state(state);
+    let app = build_router(state, web_root.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     info!("sipag serve listening on http://{} (web root: {})", addr, web_root.display());
@@ -425,6 +466,154 @@ struct UpdateTaskBody {
     labels: Option<Vec<String>>,
     #[serde(default)]
     key_results: Option<Vec<u64>>,
+}
+
+// ── auth: setup-token enrollment ──────────────────────────────────────
+//
+// First-passkey bootstrap. The CLI mints a single-use token and prints
+// a URL like `http://localhost:7100/setup?token=<hex>`. The user opens
+// that URL on a trusted device, the token is consumed once, and the
+// page renders a register-passkey UI (which talks to the WebAuthn
+// register/begin + register/finish endpoints — wired in task #36).
+//
+// Errors return HTML status pages so the user sees something useful
+// when they paste an old / expired / wrong-purpose token.
+
+#[derive(Deserialize)]
+struct SetupQuery {
+    #[serde(default)]
+    token: Option<String>,
+}
+
+async fn setup_get_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<SetupQuery>,
+) -> Response {
+    let Some(token) = q.token.filter(|t| !t.is_empty()) else {
+        return setup_error_page(
+            StatusCode::NOT_FOUND,
+            "missing token",
+            "This URL needs a `?token=…` parameter. Run `sipag setup-token` to mint one.",
+        );
+    };
+
+    // We *don't* consume here — that happens during register/finish so
+    // a stale tab can't burn the token before the user actually clicks.
+    let stored = match SetupToken::load(&state.sipag_dir, &token) {
+        Ok(t) => t,
+        Err(_) => {
+            return setup_error_page(
+                StatusCode::NOT_FOUND,
+                "unknown token",
+                "This setup token isn't recognized. It may have already been used; mint a fresh one with `sipag setup-token`.",
+            );
+        }
+    };
+    if stored.purpose != SetupPurpose::EnrollPasskey {
+        return setup_error_page(
+            StatusCode::GONE,
+            "wrong purpose",
+            "This setup token is for a different flow. For first-passkey enrollment, run `sipag setup-token`.",
+        );
+    }
+    if stored.is_expired() {
+        return setup_error_page(
+            StatusCode::GONE,
+            "token expired",
+            "This setup token has expired. Mint a fresh one with `sipag setup-token` (10-minute window).",
+        );
+    }
+
+    setup_register_page(&token)
+}
+
+fn setup_register_page(token: &str) -> Response {
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Register your passkey · sipag</title>
+<style>
+  body {{ font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+         background: #0e1013; color: #e6e8eb;
+         max-width: 460px; margin: 80px auto; padding: 24px; }}
+  h1 {{ font-size: 18px; font-weight: 600; margin: 0 0 12px; }}
+  p  {{ color: #9aa3ae; margin: 0 0 16px; }}
+  button {{ background: #7aa2f7; color: #0e1013; border: none;
+            padding: 10px 18px; border-radius: 6px; font: inherit;
+            font-size: 14px; cursor: pointer; }}
+  button:hover {{ filter: brightness(1.1); }}
+  .err {{ color: #f7768e; margin-top: 12px; font-family: ui-monospace, monospace; font-size: 13px; }}
+</style>
+</head>
+<body>
+<h1>Register your passkey</h1>
+<p>You're enrolling the first passkey for this sipag instance. Click the button below and use your device's biometric or hardware key.</p>
+<button id="register">Register passkey</button>
+<div class="err" id="err"></div>
+<script>
+  // The actual register-begin / register-finish wiring lands in task #36.
+  // For now, this page is the proof that the setup token consume flow
+  // works end-to-end: only a valid token reaches this HTML.
+  const TOKEN = {token_json};
+  document.getElementById('register').addEventListener('click', () => {{
+    document.getElementById('err').textContent =
+      'WebAuthn register endpoint not wired yet (task #36). Token: ' + TOKEN.slice(0,8) + '…';
+  }});
+</script>
+</body>
+</html>"#,
+        token_json = serde_json::to_string(token).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+fn setup_error_page(status: StatusCode, heading: &str, body: &str) -> Response {
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{heading} · sipag</title>
+<style>
+  body {{ font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+         background: #0e1013; color: #e6e8eb;
+         max-width: 460px; margin: 80px auto; padding: 24px; }}
+  h1 {{ font-size: 18px; font-weight: 600; margin: 0 0 12px; color: #f7768e; }}
+  p  {{ color: #9aa3ae; margin: 0; }}
+  code {{ background: #14181d; padding: 1px 6px; border-radius: 3px;
+          font-family: ui-monospace, monospace; font-size: 13px; }}
+</style>
+</head>
+<body>
+<h1>{heading}</h1>
+<p>{body}</p>
+</body>
+</html>"#,
+        heading = html_escape(heading),
+        body = html_escape(body),
+    );
+    (
+        status,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 async fn delete_project_handler(AxumPath(name): AxumPath<String>) -> Response {

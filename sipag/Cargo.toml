@@ -40,3 +40,7 @@ base64 = "0.22"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# Track A: in-process axum integration tests for /setup, the four
+# WebAuthn endpoints, and the auth middleware.
+axum-test = "16"
+tokio = { version = "1", features = ["full"] }

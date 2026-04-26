@@ -27,7 +27,7 @@ mod user;
 
 pub use credential::Credential;
 pub use session::Session;
-pub use setup_token::SetupToken;
+pub use setup_token::{SetupPurpose, SetupToken};
 pub use user::User;
 
 use std::path::{Path, PathBuf};

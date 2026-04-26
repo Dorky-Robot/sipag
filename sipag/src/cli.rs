@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use sipag_core::auth::{random_token, SetupPurpose, SetupToken};
 use sipag_core::{board, config::default_sipag_dir, feature, katulong, refine};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -16,6 +17,11 @@ const GIT_HASH: &str = env!("CARGO_GIT_SHA");
     about = "Work dispatcher for Claude Code crews",
     long_about = "sipag is a board-driven dispatcher that ships tasks to katulong sessions.\n\nRun with no arguments to launch the interactive TUI."
 )]
+// `version: ()` is a clap-only field that wires `-v`/`--version` to
+// the version-printing action — it has no value and no public use,
+// so clippy's manual-non-exhaustive lint mistakes the shape for an
+// API constraint. It isn't.
+#[allow(clippy::manual_non_exhaustive)]
 pub struct Cli {
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
     version: (),
@@ -146,6 +152,15 @@ pub enum Commands {
         web_root: std::path::PathBuf,
     },
 
+    /// Mint a single-use setup token (Track A passkey bootstrap)
+    ///
+    /// Prints a URL like `http://localhost:7100/setup?token=<hex>`.
+    /// Open it on a trusted device to enroll your first passkey.
+    /// The token expires after 10 minutes and can only be used once.
+    /// Set `SIPAG_PUBLIC_URL` to override the printed URL prefix
+    /// (e.g. `https://sipag.felixflor.es`).
+    SetupToken,
+
     /// Print version
     Version,
 }
@@ -248,6 +263,7 @@ pub fn run(cli: Cli) -> Result<()> {
             json,
         }) => run_sub(&topic, from_seq, json),
         Some(Commands::Serve { port, web_root }) => crate::serve::run(port, web_root),
+        Some(Commands::SetupToken) => run_setup_token(),
         Some(Commands::Version) => run_version(),
     }
 }
@@ -683,6 +699,32 @@ fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
 
 fn run_version() -> Result<()> {
     println!("sipag {VERSION} ({GIT_HASH})");
+    Ok(())
+}
+
+/// Mint a single-use setup token, persist it under
+/// `<sipag_dir>/setup-tokens/`, and print a URL the user opens on a
+/// trusted device to enroll their first passkey.
+///
+/// The URL prefix comes from `SIPAG_PUBLIC_URL` (so a tunneled
+/// instance can mint `https://sipag.felixflor.es/...`) or falls back
+/// to `http://localhost:7100`. TTL is 10 minutes — the same window
+/// katulong's setup tokens use.
+fn run_setup_token() -> Result<()> {
+    const TTL_MINUTES: i64 = 10;
+    let public_url = std::env::var("SIPAG_PUBLIC_URL")
+        .unwrap_or_else(|_| "http://localhost:7100".to_string());
+    // Strip any trailing slash so format!("{prefix}/setup?...") doesn't
+    // produce a double-slash like `http://host//setup`.
+    let prefix = public_url.trim_end_matches('/');
+
+    let token = random_token(32);
+    let record = SetupToken::new(token.clone(), SetupPurpose::EnrollPasskey, TTL_MINUTES);
+    record
+        .save(&default_sipag_dir())
+        .context("failed to persist setup token")?;
+
+    println!("{prefix}/setup?token={token}");
     Ok(())
 }
 

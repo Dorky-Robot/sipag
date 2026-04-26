@@ -1,7 +1,5 @@
-mod cli;
-mod serve;
-
 use clap::Parser;
+use sipag::cli;
 
 fn main() {
     let cli = cli::Cli::parse();
