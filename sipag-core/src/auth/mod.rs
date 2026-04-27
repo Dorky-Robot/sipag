@@ -1,68 +1,54 @@
-//! Auth state for sipag's standalone subdomain.
+//! Sipag authentication state.
 //!
-//! Layout under `<sipag_dir>/`:
+//! Functional-core / imperative-shell split: `AuthState` is an immutable
+//! value type with pure transitions (`&self -> Self`); `AuthStore` is the
+//! thin imperative boundary that serializes concurrent mutations through
+//! a single mutex and persists via atomic temp+rename.
 //!
-//! ```text
-//! ~/.sipag/
-//! ├── user.json                   single-user record (id, display_name)
-//! ├── credentials/                per-passkey metadata (one JSON file each)
-//! │   └── <cred-id>.json
-//! ├── sessions/                   active session cookies (one TOML each)
-//! │   └── <session-token>.toml
-//! └── setup-tokens/               pending bootstrap tokens (one TOML each)
-//!     └── <token>.toml
-//! ```
+//! On disk, everything lives in a single `auth.json` file under sipag's
+//! data dir. The file is locked to mode 0600 on Unix at creation, which
+//! `rename(2)` preserves through the atomic swap.
 //!
-//! sipag-core deliberately does not depend on `webauthn-rs`. The
-//! binary crate owns the WebAuthn lifecycle; sipag-core just persists
-//! the metadata side (user record, opaque-blob credentials, sessions,
-//! setup tokens) as plain files. This keeps sipag-core dependency-light
-//! and lets us swap WebAuthn implementations later without touching
-//! disk format.
+//! Ported from the `katulong-auth` crate. Keeping this in one place
+//! means a future swap of the WebAuthn implementation, or a tighter
+//! security-review pass over the storage path, lands in one crate.
 
 mod credential;
+mod error;
+mod random;
 mod session;
 mod setup_token;
-mod user;
+mod state;
+mod store;
+mod webauthn;
 
 pub use credential::Credential;
-pub use session::Session;
-pub use setup_token::{SetupPurpose, SetupToken};
-pub use user::User;
+pub use error::AuthError;
+pub use session::{Session, SessionTokenPlaintext, SESSION_TTL};
+pub use setup_token::{PlaintextToken, SetupToken};
+pub use state::AuthState;
+pub use store::AuthStore;
+pub use webauthn::{
+    encode_credential_id, ChallengeId, VerifiedAuthentication, WebAuthnService,
+};
+
+/// Re-export the webauthn-rs wire types the binary crate needs to shape
+/// its HTTP request/response bodies. Keeping these behind sipag-core's
+/// facade means handlers don't grow a direct dependency on `webauthn-rs`
+/// — if we ever swap the underlying library, the surface that changes is
+/// this file, not every handler.
+pub mod webauthn_wire {
+    pub use webauthn_rs::prelude::{
+        AuthenticationResult, CreationChallengeResponse, PublicKeyCredential,
+        RegisterPublicKeyCredential, RequestChallengeResponse,
+    };
+}
+
+pub type Result<T> = std::result::Result<T, AuthError>;
 
 use std::path::{Path, PathBuf};
 
-use crate::config::default_sipag_dir;
-
-pub fn credentials_dir(sipag_dir: &Path) -> PathBuf {
-    sipag_dir.join("credentials")
-}
-
-pub fn sessions_dir(sipag_dir: &Path) -> PathBuf {
-    sipag_dir.join("sessions")
-}
-
-pub fn setup_tokens_dir(sipag_dir: &Path) -> PathBuf {
-    sipag_dir.join("setup-tokens")
-}
-
-/// Generate a hex-encoded random token of the given raw byte length.
-/// Used for setup tokens, session tokens, and similar one-shot secrets.
-/// 32 bytes of randomness → 64 hex chars; sufficient for any token in
-/// this codebase.
-pub fn random_token(bytes: usize) -> String {
-    use rand::RngCore;
-    let mut buf = vec![0u8; bytes];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
-    let mut hex = String::with_capacity(bytes * 2);
-    for b in buf {
-        hex.push_str(&format!("{:02x}", b));
-    }
-    hex
-}
-
-/// Convenience: resolves to the default sipag dir. Modules call this
-/// so consumers can swap in a custom dir for tests via `SIPAG_DIR`.
-pub fn auth_dir() -> PathBuf {
-    default_sipag_dir()
+/// Default path to the auth state file inside `sipag_dir`.
+pub fn auth_state_path(sipag_dir: &Path) -> PathBuf {
+    sipag_dir.join("auth.json")
 }

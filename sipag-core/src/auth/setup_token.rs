@@ -1,151 +1,187 @@
-//! Setup tokens — short-lived single-use bootstrap secrets.
-//!
-//! Used twice in this codebase:
-//!   1. **First-passkey enrollment**: `sipag setup-token` mints one,
-//!      the user opens the printed URL on a trusted device,
-//!      registers a passkey, the token is consumed.
-//!   2. **Katulong-app install handshake**: each side mints a setup
-//!      token to prove human intent during the cross-origin install
-//!      flow (see docs/katulong-app-protocol.md).
-//!
-//! Tokens default to a 10-minute TTL and are single-use. Consumed
-//! tokens are removed from disk immediately so a stolen file can't
-//! replay an already-used token.
-
-use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use crate::auth::random::random_hex;
+use crate::auth::{AuthError, Result};
+use rand_core::OsRng;
+use scrypt::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use scrypt::{Params, Scrypt};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
-use super::setup_tokens_dir;
-
-/// Purpose lets one consumer reject tokens minted for another flow,
-/// even though they share the same store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SetupPurpose {
-    /// `sipag setup-token` — first-passkey enrollment.
-    EnrollPasskey,
-    /// Katulong-app install handshake (B.1 in the protocol spec).
-    KatulongAppInstall,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single-use, time-limited token used to pair a new device.
+///
+/// Stored as a PHC-encoded scrypt hash — the hash string carries algorithm,
+/// parameters, salt, and digest together, so raising the work factor later
+/// is a per-record concern rather than a state-wide migration.
+///
+/// Records persist after consumption: `used_at` is stamped and
+/// `credential_id` is linked so the UI can show "paired device <name>"
+/// rather than losing the history, and so revoking a token cascades into
+/// removing the device it created.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SetupToken {
-    pub token: String,
-    pub purpose: SetupPurpose,
-    pub created: String,
-    pub expires: String,
+    pub id: String,
+    pub hash: String,
+    pub name: Option<String>,
+    #[serde(with = "crate::auth::state::systime")]
+    pub created_at: SystemTime,
+    #[serde(with = "crate::auth::state::systime")]
+    pub expires_at: SystemTime,
+    #[serde(default, with = "crate::auth::state::systime_opt")]
+    pub used_at: Option<SystemTime>,
+    #[serde(default)]
+    pub credential_id: Option<String>,
 }
+
+/// The plaintext token produced by `issue`. Carry it carefully — it is the
+/// only copy, and it's what the user will paste into the new device. Storing
+/// it anywhere (logs, error messages, telemetry) defeats the hash.
+pub type PlaintextToken = String;
 
 impl SetupToken {
-    fn safe_filename(token: &str) -> String {
-        token
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect()
+    /// Mint a new token record and its plaintext value.
+    ///
+    /// The plaintext is 32 random bytes encoded as hex (64 ASCII chars);
+    /// it's URL-safe so the QR/pair-link flow can shove it straight into
+    /// a query string without encoding tricks. The record's `id` is a
+    /// separate short random ID used for revocation / linking — it is
+    /// NOT the plaintext.
+    pub fn issue(
+        name: Option<String>,
+        now: SystemTime,
+        ttl: Duration,
+    ) -> Result<(PlaintextToken, Self)> {
+        let id = random_hex(8);
+        let plaintext = random_hex(32);
+        let hash = hash_token(&plaintext)?;
+        Ok((
+            plaintext,
+            Self {
+                id,
+                hash,
+                name,
+                created_at: now,
+                expires_at: now + ttl,
+                used_at: None,
+                credential_id: None,
+            },
+        ))
     }
 
-    fn file_path(sipag_dir: &Path, token: &str) -> PathBuf {
-        setup_tokens_dir(sipag_dir).join(format!("{}.toml", Self::safe_filename(token)))
+    /// Verify a plaintext candidate against this record's hash. Constant-time
+    /// in the plaintext length via scrypt's KDF comparison — no short-circuit
+    /// on the hash bytes.
+    pub fn verify(&self, plaintext: &str) -> bool {
+        let Ok(parsed) = PasswordHash::new(&self.hash) else {
+            return false;
+        };
+        Scrypt
+            .verify_password(plaintext.as_bytes(), &parsed)
+            .is_ok()
     }
 
-    pub fn new(token: String, purpose: SetupPurpose, ttl_minutes: i64) -> Self {
-        let now = Utc::now();
-        let expires = now + Duration::minutes(ttl_minutes);
-        Self {
-            token,
-            purpose,
-            created: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            expires: expires.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        }
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        now >= self.expires_at
     }
 
-    pub fn save(&self, sipag_dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(setup_tokens_dir(sipag_dir))?;
-        let path = Self::file_path(sipag_dir, &self.token);
-        let content = toml::to_string_pretty(self)?;
-        crate::board::atomic_write(&path, content.as_bytes())
+    pub fn is_consumed(&self) -> bool {
+        self.used_at.is_some()
     }
 
-    pub fn load(sipag_dir: &Path, token: &str) -> Result<Self> {
-        let path = Self::file_path(sipag_dir, token);
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| "setup token not found".to_string())?;
-        let tok: Self = toml::from_str(&content)
-            .with_context(|| format!("invalid TOML in {}", path.display()))?;
-        Ok(tok)
+    /// A token is usable only if it hasn't expired and hasn't been
+    /// consumed. Fail-closed.
+    pub fn is_redeemable(&self, now: SystemTime) -> bool {
+        !self.is_expired(now) && !self.is_consumed()
     }
+}
 
-    /// Atomically consume a token: load it, verify purpose + freshness,
-    /// remove it from disk, return it. Returns Err if the token is
-    /// missing, expired, or for a different purpose.
-    pub fn consume(
-        sipag_dir: &Path,
-        token: &str,
-        expected: SetupPurpose,
-    ) -> Result<Self> {
-        let tok = Self::load(sipag_dir, token)?;
-        if tok.purpose != expected {
-            anyhow::bail!("setup token purpose mismatch");
-        }
-        if tok.is_expired() {
-            // Best-effort cleanup of the expired record.
-            let _ = std::fs::remove_file(Self::file_path(sipag_dir, token));
-            anyhow::bail!("setup token expired");
-        }
-        // Remove first so a panic later doesn't leave a replayable token.
-        std::fs::remove_file(Self::file_path(sipag_dir, token))
-            .with_context(|| "failed to remove consumed setup token".to_string())?;
-        Ok(tok)
-    }
+/// scrypt work factor. Lower than OWASP's password-hashing recommendation
+/// (log_n=17) because setup tokens are NOT user-chosen passwords — they
+/// are 32 bytes of CSPRNG output (256 bits of entropy), so the brute-force
+/// resistance we care about is already provided by the token itself. The
+/// hash only needs to prevent disclosure-via-state-file from yielding
+/// replay-usable plaintext within the token's few-hour lifetime.
+///
+/// The params travel with each hash in the PHC string, so revisiting this
+/// is a code-only change — existing tokens continue to verify with their
+/// own params.
+const SCRYPT_LOG_N: u8 = 14;
+const SCRYPT_R: u32 = 8;
+const SCRYPT_P: u32 = 1;
+const SCRYPT_KEY_LEN: usize = 32;
 
-    pub fn is_expired(&self) -> bool {
-        DateTime::parse_from_rfc3339(&self.expires)
-            .map(|t| t.with_timezone(&Utc) < Utc::now())
-            .unwrap_or(true)
-    }
+fn hash_token(plaintext: &str) -> Result<String> {
+    let params = Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, SCRYPT_KEY_LEN)
+        .map_err(|e| AuthError::Hash(e.to_string()))?;
+    let salt = SaltString::generate(&mut OsRng);
+    Scrypt
+        .hash_password_customized(plaintext.as_bytes(), None, None, params, &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| AuthError::Hash(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
-    #[test]
-    fn save_load_consume_cycle() {
-        let tmp = TempDir::new().unwrap();
-        let t = SetupToken::new("tk-abc".into(), SetupPurpose::EnrollPasskey, 10);
-        t.save(tmp.path()).unwrap();
-
-        let consumed =
-            SetupToken::consume(tmp.path(), "tk-abc", SetupPurpose::EnrollPasskey).unwrap();
-        assert_eq!(consumed.token, "tk-abc");
-
-        // Second consume should fail (token no longer on disk).
-        let err = SetupToken::consume(tmp.path(), "tk-abc", SetupPurpose::EnrollPasskey);
-        assert!(err.is_err());
+    fn epoch_plus(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
     }
 
     #[test]
-    fn purpose_mismatch_rejects() {
-        let tmp = TempDir::new().unwrap();
-        let t = SetupToken::new("p1".into(), SetupPurpose::EnrollPasskey, 10);
-        t.save(tmp.path()).unwrap();
-        let err =
-            SetupToken::consume(tmp.path(), "p1", SetupPurpose::KatulongAppInstall);
-        assert!(err.is_err());
+    fn issue_and_verify_roundtrip() {
+        let (plaintext, token) = SetupToken::issue(
+            Some("iPad".into()),
+            epoch_plus(0),
+            Duration::from_secs(3600),
+        )
+        .unwrap();
+        assert_eq!(plaintext.len(), 64);
+        assert!(token.verify(&plaintext));
+        assert!(!token.verify("wrong"));
+        assert_eq!(token.name.as_deref(), Some("iPad"));
+        assert_eq!(token.expires_at, epoch_plus(3600));
     }
 
     #[test]
-    fn expired_rejects_and_cleans() {
-        let tmp = TempDir::new().unwrap();
-        let t = SetupToken::new("expired".into(), SetupPurpose::EnrollPasskey, -5);
-        t.save(tmp.path()).unwrap();
-        assert!(t.is_expired());
-        let err = SetupToken::consume(tmp.path(), "expired", SetupPurpose::EnrollPasskey);
-        assert!(err.is_err());
-        // File should have been cleaned up by the consume call.
-        assert!(SetupToken::load(tmp.path(), "expired").is_err());
+    fn two_issues_differ() {
+        let (p1, t1) = SetupToken::issue(None, epoch_plus(0), Duration::from_secs(60)).unwrap();
+        let (p2, t2) = SetupToken::issue(None, epoch_plus(0), Duration::from_secs(60)).unwrap();
+        assert_ne!(p1, p2);
+        assert_ne!(t1.id, t2.id);
+        assert_ne!(t1.hash, t2.hash);
+    }
+
+    #[test]
+    fn is_expired_uses_now() {
+        let (_, t) = SetupToken::issue(None, epoch_plus(100), Duration::from_secs(10)).unwrap();
+        assert!(!t.is_expired(epoch_plus(109)));
+        assert!(t.is_expired(epoch_plus(110)));
+        assert!(t.is_expired(epoch_plus(200)));
+    }
+
+    #[test]
+    fn hash_is_phc_encoded() {
+        let (_, t) = SetupToken::issue(None, epoch_plus(0), Duration::from_secs(60)).unwrap();
+        assert!(
+            t.hash.starts_with("$scrypt$"),
+            "expected PHC scrypt prefix, got: {}",
+            t.hash
+        );
+    }
+
+    #[test]
+    fn corrupt_hash_fails_closed() {
+        let (plaintext, mut t) =
+            SetupToken::issue(None, epoch_plus(0), Duration::from_secs(60)).unwrap();
+        t.hash = "not-a-phc-string".into();
+        assert!(!t.verify(&plaintext));
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let (_, t) =
+            SetupToken::issue(Some("mac".into()), epoch_plus(5), Duration::from_secs(60)).unwrap();
+        let json = serde_json::to_string(&t).unwrap();
+        let back: SetupToken = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
     }
 }

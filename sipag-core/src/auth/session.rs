@@ -1,128 +1,142 @@
-//! Active session cookie store.
-//!
-//! When a user completes WebAuthn assertion, the binary crate mints a
-//! session token, writes a Session record, and sets a cookie with
-//! that token. On every authenticated request, the middleware loads
-//! the session by its token, checks expiry, and (if valid) refreshes
-//! `last_active` for sliding expiry.
-//!
-//! One TOML file per session — easy to rm, easy to inspect.
-
-use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use crate::auth::random::random_hex;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
+use std::time::{Duration, SystemTime};
 
-use super::sessions_dir;
+/// Default session lifetime: 30 days.
+pub const SESSION_TTL: Duration = Duration::from_secs(60 * 60 * 24 * 30);
 
-/// Default session lifetime — sliding expiry of 30 days.
-pub const DEFAULT_SESSION_TTL_DAYS: i64 = 30;
+/// The plaintext session-token string that goes to the client as a
+/// cookie value. Produced once by `Session::mint` alongside the record
+/// that gets persisted; after mint the server only ever compares hashes
+/// against this value (see `AuthState::find_session`).
+pub type SessionTokenPlaintext = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A browser session bound to a credential.
+///
+/// The `token_hash` field stores SHA-256 of the plaintext session token,
+/// hex-encoded. The plaintext is delivered to the client once — by
+/// `Session::mint`'s return tuple — and never stored on disk. On every
+/// subsequent request the server hashes the candidate cookie value and
+/// constant-time compares against `token_hash`. Consequence: a stolen
+/// auth-state file exposes only hashes, not replay-usable cookies. The
+/// entropy of the plaintext (256 bits from CSPRNG) already makes
+/// brute-force impossible, so SHA-256 (fast, deterministic) is the right
+/// primitive — scrypt-level work factor would be overkill and make every
+/// request slower for no gain.
+///
+/// Carries a CSRF token and an activity timestamp to support a sliding-
+/// expiry model: fixed expiry means a stolen cookie is valid for the
+/// full window regardless of user activity; a sliding window extends the
+/// deadline only when the user has been genuinely active.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
-    pub token: String,
-    /// Which credential authenticated this session.
+    /// SHA-256 of the plaintext token, hex-encoded (64 chars). See
+    /// struct docs for the rationale. Never equal to the plaintext.
+    pub token_hash: String,
     pub credential_id: String,
-    pub created: String,
-    pub last_active: String,
-    pub expires: String,
+    pub csrf_token: String,
+    #[serde(with = "crate::auth::state::systime")]
+    pub created_at: SystemTime,
+    #[serde(with = "crate::auth::state::systime")]
+    pub expires_at: SystemTime,
+    #[serde(with = "crate::auth::state::systime")]
+    pub last_activity_at: SystemTime,
 }
 
 impl Session {
-    fn safe_filename(token: &str) -> String {
-        token
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-            .collect()
+    /// Mint a fresh session for `credential_id`, expiring `ttl` after
+    /// `now`. Returns `(plaintext_token, session)`.
+    pub fn mint(
+        credential_id: impl Into<String>,
+        now: SystemTime,
+        ttl: Duration,
+    ) -> (SessionTokenPlaintext, Self) {
+        let plaintext = random_hex(32);
+        let session = Self {
+            token_hash: hash_session_token(&plaintext),
+            credential_id: credential_id.into(),
+            csrf_token: random_hex(32),
+            created_at: now,
+            expires_at: now + ttl,
+            last_activity_at: now,
+        };
+        (plaintext, session)
     }
+}
 
-    fn file_path(sipag_dir: &Path, token: &str) -> PathBuf {
-        sessions_dir(sipag_dir).join(format!("{}.toml", Self::safe_filename(token)))
+/// SHA-256 hash of a plaintext session token, hex-encoded. 64 chars.
+///
+/// Used both at mint time (`Session::mint`) and at lookup time
+/// (`AuthState::find_session`). Keeping it as a crate-private helper
+/// means "how do we hash a session token?" has exactly one answer
+/// visible from both mint and verify paths.
+pub(crate) fn hash_session_token(plaintext: &str) -> String {
+    let digest = Sha256::new().chain_update(plaintext.as_bytes()).finalize();
+    let mut out = String::with_capacity(64);
+    for b in digest.iter() {
+        write!(&mut out, "{b:02x}").expect("write to String cannot fail");
     }
-
-    pub fn new(token: String, credential_id: String) -> Self {
-        let now = Utc::now();
-        let expires = now + Duration::days(DEFAULT_SESSION_TTL_DAYS);
-        Self {
-            token,
-            credential_id,
-            created: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            last_active: now.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            expires: expires.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        }
-    }
-
-    pub fn save(&self, sipag_dir: &Path) -> Result<()> {
-        std::fs::create_dir_all(sessions_dir(sipag_dir))?;
-        let path = Self::file_path(sipag_dir, &self.token);
-        let content = toml::to_string_pretty(self)?;
-        crate::board::atomic_write(&path, content.as_bytes())
-    }
-
-    pub fn load(sipag_dir: &Path, token: &str) -> Result<Self> {
-        let path = Self::file_path(sipag_dir, token);
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| "session not found".to_string())?;
-        let session: Self = toml::from_str(&content)
-            .with_context(|| format!("invalid TOML in {}", path.display()))?;
-        Ok(session)
-    }
-
-    pub fn delete(sipag_dir: &Path, token: &str) -> Result<()> {
-        let path = Self::file_path(sipag_dir, token);
-        if !path.exists() {
-            return Ok(());
-        }
-        std::fs::remove_file(&path)
-            .with_context(|| format!("failed to remove {}", path.display()))?;
-        Ok(())
-    }
-
-    /// True if `expires` is in the past.
-    pub fn is_expired(&self) -> bool {
-        DateTime::parse_from_rfc3339(&self.expires)
-            .map(|t| t.with_timezone(&Utc) < Utc::now())
-            .unwrap_or(true)
-    }
-
-    /// Bump `last_active` to now and slide `expires` forward.
-    pub fn touch(&mut self) {
-        let now = Utc::now();
-        self.last_active = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        self.expires = (now + Duration::days(DEFAULT_SESSION_TTL_DAYS))
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
-    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
-    fn save_load_round_trip() {
-        let tmp = TempDir::new().unwrap();
-        let s = Session::new("tok-abc".into(), "cred-1".into());
-        s.save(tmp.path()).unwrap();
-        let loaded = Session::load(tmp.path(), "tok-abc").unwrap();
-        assert_eq!(loaded.token, "tok-abc");
-        assert_eq!(loaded.credential_id, "cred-1");
-        assert!(!loaded.is_expired());
+    fn mint_produces_distinct_tokens_on_each_call() {
+        let (a_plain, a) = Session::mint("cred", SystemTime::UNIX_EPOCH, SESSION_TTL);
+        let (b_plain, b) = Session::mint("cred", SystemTime::UNIX_EPOCH, SESSION_TTL);
+        assert_ne!(a_plain, b_plain, "plaintext tokens must be unique");
+        assert_ne!(a.token_hash, b.token_hash, "hashes must differ too");
+        assert_ne!(a.csrf_token, b.csrf_token, "csrf tokens must be unique");
+        assert_ne!(
+            a_plain, a.csrf_token,
+            "session and csrf tokens must be drawn independently"
+        );
     }
 
     #[test]
-    fn delete_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        Session::delete(tmp.path(), "no-such-token").unwrap();
+    fn mint_sets_expiry_from_ttl() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let (_, s) = Session::mint("cred", now, Duration::from_secs(3600));
+        assert_eq!(s.created_at, now);
+        assert_eq!(s.expires_at, now + Duration::from_secs(3600));
+        assert_eq!(s.last_activity_at, now);
     }
 
     #[test]
-    fn touch_slides_expiry() {
-        let mut s = Session::new("t".into(), "c".into());
-        let original_expires = s.expires.clone();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        s.touch();
-        assert_ne!(s.expires, original_expires);
+    fn plaintext_shape_is_64_hex_chars() {
+        let (plaintext, _) = Session::mint("cred", SystemTime::UNIX_EPOCH, SESSION_TTL);
+        assert_eq!(plaintext.len(), 64, "32 bytes hex-encoded → 64 chars");
+        assert!(
+            plaintext.chars().all(|c| c.is_ascii_hexdigit()),
+            "token must be hex only"
+        );
+    }
+
+    #[test]
+    fn stored_hash_is_not_plaintext() {
+        let (plaintext, s) = Session::mint("cred", SystemTime::UNIX_EPOCH, SESSION_TTL);
+        assert_ne!(
+            plaintext, s.token_hash,
+            "storing the plaintext defeats the hash"
+        );
+        assert_eq!(
+            hash_session_token(&plaintext),
+            s.token_hash,
+            "the stored hash must be SHA-256 of the returned plaintext"
+        );
+    }
+
+    #[test]
+    fn hash_is_deterministic() {
+        let h1 = hash_session_token("abc");
+        let h2 = hash_session_token("abc");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, hash_session_token("abd"));
+        assert_eq!(h1.len(), 64);
     }
 }

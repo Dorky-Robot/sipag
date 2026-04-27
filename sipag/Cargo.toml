@@ -26,21 +26,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-
-# Track A — WebAuthn auth for sipag's standalone subdomain. We host
-# our own credential store + session store; no third-party identity
-# provider. Mirrors katulong's pattern (per-entity TOML files).
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
-tower-cookies = "0.10"
-rand = "0.8"
+thiserror = "1"
 url = "2"
-base64 = "0.22"
+
+# WebAuthn lives in sipag-core::auth — the binary crate just wires
+# handlers around the AuthStore and WebAuthnService.
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
-# Track A: in-process axum integration tests for /setup, the four
-# WebAuthn endpoints, and the auth middleware.
+# In-process axum integration tests for the auth surface.
 axum-test = "16"
 tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+serde_json = "1"
