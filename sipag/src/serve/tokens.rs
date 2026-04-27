@@ -36,7 +36,10 @@ const TOKEN_NAME_MAX_LEN: usize = 64;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/auth/setup-tokens", get(list_tokens).post(create_token))
+        .route(
+            "/api/auth/setup-tokens",
+            get(list_tokens).post(create_token),
+        )
         .route("/api/auth/setup-tokens/:id", delete(revoke_token))
 }
 

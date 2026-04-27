@@ -37,7 +37,9 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            ApiError::BadRequest(detail) => json_status(StatusCode::BAD_REQUEST, "bad_request", detail),
+            ApiError::BadRequest(detail) => {
+                json_status(StatusCode::BAD_REQUEST, "bad_request", detail)
+            }
             ApiError::Unauthorized => {
                 json_status(StatusCode::UNAUTHORIZED, "unauthorized", "sign in")
             }
@@ -88,9 +90,5 @@ fn map_auth_error(err: AuthError) -> Response {
 }
 
 fn json_status(status: StatusCode, code: &str, detail: &str) -> Response {
-    (
-        status,
-        Json(json!({ "error": code, "detail": detail })),
-    )
-        .into_response()
+    (status, Json(json!({ "error": code, "detail": detail }))).into_response()
 }

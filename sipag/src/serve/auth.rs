@@ -241,9 +241,11 @@ async fn login_finish(
     let (plaintext_token, minted_session) = state
         .auth_store
         .transact(move |s| {
-            let cred = s.find_credential(&credential_id).ok_or(
-                AuthError::StateConflict("credential revoked during authentication ceremony"),
-            )?;
+            let cred = s
+                .find_credential(&credential_id)
+                .ok_or(AuthError::StateConflict(
+                    "credential revoked during authentication ceremony",
+                ))?;
             let updated = cred.apply_authentication(&verified.result)?;
             let (plaintext, session) = Session::mint(credential_id.clone(), now, SESSION_TTL);
             let mut next = s.clone();
@@ -321,9 +323,10 @@ async fn pair_start(
         })?;
     let setup_token_id = token.id.clone();
 
-    let (challenge_id, ccr) = state
-        .webauthn
-        .start_registration(user_handle, "sipag", "Sipag", &snap.credentials, now)?;
+    let (challenge_id, ccr) =
+        state
+            .webauthn
+            .start_registration(user_handle, "sipag", "Sipag", &snap.credentials, now)?;
 
     Ok(Json(PairStartResponse {
         challenge_id,
@@ -370,8 +373,7 @@ async fn pair_finish(
                 ));
             }
 
-            let (plaintext, session) =
-                Session::mint(new_credential.id.clone(), now, SESSION_TTL);
+            let (plaintext, session) = Session::mint(new_credential.id.clone(), now, SESSION_TTL);
             let next = s
                 .upsert_credential(new_credential.clone())
                 .consume_setup_token(&setup_token_id, &new_credential.id, now)

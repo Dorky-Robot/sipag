@@ -72,10 +72,7 @@ mod tests {
     #[test]
     fn extract_pulls_named_cookie_from_multi_cookie_header() {
         let header = "other=foo; sipag_session=abc123; yet_another=bar";
-        assert_eq!(
-            extract_session_token(header),
-            Some("abc123".to_string())
-        );
+        assert_eq!(extract_session_token(header), Some("abc123".to_string()));
     }
 
     #[test]

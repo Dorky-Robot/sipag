@@ -20,12 +20,7 @@
 
 use crate::serve::error::ApiError;
 use crate::serve::state::AppState;
-use axum::{
-    extract::Query,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::Query, response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
 use std::process::Stdio;
 use tokio::process::Command;
@@ -147,9 +142,7 @@ pub struct Insight {
     pub repo: String,
 }
 
-async fn search_insights(
-    Query(q): Query<SearchQuery>,
-) -> Result<Json<Vec<Insight>>, ApiError> {
+async fn search_insights(Query(q): Query<SearchQuery>) -> Result<Json<Vec<Insight>>, ApiError> {
     let query = q.q.unwrap_or_default();
     let n = q.n.unwrap_or(DEFAULT_SEARCH_N);
     Ok(Json(search(&query, q.repo.as_deref(), n).await?))
@@ -157,11 +150,7 @@ async fn search_insights(
 
 /// Direct callable for non-HTTP consumers (the HTMX spike, future
 /// templated handlers). Same shape as `GET /api/insights/search`.
-pub async fn search(
-    query: &str,
-    repo: Option<&str>,
-    n: usize,
-) -> Result<Vec<Insight>, ApiError> {
+pub async fn search(query: &str, repo: Option<&str>, n: usize) -> Result<Vec<Insight>, ApiError> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -245,9 +234,7 @@ async fn run_diwa(args: &[&str]) -> Result<String, ApiError> {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             tracing::warn!(error = %e, args = ?args, "diwa exec failed");
-            return Err(ApiError::Internal(anyhow::anyhow!(
-                "diwa exec failed: {e}"
-            )));
+            return Err(ApiError::Internal(anyhow::anyhow!("diwa exec failed: {e}")));
         }
         Err(_) => {
             tracing::warn!(args = ?args, "diwa exec timed out");
@@ -305,19 +292,13 @@ mod tests {
     fn strip_ansi_removes_color_sequences() {
         assert_eq!(strip_ansi("plain"), "plain");
         assert_eq!(strip_ansi("\x1b[90mgrey\x1b[0m"), "grey");
-        assert_eq!(
-            strip_ansi("a\x1b[1;32mb\x1b[0mc"),
-            "abc"
-        );
+        assert_eq!(strip_ansi("a\x1b[1;32mb\x1b[0mc"), "abc");
     }
 
     #[test]
     fn sanitize_query_strips_fts_metacharacters() {
         assert_eq!(sanitize_query("auth refactor"), "auth refactor");
-        assert_eq!(
-            sanitize_query("auth \"refactor\" (#3)"),
-            "auth refactor #3"
-        );
+        assert_eq!(sanitize_query("auth \"refactor\" (#3)"), "auth refactor #3");
         assert_eq!(sanitize_query("*"), "");
         assert_eq!(sanitize_query(":"), "");
         assert_eq!(sanitize_query("  hello  world  "), "hello world");

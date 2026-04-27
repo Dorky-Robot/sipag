@@ -51,11 +51,7 @@ async fn login_get(
         .into_response()
 }
 
-fn render_page(
-    access: AccessMethod,
-    has_credentials: bool,
-    setup_token: Option<&str>,
-) -> String {
+fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<&str>) -> String {
     let intent = pick_intent(access, has_credentials, setup_token);
     let body = render_body(&intent);
     let setup_token_json = setup_token

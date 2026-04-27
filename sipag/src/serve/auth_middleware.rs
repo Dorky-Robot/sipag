@@ -31,7 +31,8 @@ use std::time::SystemTime;
 const FALLBACK_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
 
 #[allow(clippy::large_enum_variant)]
-#[allow(dead_code)] // session field + credential_id helper are part of the public surface for handlers we haven't wired yet.
+#[allow(dead_code)]
+// session field + credential_id helper are part of the public surface for handlers we haven't wired yet.
 #[derive(Debug, Clone)]
 pub enum AuthContext {
     Localhost,
@@ -129,10 +130,7 @@ fn is_public_path(uri: &Uri) -> bool {
 /// real peer; this middleware is the safety net for missing-extension
 /// edge cases. Falls back to a non-loopback address so the gate
 /// classifies as remote — fail-closed.
-pub async fn ensure_connect_info(
-    mut request: axum::extract::Request,
-    next: Next,
-) -> Response {
+pub async fn ensure_connect_info(mut request: axum::extract::Request, next: Next) -> Response {
     if request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
@@ -151,8 +149,7 @@ pub async fn ensure_loopback_connect_info(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    const TEST_PEER: SocketAddr =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
+    const TEST_PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0);
     if request
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()

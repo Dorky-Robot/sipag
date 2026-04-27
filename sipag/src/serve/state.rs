@@ -1,5 +1,6 @@
 use sipag_core::auth::{AuthStore, WebAuthnService};
 use sipag_core::hosts::HostsConfig;
+use sipag_core::pubsub::Broker;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,4 +23,10 @@ pub struct AppState {
     /// In-memory WebAuthn ceremony coordinator. Pending registration /
     /// authentication state lives here.
     pub webauthn: Arc<WebAuthnService>,
+    /// File-backed pub/sub broker. Workers publish progress; the WS
+    /// endpoint forwards live envelopes to the browser.
+    pub broker: Broker,
+    /// Whether autonomous workers are running. The CLI flag
+    /// `serve --workers` flips this on.
+    pub workers_enabled: bool,
 }

@@ -150,10 +150,7 @@ async fn tunnel_host_without_cookie_redirects_html_to_login() {
 async fn login_is_publicly_reachable_from_tunnel_host() {
     let dir = TempDir::new().unwrap();
     let (server, _) = server(&dir).await;
-    let response = server
-        .get("/login")
-        .add_header("host", TUNNEL_HOST)
-        .await;
+    let response = server.get("/login").add_header("host", TUNNEL_HOST).await;
     response.assert_status_ok();
 }
 
@@ -357,10 +354,7 @@ async fn login_renders_login_intent_when_credentials_exist() {
     let (server, state) = server(&dir).await;
     seed_session(&state, "tk").await;
 
-    let response = server
-        .get("/login")
-        .add_header("host", TUNNEL_HOST)
-        .await;
+    let response = server.get("/login").add_header("host", TUNNEL_HOST).await;
     response.assert_status_ok();
     assert!(response.text().contains("Sign in"));
 }
@@ -381,11 +375,7 @@ async fn login_renders_pair_intent_with_setup_token_query() {
 async fn login_renders_bootstrap_intent_when_remote_with_no_credentials_and_no_token() {
     let dir = TempDir::new().unwrap();
     let (server, _) = server(&dir).await;
-    let response = server
-        .get("/login")
-        .add_header("host", TUNNEL_HOST)
-        .await;
+    let response = server.get("/login").add_header("host", TUNNEL_HOST).await;
     response.assert_status_ok();
     assert!(response.text().contains("No passkeys yet"));
 }
-

@@ -152,6 +152,12 @@ pub enum Commands {
         /// server, not loaded from disk.
         #[arg(long, default_value = "web/public")]
         web_root: std::path::PathBuf,
+
+        /// Enable autonomous workers (research, expand, …). When off
+        /// (default) the server still ships the UI, pubsub, WS, and
+        /// HTMX CRUD; only the label-driven dispatcher is gated.
+        #[arg(long, default_value_t = false)]
+        workers: bool,
     },
 
     /// Print version
@@ -255,7 +261,11 @@ pub fn run(cli: Cli) -> Result<()> {
             from_seq,
             json,
         }) => run_sub(&topic, from_seq, json),
-        Some(Commands::Serve { port, web_root }) => crate::serve::run(port, web_root),
+        Some(Commands::Serve {
+            port,
+            web_root,
+            workers,
+        }) => crate::serve::run(port, web_root, workers),
         Some(Commands::Version) => run_version(),
     }
 }
