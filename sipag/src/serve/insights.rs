@@ -151,20 +151,30 @@ async fn search_insights(
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<Insight>>, ApiError> {
     let query = q.q.unwrap_or_default();
+    let n = q.n.unwrap_or(DEFAULT_SEARCH_N);
+    Ok(Json(search(&query, q.repo.as_deref(), n).await?))
+}
+
+/// Direct callable for non-HTTP consumers (the HTMX spike, future
+/// templated handlers). Same shape as `GET /api/insights/search`.
+pub async fn search(
+    query: &str,
+    repo: Option<&str>,
+    n: usize,
+) -> Result<Vec<Insight>, ApiError> {
     let query = query.trim();
     if query.is_empty() {
-        return Ok(Json(Vec::new()));
+        return Ok(Vec::new());
     }
     if query.len() > MAX_QUERY_LEN {
         return Err(ApiError::BadRequest("query too long"));
     }
-    let n = q.n.unwrap_or(DEFAULT_SEARCH_N).min(MAX_SEARCH_N);
+    let n = n.min(MAX_SEARCH_N).max(1);
 
-    let repos: Vec<String> = match q.repo {
+    let repos: Vec<String> = match repo {
         Some(r) if !r.trim().is_empty() => vec![r.trim().to_string()],
         _ => {
             // No repo specified — search across every indexed repo.
-            // We cap N so a cross-repo fanout doesn't OOM.
             let out = run_diwa(&["ls"]).await.unwrap_or_default();
             parse_diwa_ls(&out).into_iter().map(|r| r.name).collect()
         }
@@ -172,7 +182,7 @@ async fn search_insights(
 
     let safe_query = sanitize_query(query);
     if safe_query.is_empty() {
-        return Ok(Json(Vec::new()));
+        return Ok(Vec::new());
     }
 
     let mut all: Vec<Insight> = Vec::new();
@@ -201,7 +211,7 @@ async fn search_insights(
     all.sort_by(|a, b| b.commit_date.cmp(&a.commit_date));
     all.truncate(n);
 
-    Ok(Json(all))
+    Ok(all)
 }
 
 /// Conservative query sanitizer. diwa's `search` uses sqlite FTS5,
