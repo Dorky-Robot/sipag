@@ -12,6 +12,7 @@ mod board;
 mod cookie;
 mod devices;
 mod error;
+mod insights;
 mod login;
 mod state;
 mod tokens;
@@ -158,6 +159,7 @@ fn build_router_inner(state: AppState, web_root: PathBuf, test_loopback_peer: bo
         .merge(devices::routes())
         .merge(login::routes())
         .merge(board::routes())
+        .merge(insights::routes())
         .fallback_service(ServeDir::new(&web_root).append_index_html_on_directories(true))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
