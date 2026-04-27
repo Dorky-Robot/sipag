@@ -137,16 +137,19 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Run the agent-manager web server (Week-1 spike)
+    /// Run the agent-manager web server
     ///
-    /// Serves the ClojureScript SPA and proxies the katulong mesh defined
-    /// in ~/.sipag/hosts.toml. API keys stay server-side.
+    /// Server-rendered HTMX UI (maud templates) plus a JSON `/api/*`
+    /// surface for programmatic clients. Proxies the katulong mesh
+    /// defined in ~/.sipag/hosts.toml; API keys stay server-side.
     Serve {
         /// Port to listen on
         #[arg(long, default_value_t = 7100)]
         port: u16,
 
-        /// Directory holding the compiled cljs SPA (index.html + assets)
+        /// Directory of static assets served as a fallback (style.css,
+        /// htmx.min.js, favicons). The HTML for `/` is rendered by the
+        /// server, not loaded from disk.
         #[arg(long, default_value = "web/public")]
         web_root: std::path::PathBuf,
     },

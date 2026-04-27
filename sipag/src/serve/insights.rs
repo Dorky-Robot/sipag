@@ -169,7 +169,7 @@ pub async fn search(
     if query.len() > MAX_QUERY_LEN {
         return Err(ApiError::BadRequest("query too long"));
     }
-    let n = n.min(MAX_SEARCH_N).max(1);
+    let n = n.clamp(1, MAX_SEARCH_N);
 
     let repos: Vec<String> = match repo {
         Some(r) if !r.trim().is_empty() => vec![r.trim().to_string()],
