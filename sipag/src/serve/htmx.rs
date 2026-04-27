@@ -39,13 +39,22 @@ pub fn routes() -> Router<AppState> {
         .route("/htmx/forms/:key", get(form_fragment))
         .route("/htmx/projects", post(create_project))
         .route("/htmx/projects/:name", delete(delete_project_handler))
-        .route(
-            "/htmx/projects/:name/key-results",
-            post(create_kr_handler),
-        )
+        .route("/htmx/projects/:name/key-results", post(create_kr_handler))
         .route(
             "/htmx/projects/:name/key-results/:id",
             patch(update_kr_handler).delete(delete_kr_handler),
+        )
+        .route(
+            "/htmx/projects/:name/key-results/:id/labels",
+            post(kr_labels_handler),
+        )
+        .route(
+            "/htmx/projects/:name/key-results/:id/done",
+            post(kr_done_handler),
+        )
+        .route(
+            "/htmx/projects/:name/key-results/:id/discourse",
+            post(kr_discourse_handler),
         )
         .route("/htmx/projects/:name/tasks", post(create_task_handler))
         .route(
@@ -53,9 +62,23 @@ pub fn routes() -> Router<AppState> {
             patch(update_task_handler).delete(delete_task_handler),
         )
         .route(
+            "/htmx/projects/:name/tasks/:id/labels",
+            post(task_labels_handler),
+        )
+        .route(
+            "/htmx/projects/:name/tasks/:id/discourse",
+            post(task_discourse_handler),
+        )
+        .route(
             "/htmx/projects/:name/tasks/:id/dispatch",
             post(dispatch_task_handler),
         )
+        .route(
+            "/htmx/discourse/:kind/:project/:id",
+            get(discourse_fragment),
+        )
+        .route("/htmx/attention", get(attention_fragment))
+        .route("/htmx/ticker", get(ticker_fragment))
         .route("/htmx/insights/hint", get(insights_hint))
 }
 
@@ -198,9 +221,7 @@ async fn create_project(
     let kind = match body.kind.as_deref().unwrap_or("objective") {
         "objective" => ProjectKind::Objective,
         "standing" => ProjectKind::Standing,
-        other => {
-            return err_response(StatusCode::BAD_REQUEST, format!("unknown kind: {other}"))
-        }
+        other => return err_response(StatusCode::BAD_REQUEST, format!("unknown kind: {other}")),
     };
     if let Err(e) = create_project_with_kind(&dir, body.name.trim(), &body.repo, kind, None) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
@@ -246,9 +267,9 @@ async fn create_kr_handler(
         id,
         title: body.title,
         stance: KrStance::Green,
-        created: chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
+        created: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        labels: Vec::new(),
+        done: false,
     };
     if let Err(e) = kr.save(&dir, &name) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
@@ -430,9 +451,7 @@ async fn update_task_handler(
                 }
                 task = match Task::load(&dir, &name, id) {
                     Ok(t) => t,
-                    Err(_) => {
-                        return err_response(StatusCode::NOT_FOUND, "task not found")
-                    }
+                    Err(_) => return err_response(StatusCode::NOT_FOUND, "task not found"),
                 };
             }
             let mut dirty = false;
@@ -449,9 +468,7 @@ async fn update_task_handler(
                 dirty = true;
             }
             if dirty {
-                task.updated = chrono::Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%SZ")
-                    .to_string();
+                task.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
                 if let Err(e) = task.save(&dir, &name) {
                     return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
                 }
@@ -502,9 +519,7 @@ async fn dispatch_task_handler(
     let host = match want_host {
         Some(id) => match state.hosts.find(&id) {
             Some(h) => h,
-            None => {
-                return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {id}"))
-            }
+            None => return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {id}")),
         },
         None => match state.hosts.hosts.first() {
             Some(h) => h,
@@ -583,10 +598,7 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST exec failed");
-            return err_response(
-                StatusCode::BAD_GATEWAY,
-                format!("exec on {}: {e}", host.id),
-            );
+            return err_response(StatusCode::BAD_GATEWAY, format!("exec on {}: {e}", host.id));
         }
     };
     if !exec_resp.status().is_success() {
@@ -635,9 +647,178 @@ async fn insights_hint(Query(q): Query<InsightsHintQuery>) -> Response {
     use crate::serve::insights::search;
     let query = q.q.unwrap_or_default();
     let n = q.n.unwrap_or(3);
-    let insights = search(&query, q.repo.as_deref(), n).await.unwrap_or_default();
+    let insights = search(&query, q.repo.as_deref(), n)
+        .await
+        .unwrap_or_default();
     if insights.is_empty() {
         return Html(String::new()).into_response();
     }
     html_response(board_view::render_hint_rows_external(&insights))
+}
+
+// ── label / done / discourse / attention / ticker ───────────────────
+
+#[derive(Deserialize)]
+struct LabelChangeForm {
+    #[serde(default)]
+    add: String,
+    #[serde(default)]
+    remove: String,
+}
+
+fn parse_csv(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+fn apply_labels(labels: &mut Vec<String>, add: &[String], remove: &[String]) {
+    labels.retain(|l| !remove.iter().any(|r| r == l));
+    for a in add {
+        if !labels.iter().any(|l| l == a) {
+            labels.push(a.clone());
+        }
+    }
+}
+
+async fn kr_labels_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+    Form(body): Form<LabelChangeForm>,
+) -> Response {
+    let dir = load_dir();
+    let mut kr = match KeyResult::load(&dir, &name, id) {
+        Ok(k) => k,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "KR not found"),
+    };
+    let add = parse_csv(&body.add);
+    let remove = parse_csv(&body.remove);
+    apply_labels(&mut kr.labels, &add, &remove);
+    if let Err(e) = kr.save(&dir, &name) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
+    }
+    let topic = format!("key-results/{name}/{id}/discourse");
+    let payload = serde_json::json!({
+        "add": add,
+        "remove": remove,
+        "actor": "human",
+    });
+    let _ = state.broker.publish(&topic, "label.changed", payload);
+    html_response(render_board(&state).await)
+}
+
+async fn task_labels_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+    Form(body): Form<LabelChangeForm>,
+) -> Response {
+    let dir = load_dir();
+    let mut task = match Task::load(&dir, &name, id) {
+        Ok(t) => t,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "task not found"),
+    };
+    let add = parse_csv(&body.add);
+    let remove = parse_csv(&body.remove);
+    apply_labels(&mut task.labels, &add, &remove);
+    task.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    if let Err(e) = task.save(&dir, &name) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
+    }
+    let topic = format!("tasks/{name}/{id}/discourse");
+    let payload = serde_json::json!({
+        "add": add,
+        "remove": remove,
+        "actor": "human",
+    });
+    let _ = state.broker.publish(&topic, "label.changed", payload);
+    html_response(render_board(&state).await)
+}
+
+async fn kr_done_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+) -> Response {
+    let dir = load_dir();
+    let mut kr = match KeyResult::load(&dir, &name, id) {
+        Ok(k) => k,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "KR not found"),
+    };
+    kr.done = !kr.done;
+    if let Err(e) = kr.save(&dir, &name) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
+    }
+    let topic = format!("key-results/{name}/{id}/discourse");
+    let payload = serde_json::json!({
+        "done": kr.done,
+        "actor": "human",
+    });
+    let _ = state.broker.publish(&topic, "done.toggled", payload);
+    html_response(render_board(&state).await)
+}
+
+#[derive(Deserialize)]
+struct DiscoursePost {
+    text: String,
+}
+
+async fn kr_discourse_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+    Form(body): Form<DiscoursePost>,
+) -> Response {
+    let trimmed = body.text.trim();
+    if trimmed.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let topic = format!("key-results/{name}/{id}/discourse");
+    let payload = serde_json::json!({
+        "text": trimmed,
+        "actor": "human",
+    });
+    let _ = state.broker.publish(&topic, "human.message", payload);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn task_discourse_handler(
+    AxumPath((name, id)): AxumPath<(String, u64)>,
+    State(state): State<AppState>,
+    Form(body): Form<DiscoursePost>,
+) -> Response {
+    let trimmed = body.text.trim();
+    if trimmed.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let topic = format!("tasks/{name}/{id}/discourse");
+    let payload = serde_json::json!({
+        "text": trimmed,
+        "actor": "human",
+    });
+    let _ = state.broker.publish(&topic, "human.message", payload);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn discourse_fragment(
+    AxumPath((kind, project, id)): AxumPath<(String, String, u64)>,
+    State(state): State<AppState>,
+) -> Response {
+    if kind != "key-results" && kind != "tasks" {
+        return err_response(StatusCode::BAD_REQUEST, "invalid kind");
+    }
+    let topic = format!("{kind}/{project}/{id}/discourse");
+    let envs = state.broker.read(&topic, 0).unwrap_or_default();
+    html_response(board_view::discourse_panel(&topic, &envs))
+}
+
+async fn attention_fragment(State(state): State<AppState>) -> Response {
+    let snap = board_view::load_snapshot(&state).await;
+    html_response(board_view::attention_strip(&snap))
+}
+
+async fn ticker_fragment(State(state): State<AppState>) -> Response {
+    let envs = state.broker.read("workers/activity", 0).unwrap_or_default();
+    let last_n: Vec<_> = envs.iter().rev().take(5).cloned().collect();
+    let mut chronological = last_n;
+    chronological.reverse();
+    html_response(board_view::ticker(&chronological))
 }

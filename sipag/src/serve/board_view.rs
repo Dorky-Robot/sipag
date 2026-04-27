@@ -11,10 +11,10 @@
 use crate::serve::state::AppState;
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sipag_core::board::{
-    list_project_names, list_tasks, load_project, KeyResult, Project, ProjectKind, Task,
-    TaskStatus,
+    list_project_names, list_tasks, load_project, KeyResult, Project, ProjectKind, Task, TaskStatus,
 };
 use sipag_core::hosts::Host;
+use sipag_core::pubsub::Envelope;
 use std::collections::BTreeMap;
 
 // ── public data shape ────────────────────────────────────────────────
@@ -171,15 +171,19 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 title { "sipag" }
                 link rel="stylesheet" href="/style.css";
                 script src="/js/htmx.min.js" {}
+                script src="/js/transport.js" {}
+                script src="/js/sipag-live.js" defer {}
             }
             body {
                 #app {
                     (topbar(snap))
+                    (attention_strip(snap))
                     (board_main(snap))
                     (idea_box(&snap.projects, false))
-                    // Mount points for HTMX OOB swaps.
+                    // Mount points for HTMX OOB swaps and live (WS) updates.
                     div #dispatch-picker-mount {}
                     div #toast-mount {}
+                    div #ticker.ticker {}
                 }
                 script {
                     (PreEscaped(INLINE_JS))
@@ -378,13 +382,24 @@ fn kr_row(
     let stance = kr.stance.as_str();
     let project_seg = urlencode(project_name);
     let kr_endpoint = format!("/htmx/projects/{project_seg}/key-results/{}", kr.id);
+    let labels_endpoint = format!("{kr_endpoint}/labels");
+    let done_endpoint = format!("{kr_endpoint}/done");
+    let discourse_topic = format!("key-results/{}/{}/discourse", project_name, kr.id);
     let kr_tasks: Vec<&&Task> = active_tasks
         .iter()
         .filter(|t| t.key_results.contains(&kr.id))
         .collect();
+    let working = kr.labels.iter().any(|l| l == "research" || l == "expand");
+    let kr_class = if working {
+        "kr working"
+    } else if kr.done {
+        "kr done"
+    } else {
+        "kr"
+    };
 
     html! {
-        div.kr {
+        div class=(kr_class) data-kind="key-results" data-project=(project_name) data-id=(kr.id) {
             div.kr-head {
                 button.kr-stance.{(stance)}
                     "hx-patch"=(kr_endpoint)
@@ -394,6 +409,12 @@ fn kr_row(
                     title={(stance) " — click to cycle"}
                 { (stance_symbol(stance)) }
                 span.kr-title { (kr.title) }
+                button.kr-done
+                    "hx-post"=(done_endpoint)
+                    "hx-target"="#board"
+                    "hx-swap"="outerHTML"
+                    title="toggle done"
+                { @if kr.done { "✓" } @else { "○" } }
                 button.row-delete
                     "hx-delete"=(kr_endpoint)
                     "hx-target"="#board"
@@ -402,6 +423,9 @@ fn kr_row(
                     title="delete KR"
                 { "×" }
             }
+            (label_chips(&kr.labels, &labels_endpoint))
+            (quick_label_row(&kr.labels, &labels_endpoint))
+            (discourse_drawer(&discourse_topic, "key-results", project_name, kr.id))
             @if !kr_tasks.is_empty() {
                 ul.tasks.kr-tasks {
                     @for t in &kr_tasks {
@@ -425,12 +449,16 @@ fn task_row(
     let status = task.status.to_string();
     let project_seg = urlencode(project_name);
     let task_endpoint = format!("/htmx/projects/{project_seg}/tasks/{}", task.id);
+    let labels_endpoint = format!("{task_endpoint}/labels");
     let dispatch_endpoint = format!("/htmx/projects/{project_seg}/tasks/{}/dispatch", task.id);
+    let discourse_topic = format!("tasks/{}/{}/discourse", project_name, task.id);
     let dispatchable = !hosts.is_empty() && running_on.is_none();
     let single_host = hosts.len() == 1;
+    let working = task.labels.iter().any(|l| l == "research" || l == "expand");
+    let li_class = if working { "task working" } else { "task" };
 
     html! {
-        li.task {
+        li class=(li_class) data-kind="tasks" data-project=(project_name) data-id=(task.id) {
             div.task-head {
                 span.task-id { "#" (task.id) }
                 span.task-title { (task.title) }
@@ -467,14 +495,6 @@ fn task_row(
                     }
                 }
 
-                @if !task.labels.is_empty() {
-                    span.labels {
-                        @for l in &task.labels {
-                            span.label { (l) }
-                        }
-                    }
-                }
-
                 button.row-delete
                     "hx-delete"=(task_endpoint)
                     "hx-target"="#board"
@@ -483,6 +503,9 @@ fn task_row(
                     title="delete task"
                 { "×" }
             }
+            (label_chips(&task.labels, &labels_endpoint))
+            (quick_label_row(&task.labels, &labels_endpoint))
+            (discourse_drawer(&discourse_topic, "tasks", project_name, task.id))
             @if let Some(host_id) = running_on {
                 div.task-foot { "▸ running on " (host_id) }
             }
@@ -890,6 +913,233 @@ fn relative_time(iso: &str) -> String {
         format!("{}w ago", days / 7)
     } else {
         format!("{}mo ago", days / 30)
+    }
+}
+
+// ── label chips + quick toggles ─────────────────────────────────────
+
+const QUICK_LABELS: &[&str] = &[
+    "research",
+    "expand",
+    "priority",
+    "blocked",
+    "attention",
+    "archive",
+    "done",
+];
+
+pub fn label_chips(labels: &[String], labels_endpoint: &str) -> Markup {
+    html! {
+        div.labels {
+            @for l in labels {
+                span.label.chip {
+                    (l)
+                    button.chip-x
+                        "hx-post"=(labels_endpoint)
+                        "hx-vals"={"{\"add\":\"\",\"remove\":\"" (json_escape(l)) "\"}"}
+                        "hx-target"="#board"
+                        "hx-swap"="outerHTML"
+                        title={"remove label '" (l) "'"}
+                    { "×" }
+                }
+            }
+            form.label-add
+                "hx-post"=(labels_endpoint)
+                "hx-target"="#board"
+                "hx-swap"="outerHTML"
+            {
+                input type="hidden" name="remove" value="";
+                input type="text" name="add" placeholder="+label" autocomplete="off";
+            }
+        }
+    }
+}
+
+pub fn quick_label_row(labels: &[String], labels_endpoint: &str) -> Markup {
+    html! {
+        div.quick-labels {
+            @for l in QUICK_LABELS {
+                @let active = labels.iter().any(|x| x == l);
+                @let cls = if active { "quick-label active" } else { "quick-label" };
+                @let payload = if active {
+                    format!("{{\"add\":\"\",\"remove\":\"{l}\"}}")
+                } else {
+                    format!("{{\"add\":\"{l}\",\"remove\":\"\"}}")
+                };
+                button class=(cls)
+                    "hx-post"=(labels_endpoint)
+                    "hx-vals"=(payload)
+                    "hx-target"="#board"
+                    "hx-swap"="outerHTML"
+                    title={(l) " — toggle"}
+                { (l) }
+            }
+        }
+    }
+}
+
+// ── discourse drawer ────────────────────────────────────────────────
+
+pub fn discourse_drawer(topic: &str, kind: &str, project: &str, id: u64) -> Markup {
+    let panel_url = format!("/htmx/discourse/{}/{}/{}", kind, urlencode(project), id);
+    let post_url = format!(
+        "/htmx/projects/{}/{}/{}/discourse",
+        urlencode(project),
+        kind,
+        id
+    );
+    html! {
+        details.discourse-drawer {
+            summary.discourse-toggle { "discourse" }
+            div.discourse data-topic=(topic)
+                "hx-get"=(panel_url)
+                "hx-trigger"="toggle from:closest details once"
+                "hx-target"="this"
+                "hx-swap"="innerHTML"
+            {
+                div.discourse-empty.subtle { "loading…" }
+            }
+            form.discourse-post
+                "hx-post"=(post_url)
+                "hx-target"="this"
+                "hx-swap"="none"
+            {
+                input type="text" name="text" placeholder="add to the conversation…" autocomplete="off";
+                button type="submit" { "post" }
+            }
+        }
+    }
+}
+
+pub fn discourse_panel(topic: &str, envs: &[Envelope]) -> Markup {
+    html! {
+        ul.discourse-log data-topic=(topic) {
+            @if envs.is_empty() {
+                li.discourse-empty.subtle { "no discourse yet — ping a worker or post a thought" }
+            } @else {
+                @for env in envs {
+                    (discourse_row(env))
+                }
+            }
+        }
+    }
+}
+
+fn discourse_row(env: &Envelope) -> Markup {
+    let role = env.kind.as_str();
+    let actor = env
+        .payload
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or(role);
+    let worker = env.payload.get("worker").and_then(|v| v.as_str());
+    let text = env
+        .payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .or_else(|| env.payload.get("message").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let citations: Vec<&str> = env
+        .payload
+        .get("citations")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
+        .unwrap_or_default();
+
+    let role_label = match role {
+        "human.message" => "human".to_string(),
+        "assistant.message" => format!("worker:{}", worker.unwrap_or("ollama")),
+        "worker.progress" => format!("worker:{} (progress)", worker.unwrap_or("?")),
+        "worker.complete" => format!("worker:{}", worker.unwrap_or("?")),
+        "worker.error" => format!("worker:{} (error)", worker.unwrap_or("?")),
+        "label.changed" => "system: label".to_string(),
+        "done.toggled" => "system: done".to_string(),
+        other => other.to_string(),
+    };
+
+    html! {
+        li.discourse-row data-kind=(role) {
+            span.discourse-ts { (env.ts) }
+            span.discourse-role { (role_label) }
+            @if !text.is_empty() {
+                span.discourse-text { (text) }
+            }
+            @if role == "label.changed" {
+                @let add = env.payload.get("add").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                @let remove = env.payload.get("remove").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                span.discourse-text {
+                    @for a in &add { "+" (a.as_str().unwrap_or("")) " " }
+                    @for r in &remove { "-" (r.as_str().unwrap_or("")) " " }
+                }
+            }
+            @if !citations.is_empty() {
+                span.discourse-citations {
+                    @for sha in &citations {
+                        @let short: String = sha.chars().take(7).collect();
+                        span.cite { (short) }
+                    }
+                }
+            }
+            @let _ = actor; // referenced for future styling hooks
+        }
+    }
+}
+
+// ── attention strip + ticker ────────────────────────────────────────
+
+pub fn attention_strip(snap: &BoardSnapshot) -> Markup {
+    let mut rows: Vec<(String, String, u64, String)> = Vec::new();
+    for p in &snap.projects {
+        for kr in &p.key_results {
+            if kr.labels.iter().any(|l| l == "attention") {
+                rows.push((
+                    "key-results".to_string(),
+                    p.name.clone(),
+                    kr.id,
+                    kr.title.clone(),
+                ));
+            }
+        }
+        for t in &p.tasks {
+            if t.labels.iter().any(|l| l == "attention") {
+                rows.push(("tasks".to_string(), p.name.clone(), t.id, t.title.clone()));
+            }
+        }
+    }
+    html! {
+        div #attention-strip class=(if rows.is_empty() { "attention-strip empty" } else { "attention-strip" }) {
+            @if rows.is_empty() {
+                span.subtle { "all clear" }
+            } @else {
+                @for (kind, project, id, title) in &rows {
+                    div.attention-row {
+                        span.attention-kind { (kind) }
+                        span.attention-project { (project) }
+                        span.attention-id { "#" (id) }
+                        span.attention-title { (title) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub fn ticker(envs: &[Envelope]) -> Markup {
+    html! {
+        @for env in envs {
+            div.ticker-row data-kind=(env.kind) {
+                span.ticker-ts { (env.ts) }
+                span.ticker-kind { (env.kind) }
+                @let worker = env.payload.get("worker").and_then(|v| v.as_str()).unwrap_or("");
+                @let pkind = env.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                @let project = env.payload.get("project").and_then(|v| v.as_str()).unwrap_or("");
+                @let id = env.payload.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                span.ticker-worker { (worker) }
+                @if !pkind.is_empty() {
+                    span.ticker-target { (pkind) " " (project) " #" (id) }
+                }
+            }
+        }
     }
 }
 

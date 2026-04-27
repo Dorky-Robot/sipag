@@ -84,6 +84,8 @@ struct KrView {
     title: String,
     stance: String,
     created: String,
+    labels: Vec<String>,
+    done: bool,
 }
 
 impl From<KeyResult> for KrView {
@@ -93,6 +95,8 @@ impl From<KeyResult> for KrView {
             title: k.title,
             stance: k.stance.to_string(),
             created: k.created,
+            labels: k.labels,
+            done: k.done,
         }
     }
 }
@@ -170,8 +174,7 @@ async fn create_project_handler(Json(body): Json<CreateProjectBody>) -> Response
         "objective" => ProjectKind::Objective,
         "standing" => ProjectKind::Standing,
         other => {
-            return (StatusCode::BAD_REQUEST, format!("unknown kind: {other}"))
-                .into_response()
+            return (StatusCode::BAD_REQUEST, format!("unknown kind: {other}")).into_response()
         }
     };
     if body.name.trim().is_empty() {
@@ -228,9 +231,9 @@ async fn create_kr_handler(
         id,
         title: body.title,
         stance: KrStance::Green,
-        created: chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string(),
+        created: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        labels: Vec::new(),
+        done: false,
     };
     if let Err(e) = kr.save(&dir, &name) {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
@@ -364,9 +367,7 @@ async fn update_task_handler(
         dirty = true;
     }
     if dirty {
-        task.updated = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        task.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         if let Err(e) = task.save(&dir, &name) {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
         }
@@ -410,8 +411,7 @@ async fn dispatch_task_handler(
         Some(id) => match state.hosts.find(&id) {
             Some(h) => h,
             None => {
-                return (StatusCode::BAD_REQUEST, format!("unknown host: {id}"))
-                    .into_response()
+                return (StatusCode::BAD_REQUEST, format!("unknown host: {id}")).into_response()
             }
         },
         None => match state.hosts.hosts.first() {
@@ -435,8 +435,8 @@ async fn dispatch_task_handler(
         .map(|r| r.command)
         .unwrap_or_else(|_| "claude".to_string());
 
-    let title_quoted = serde_json::to_string(&task.title)
-        .unwrap_or_else(|_| format!("\"task #{id}\""));
+    let title_quoted =
+        serde_json::to_string(&task.title).unwrap_or_else(|_| format!("\"task #{id}\""));
     let agent_cmd = format!("{} -p {}", role_command, title_quoted);
     let session = session_name(&project_name, &task.role);
 
@@ -496,11 +496,7 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST exec failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("exec on {}: {e}", host.id),
-            )
-                .into_response();
+            return (StatusCode::BAD_GATEWAY, format!("exec on {}: {e}", host.id)).into_response();
         }
     };
     if !exec_resp.status().is_success() {
@@ -550,10 +546,7 @@ async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostSummary>> {
     Json(summaries)
 }
 
-async fn proxy_sessions(
-    AxumPath(id): AxumPath<String>,
-    State(state): State<AppState>,
-) -> Response {
+async fn proxy_sessions(AxumPath(id): AxumPath<String>, State(state): State<AppState>) -> Response {
     proxy_get(&state, &id, "/sessions").await
 }
 
@@ -574,13 +567,7 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
     };
     let url = format!("{}{}", host.base_url(), path);
 
-    match state
-        .http
-        .get(&url)
-        .bearer_auth(&host.api_key)
-        .send()
-        .await
-    {
+    match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(resp) => {
             let status = resp.status();
             let mut headers = HeaderMap::new();
