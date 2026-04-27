@@ -28,9 +28,7 @@ pub use session::{Session, SessionTokenPlaintext, SESSION_TTL};
 pub use setup_token::{PlaintextToken, SetupToken};
 pub use state::AuthState;
 pub use store::AuthStore;
-pub use webauthn::{
-    encode_credential_id, ChallengeId, VerifiedAuthentication, WebAuthnService,
-};
+pub use webauthn::{encode_credential_id, ChallengeId, VerifiedAuthentication, WebAuthnService};
 
 /// Re-export the webauthn-rs wire types the binary crate needs to shape
 /// its HTTP request/response bodies. Keeping these behind sipag-core's

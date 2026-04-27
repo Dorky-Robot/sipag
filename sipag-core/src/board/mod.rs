@@ -18,10 +18,10 @@ mod project;
 mod role;
 mod task;
 
+pub use key_result::{KeyResult, KrStance};
 pub use project::{Project, ProjectKind};
 pub use role::Role;
 pub use task::{Task, TaskStatus};
-pub use key_result::{KeyResult, KrStance};
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};

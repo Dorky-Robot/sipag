@@ -11,9 +11,7 @@ use super::atomic_write;
 /// results and outcome-driven tasks. `Standing` is for perpetual
 /// upkeep — architecture reviews, dep audits, one-off firefights —
 /// work that doesn't ladder up to an outcome.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProjectKind {
     #[default]
@@ -94,8 +92,11 @@ mod tests {
         let path = dir.path().join("projects/legacy/project.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // TOML without `kind` — represents projects from before this field existed.
-        std::fs::write(&path, "name = \"legacy\"\nrepo = \"a/b\"\nstatuses = [\"todo\"]\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "name = \"legacy\"\nrepo = \"a/b\"\nstatuses = [\"todo\"]\n",
+        )
+        .unwrap();
 
         let loaded = Project::load(dir.path(), "legacy").unwrap();
         assert_eq!(loaded.kind, ProjectKind::Objective);

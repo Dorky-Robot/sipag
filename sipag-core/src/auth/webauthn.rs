@@ -351,8 +351,8 @@ impl Credential {
         let mut passkey = self.to_passkey()?;
         match passkey.update_credential(result) {
             Some(true) => {
-                let material = serde_json::to_vec(&passkey)
-                    .map_err(|e| AuthError::WebAuthn(e.to_string()))?;
+                let material =
+                    serde_json::to_vec(&passkey).map_err(|e| AuthError::WebAuthn(e.to_string()))?;
                 Ok(Some(Credential {
                     public_key: material,
                     counter: result.counter(),

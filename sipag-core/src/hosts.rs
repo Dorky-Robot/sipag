@@ -100,7 +100,10 @@ apiKey = "k3"
 
         let cfg = HostsConfig::load_from(&path).unwrap();
         assert_eq!(cfg.hosts.len(), 3);
-        assert_eq!(cfg.find("mini").unwrap().base_url(), "https://katulong-mini.felixflor.es");
+        assert_eq!(
+            cfg.find("mini").unwrap().base_url(),
+            "https://katulong-mini.felixflor.es"
+        );
         assert_eq!(cfg.find("prime").unwrap().api_key, "k2");
         assert!(cfg.find("missing").is_none());
     }

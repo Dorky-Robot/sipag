@@ -14,9 +14,7 @@ use std::path::{Path, PathBuf};
 use super::atomic_write;
 
 /// Traffic light for a key result.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KrStance {
     #[default]
@@ -61,6 +59,17 @@ pub struct KeyResult {
     #[serde(default)]
     pub stance: KrStance,
     pub created: String,
+    /// Free-form labels driving worker choreography
+    /// (e.g. `research`, `expand`, `attention`, `priority`, `blocked`,
+    /// `archive`, `done`). Workers register against label triggers; the
+    /// scheduler matches and dispatches.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Convenience boolean — closes the KR for board purposes without
+    /// changing stance. Stance still drives the stoplight; this is the
+    /// "checked off" mark.
+    #[serde(default)]
+    pub done: bool,
 }
 
 impl KeyResult {
@@ -115,7 +124,12 @@ impl KeyResult {
     /// Next free id for a new KR in this project.
     pub fn next_id(sipag_dir: &Path, project: &str) -> Result<u64> {
         let existing = Self::list(sipag_dir, project)?;
-        Ok(existing.iter().map(|k| k.id).max().map(|m| m + 1).unwrap_or(1))
+        Ok(existing
+            .iter()
+            .map(|k| k.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1))
     }
 
     /// Delete a KR file. Returns Ok(()) when it's already gone.
@@ -174,6 +188,8 @@ mod tests {
             title: "Cmd+/ launches sipag fast enough to feel native".to_string(),
             stance: KrStance::Yellow,
             created: "2026-04-25T00:00:00Z".to_string(),
+            labels: vec!["research".to_string(), "priority".to_string()],
+            done: false,
         };
         kr.save(dir.path(), "test").unwrap();
 
@@ -184,6 +200,42 @@ mod tests {
             loaded.title,
             "Cmd+/ launches sipag fast enough to feel native"
         );
+        assert_eq!(loaded.labels, vec!["research", "priority"]);
+        assert!(!loaded.done);
+    }
+
+    #[test]
+    fn labels_and_done_default_when_missing() {
+        // Pre-existing TOML files (before labels/done were added) must
+        // still load. Both new fields use serde defaults so legacy KRs
+        // come back with empty labels and `done = false`.
+        let dir = setup();
+        let path = dir.path().join("projects/test/key-results/007.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "id = 7\ntitle = \"legacy KR\"\nstance = \"yellow\"\ncreated = \"2026-01-01T00:00:00Z\"\n",
+        )
+        .unwrap();
+        let kr = KeyResult::load(dir.path(), "test", 7).unwrap();
+        assert!(kr.labels.is_empty());
+        assert!(!kr.done);
+    }
+
+    #[test]
+    fn done_round_trip() {
+        let dir = setup();
+        let kr = KeyResult {
+            id: 2,
+            title: "ship".to_string(),
+            stance: KrStance::Done,
+            created: "2026-04-25T00:00:00Z".to_string(),
+            labels: vec![],
+            done: true,
+        };
+        kr.save(dir.path(), "test").unwrap();
+        let loaded = KeyResult::load(dir.path(), "test", 2).unwrap();
+        assert!(loaded.done);
     }
 
     #[test]
@@ -197,6 +249,8 @@ mod tests {
                 title: title.to_string(),
                 stance: KrStance::Green,
                 created: "2026-04-25T00:00:00Z".to_string(),
+                labels: vec![],
+                done: false,
             }
             .save(dir.path(), "test")
             .unwrap();
@@ -217,6 +271,8 @@ mod tests {
             title: "first".to_string(),
             stance: KrStance::Green,
             created: "2026-04-25T00:00:00Z".to_string(),
+            labels: vec![],
+            done: false,
         }
         .save(dir.path(), "test")
         .unwrap();

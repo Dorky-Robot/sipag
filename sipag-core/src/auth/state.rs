@@ -606,9 +606,10 @@ mod tests {
     fn consume_setup_token_stamps_fields_and_is_idempotent() {
         let (_, t) = issue_token(0, 1000);
         let id = t.id.clone();
-        let s = AuthState::new()
-            .add_setup_token(t)
-            .consume_setup_token(&id, "cred-1", epoch_plus(500));
+        let s =
+            AuthState::new()
+                .add_setup_token(t)
+                .consume_setup_token(&id, "cred-1", epoch_plus(500));
         let consumed = s.find_setup_token(&id).unwrap();
         assert_eq!(consumed.used_at, Some(epoch_plus(500)));
         assert_eq!(consumed.credential_id.as_deref(), Some("cred-1"));
