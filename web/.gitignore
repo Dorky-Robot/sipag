@@ -1,5 +1,11 @@
 node_modules/
-public/js/
+# Ignore everything in public/js/ by default, then un-ignore the
+# specific files we vendor by hand. Note: the rule can't have a
+# trailing slash or the negations below are silently dropped.
+public/js/*
+!public/js/htmx.min.js
+!public/js/transport.js
+!public/js/sipag-live.js
 .shadow-cljs/
 .cpcache/
 *.log
