@@ -49,10 +49,27 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/ws", get(ws_handler))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("?");
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("?");
+    tracing::info!(host = %host, origin = %origin, "ws: upgrade requested");
     ws.max_message_size(MAX_FRAME_BYTES)
         .max_frame_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state))
+        .on_upgrade(move |socket| async move {
+            tracing::info!("ws: socket upgraded");
+            handle_socket(socket, state).await;
+            tracing::info!("ws: socket closed");
+        })
 }
 
 /// One incoming client message. `serde(tag = "action")` makes the

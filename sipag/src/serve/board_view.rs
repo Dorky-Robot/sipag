@@ -28,6 +28,22 @@ pub struct BoardSnapshot {
     /// host_id → vec of session names the host reports running.
     pub sessions: BTreeMap<String, Vec<String>>,
     pub error: Option<String>,
+    /// Process-lifetime token used as a `?v=` cache-buster on JS asset
+    /// URLs. Changes on every server restart so iPad Safari (and other
+    /// aggressive HTTP caches) can't keep serving stale transport.js.
+    pub boot_id: String,
+}
+
+/// Boot id assigned once per process. Used to cache-bust JS assets.
+fn boot_id() -> &'static str {
+    use std::sync::OnceLock;
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().to_string())
+            .unwrap_or_else(|_| "0".into())
+    })
 }
 
 pub struct ProjectView {
@@ -57,6 +73,7 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
                 hosts: state.hosts.hosts.iter().map(host_summary).collect(),
                 sessions: BTreeMap::new(),
                 error: Some(format!("{e}")),
+                boot_id: boot_id().to_string(),
             }
         }
     };
@@ -72,6 +89,7 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
         hosts: state.hosts.hosts.iter().map(host_summary).collect(),
         sessions,
         error: None,
+        boot_id: boot_id().to_string(),
     }
 }
 
@@ -171,8 +189,12 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 title { "sipag" }
                 link rel="stylesheet" href="/style.css";
                 script src="/js/htmx.min.js" {}
-                script src="/js/transport.js" {}
-                script src="/js/sipag-live.js" defer {}
+                // Cache-bust the JS each restart so iPad Safari can't
+                // serve stale copies. The version is the server's start
+                // time as millis (set in build_state).
+                script src=(format!("/js/transport.js?v={}", snap.boot_id)) {}
+                script src=(format!("/js/sipag-live.js?v={}", snap.boot_id)) defer {}
+                script src=(format!("/js/sipag-debug.js?v={}", snap.boot_id)) defer {}
             }
             body {
                 #app {
@@ -180,10 +202,18 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                     (attention_strip(snap))
                     (board_main(snap))
                     (idea_box(&snap.projects, false))
-                    // Mount points for HTMX OOB swaps and live (WS) updates.
+                    // Mount points for HTMX OOB swaps and live (WS)
+                    // updates. The ticker also polls every 5s as a
+                    // fallback so iPad Safari (which silently blocks
+                    // WebSockets to this origin under privacy mode)
+                    // still gets recent worker activity, just delayed.
                     div #dispatch-picker-mount {}
                     div #toast-mount {}
-                    div #ticker.ticker {}
+                    div
+                        #ticker.ticker
+                        "hx-get"="/htmx/ticker"
+                        "hx-trigger"="every 5s [!document.activeElement || !document.activeElement.matches('input,textarea')]"
+                        "hx-swap"="innerHTML" {}
                 }
                 script {
                     (PreEscaped(INLINE_JS))
@@ -1107,7 +1137,12 @@ pub fn attention_strip(snap: &BoardSnapshot) -> Markup {
         }
     }
     html! {
-        div #attention-strip class=(if rows.is_empty() { "attention-strip empty" } else { "attention-strip" }) {
+        div
+            #attention-strip
+            class=(if rows.is_empty() { "attention-strip empty" } else { "attention-strip" })
+            "hx-get"="/htmx/attention"
+            "hx-trigger"="every 5s [!document.activeElement || !document.activeElement.matches('input,textarea')]"
+            "hx-swap"="outerHTML" {
             @if rows.is_empty() {
                 span.subtle { "all clear" }
             } @else {

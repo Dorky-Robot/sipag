@@ -10,6 +10,9 @@
 (function () {
   if (!window.sipagTransport) return;
   const t = window.sipagTransport.connect("/ws");
+  // Make the live transport reachable from the debug panel so it can
+  // expose URL + lastClose info without re-connecting.
+  window.sipagLive = { transport: t };
 
   const TICKER_MAX = 5;
 

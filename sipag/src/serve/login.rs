@@ -80,9 +80,19 @@ fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<
            font-size: 14px; cursor: pointer; }}
   button:hover {{ filter: brightness(1.1); }}
   button:disabled {{ opacity: 0.5; cursor: progress; }}
+  input {{ width: 100%; box-sizing: border-box;
+           background: #14181d; border: 1px solid #262c34;
+           color: #e6e8eb; padding: 10px 12px; border-radius: 6px;
+           font: inherit; font-family: ui-monospace, monospace;
+           font-size: 13px; margin: 8px 0 12px; }}
+  input:focus {{ border-color: #7aa2f7; outline: none; }}
+  .alt {{ margin-top: 28px; padding-top: 20px;
+          border-top: 1px solid #262c34; }}
+  .alt .subtle {{ color: #9aa3ae; font-size: 13px; margin: 0 0 4px; }}
   .err {{ color: #f7768e; margin-top: 12px;
          font-family: ui-monospace, monospace; font-size: 13px;
          word-break: break-word; }}
+  .subtle {{ color: #9aa3ae; }}
 </style>
 </head>
 <body>
@@ -184,8 +194,25 @@ fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<
     }});
   }}
 
-  async function doPair() {{
-    const begin = await jpost('/api/auth/pair/start', {{ setup_token: SETUP_TOKEN }});
+  // Extract a setup token from a freeform string. Accepts either a
+  // raw 64-hex token, or a full URL like
+  //   https://sipag.felixflor.es/login?setup_token=<hex>
+  // (which is what `pbcopy` from the host produces).
+  function extractToken(raw) {{
+    if (!raw) return '';
+    raw = raw.trim();
+    try {{
+      const u = new URL(raw);
+      const v = u.searchParams.get('setup_token');
+      if (v) return v.trim();
+    }} catch (_) {{ /* not a URL */ }}
+    return raw;
+  }}
+
+  async function doPair(token) {{
+    const tok = token || SETUP_TOKEN;
+    if (!tok) throw new Error('paste a setup token first');
+    const begin = await jpost('/api/auth/pair/start', {{ setup_token: tok }});
     const opts = buildPublicKeyOptions(begin.options, false);
     const cred = await navigator.credentials.create({{ publicKey: opts }});
     await jpost('/api/auth/pair/finish', {{
@@ -193,6 +220,12 @@ fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<
       setup_token_id: begin.setup_token_id,
       response: attestation(cred),
     }});
+  }}
+
+  function pairFromInput() {{
+    const input = document.getElementById('paste-token');
+    const token = extractToken(input ? input.value : '');
+    return doPair(token);
   }}
 
   if (btn) {{
@@ -204,6 +237,7 @@ fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<
         if (action === 'register') await doRegister();
         else if (action === 'login') await doLogin();
         else if (action === 'pair') await doPair();
+        else if (action === 'pair-input') await pairFromInput();
         window.location = '/';
       }} catch (e) {{
         btn.disabled = false;
@@ -211,6 +245,23 @@ fn render_page(access: AccessMethod, has_credentials: bool, setup_token: Option<
       }}
     }});
   }}
+
+  // Also bind any extra buttons on the page (e.g., the paste-token
+  // pair button when the primary action is a passkey login).
+  document.querySelectorAll('[data-action="pair-input"]').forEach((b) => {{
+    if (b === btn) return;
+    b.addEventListener('click', async () => {{
+      b.disabled = true;
+      errEl.textContent = '';
+      try {{
+        await pairFromInput();
+        window.location = '/';
+      }} catch (e) {{
+        b.disabled = false;
+        errEl.textContent = String(e && e.message || e);
+      }}
+    }});
+  }});
 </script>
 </body>
 </html>"#,
@@ -258,6 +309,14 @@ fn render_body(intent: &Intent<'_>) -> String {
 <h1>Sign in</h1>
 <p>Use the passkey enrolled with this sipag.</p>
 <button id="action" data-action="login">Sign in with passkey</button>
+
+<div class="alt">
+  <p class="subtle">or pair this device with a setup token</p>
+  <input id="paste-token" type="text" inputmode="text" autocomplete="off"
+         placeholder="paste setup token or URL">
+  <button data-action="pair-input">Pair this device</button>
+</div>
+
 <div class="err" id="err"></div>
 "#
         .to_string(),
@@ -272,7 +331,12 @@ fn render_body(intent: &Intent<'_>) -> String {
 
         Intent::Bootstrap => r#"
 <h1>No passkeys yet</h1>
-<p>This sipag isn't bootstrapped. On the host running sipag, open it on localhost to register the first passkey, or paste a setup token URL minted from another device.</p>
+<p>This sipag isn't bootstrapped. On the host running sipag, mint a setup token (the host CLI / web UI both have this) and paste it here, or open the host on localhost to register the first passkey directly.</p>
+
+<input id="paste-token" type="text" inputmode="text" autocomplete="off"
+       placeholder="paste setup token or URL">
+<button id="action" data-action="pair-input">Pair this device</button>
+
 <div class="err" id="err"></div>
 "#
         .to_string(),

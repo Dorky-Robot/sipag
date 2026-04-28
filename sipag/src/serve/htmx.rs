@@ -80,6 +80,16 @@ pub fn routes() -> Router<AppState> {
         .route("/htmx/attention", get(attention_fragment))
         .route("/htmx/ticker", get(ticker_fragment))
         .route("/htmx/insights/hint", get(insights_hint))
+        .route("/htmx/debug/topics", get(debug_topics))
+}
+
+/// Lists every known pubsub topic. Used by the in-page debug panel
+/// to show which streams are live; the panel then subscribes to each
+/// over the WebSocket so the user can watch traffic without a
+/// browser inspector.
+async fn debug_topics(State(state): State<AppState>) -> Response {
+    let topics = state.broker.list_topics().unwrap_or_default();
+    axum::Json(topics).into_response()
 }
 
 // ── shared response builders ────────────────────────────────────────

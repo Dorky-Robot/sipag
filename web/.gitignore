@@ -6,6 +6,7 @@ public/js/*
 !public/js/htmx.min.js
 !public/js/transport.js
 !public/js/sipag-live.js
+!public/js/sipag-debug.js
 .shadow-cljs/
 .cpcache/
 *.log
