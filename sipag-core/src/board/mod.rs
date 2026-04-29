@@ -14,11 +14,13 @@
 //! ```
 
 mod key_result;
+mod observation;
 mod project;
 mod role;
 mod task;
 
 pub use key_result::{KeyResult, KrStance};
+pub use observation::{Observation, MISC_PROJECT};
 pub use project::{Project, ProjectKind};
 pub use role::Role;
 pub use task::{Task, TaskStatus};

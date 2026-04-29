@@ -56,6 +56,10 @@ pub struct ChatOptions {
     pub temperature: f32,
     /// Max tokens to predict. `None` lets ollama decide.
     pub num_predict: Option<u32>,
+    /// Bearer token for the upstream. `None` means no `Authorization`
+    /// header. Used when `OLLAMA_HOST` points at a katulong-style
+    /// authenticated bridge instead of a raw ollama daemon.
+    pub auth_bearer: Option<String>,
 }
 
 impl Default for ChatOptions {
@@ -64,6 +68,7 @@ impl Default for ChatOptions {
             model: env_model(),
             temperature: 0.7,
             num_predict: None,
+            auth_bearer: env_auth(),
         }
     }
 }
@@ -88,61 +93,105 @@ pub fn env_model() -> String {
     std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
+/// Resolve the bearer token for an authenticated bridge from env.
+///
+/// `OLLAMA_AUTH` holds either the token itself or `@<path>` to point at
+/// a file (curl convention). Whitespace is trimmed. Returns `None` when
+/// unset or empty so callers can simply skip the `Authorization` header.
+pub fn env_auth() -> Option<String> {
+    let raw = std::env::var("OLLAMA_AUTH").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(path) = trimmed.strip_prefix('@') {
+        let expanded = expand_tilde(path);
+        let contents = std::fs::read_to_string(&expanded).ok()?;
+        let token = contents.trim().to_string();
+        if token.is_empty() {
+            return None;
+        }
+        return Some(token);
+    }
+    Some(trimmed.to_string())
+}
+
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     stream: bool,
-    options: ChatRequestOptions,
-}
-
-#[derive(Serialize)]
-struct ChatRequestOptions {
     temperature: f32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    num_predict: Option<u32>,
+    #[serde(rename = "max_tokens", skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Deserialize)]
-struct ChatResponse {
+struct SseChunk {
     #[serde(default)]
-    message: Option<ResponseMessage>,
+    choices: Vec<SseChoice>,
     #[serde(default)]
-    error: Option<String>,
+    error: Option<SseError>,
 }
 
 #[derive(Deserialize)]
-struct ResponseMessage {
+struct SseChoice {
     #[serde(default)]
-    content: String,
+    delta: SseDelta,
 }
 
-/// Send a chat request to ollama and return the assistant's text.
+#[derive(Deserialize, Default)]
+struct SseDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SseError {
+    #[serde(default)]
+    message: String,
+}
+
+/// Send a chat request and return the assistant's text.
 ///
-/// Uses the supplied `reqwest::Client` and `host` (e.g.
-/// `http://localhost:11434`). The `host` is whatever `OLLAMA_HOST`
-/// resolves to in the caller; we don't read env here so injection is
-/// cheap in tests.
+/// We talk to the OpenAI-compatible endpoint (`/v1/chat/completions`)
+/// rather than ollama's native `/api/chat`. Both ollama and any future
+/// drop-in replacement (Anthropic, Grok, hosted inference) speak this
+/// shape, and — crucially — the response is `Content-Type:
+/// text/event-stream`, which Cloudflare and other CDNs recognize as
+/// "do not buffer." Ollama's NDJSON path triggers the 100s no-first-
+/// byte timeout because the edge holds the response.
 pub async fn chat(
     http: &reqwest::Client,
     host: &str,
     messages: Vec<ChatMessage>,
     opts: ChatOptions,
 ) -> Result<String, LlmError> {
-    let url = format!("{}/api/chat", host.trim_end_matches('/'));
+    use futures_util::StreamExt;
+
+    let url = format!("{}/v1/chat/completions", host.trim_end_matches('/'));
     let req = ChatRequest {
         model: &opts.model,
         messages: &messages,
-        stream: false,
-        options: ChatRequestOptions {
-            temperature: opts.temperature,
-            num_predict: opts.num_predict,
-        },
+        stream: true,
+        temperature: opts.temperature,
+        max_tokens: opts.num_predict,
     };
 
-    let resp = http
-        .post(&url)
-        .json(&req)
+    let mut builder = http.post(&url).json(&req);
+    if let Some(token) = opts.auth_bearer.as_deref() {
+        builder = builder.bearer_auth(token);
+    }
+    let resp = builder
         .send()
         .await
         .map_err(|e| LlmError::Transport(e.to_string()))?;
@@ -152,17 +201,48 @@ pub async fn chat(
         let body = resp.text().await.unwrap_or_default();
         return Err(LlmError::Http(status.as_u16(), body));
     }
-    let body: ChatResponse = resp
-        .json()
-        .await
-        .map_err(|e| LlmError::BadResponse(e.to_string()))?;
-    if let Some(err) = body.error {
-        return Err(LlmError::BadResponse(err));
+
+    // Parse the SSE stream. Frames are `data: <json>\n\n`, terminated
+    // by `data: [DONE]`. Lines starting with `:` are keepalive comments
+    // (ignored). Buffer partial lines across chunks so we don't crash
+    // on a frame split mid-event.
+    let mut stream = resp.bytes_stream();
+    let mut buf = String::new();
+    let mut out = String::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| LlmError::Transport(e.to_string()))?;
+        buf.push_str(std::str::from_utf8(&bytes).map_err(|e| LlmError::BadResponse(e.to_string()))?);
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].to_string();
+            buf.drain(..=idx);
+            let trimmed = line.trim_end_matches('\r');
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                continue;
+            }
+            let Some(payload) = trimmed.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload == "[DONE]" {
+                buf.clear();
+                break;
+            }
+            let frame: SseChunk = serde_json::from_str(payload)
+                .map_err(|e| LlmError::BadResponse(format!("bad frame: {e}")))?;
+            if let Some(err) = frame.error {
+                return Err(LlmError::BadResponse(err.message));
+            }
+            for choice in frame.choices {
+                if let Some(content) = choice.delta.content {
+                    out.push_str(&content);
+                }
+            }
+        }
     }
-    let msg = body
-        .message
-        .ok_or_else(|| LlmError::BadResponse("missing message".into()))?;
-    Ok(msg.content)
+    if out.is_empty() {
+        return Err(LlmError::BadResponse("no content in stream".into()));
+    }
+    Ok(out)
 }
 
 /// Convenience: read host/model from env and call `chat`.
@@ -189,20 +269,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_chat_response_shape() {
-        // The JSON shape we care about — non-streaming /api/chat reply.
-        let raw = r#"{"model":"llama3.1:8b","created_at":"2026-04-26T00:00:00Z","message":{"role":"assistant","content":"hello there"},"done":true}"#;
-        let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
-        let msg = parsed.message.expect("message present");
-        assert_eq!(msg.content, "hello there");
+    fn parses_sse_chunk_shape() {
+        // One frame from /v1/chat/completions with stream=true.
+        let raw = r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}"#;
+        let parsed: SseChunk = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.choices.len(), 1);
+        assert_eq!(parsed.choices[0].delta.content.as_deref(), Some("hello"));
     }
 
     #[test]
-    fn parses_error_response() {
-        let raw = r#"{"error":"model not found"}"#;
-        let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
-        assert!(parsed.message.is_none());
-        assert_eq!(parsed.error.as_deref(), Some("model not found"));
+    fn parses_sse_error_chunk() {
+        let raw = r#"{"error":{"message":"model not found","type":"not_found"}}"#;
+        let parsed: SseChunk = serde_json::from_str(raw).unwrap();
+        assert!(parsed.choices.is_empty());
+        assert_eq!(parsed.error.unwrap().message, "model not found");
     }
 
     #[test]

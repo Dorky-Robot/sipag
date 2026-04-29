@@ -478,6 +478,95 @@ html, body {
 .form-cancel { color: var(--dim); }
 .form-cancel:hover { color: var(--text); }
 
+/* ── label chips + quick toggles ───────────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chip-x {
+  background: transparent;
+  border: none;
+  color: var(--subtle);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 2px;
+  line-height: 1;
+}
+.chip-x:hover { color: var(--text); }
+
+.label-add {
+  display: inline-flex;
+  margin: 0;
+}
+.label-add input {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--dim);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  width: 70px;
+}
+.label-add input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--text);
+  width: 140px;
+}
+
+/* `<details>` wrapper around the quick-toggle row. Collapsed by
+   default — tap the small "labels" affordance to expand. Keeps the
+   per-item card from drowning in seven default-styled buttons. */
+details.quick-toggle { display: inline-block; margin-left: 6px; }
+details.quick-toggle > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--subtle);
+  font-family: var(--mono);
+  padding: 1px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  display: inline-block;
+}
+details.quick-toggle > summary::-webkit-details-marker { display: none; }
+details.quick-toggle > summary:hover { color: var(--text); border-style: solid; }
+details.quick-toggle[open] > summary {
+  color: var(--text);
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.quick-labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+}
+.quick-label {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--mono);
+}
+.quick-label:hover { color: var(--text); border-color: var(--accent); }
+.quick-label.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(122, 162, 247, 0.08);
+}
+
 /* ── idea box (bottom drawer) ───────────────────────── */
 
 .idea-box {
@@ -578,3 +667,46 @@ html, body {
 .hint-learning .hint-cat { color: var(--green); }
 .hint-title { color: var(--text); font-size: 13px; line-height: 1.35; }
 .hint-meta { font-size: 11px; color: var(--subtle); white-space: nowrap; }
+
+/* ── live activity tray (observations from katulong sessions) ──────── */
+
+.live-activity {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.live-activity > details > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.live-activity > details > summary::-webkit-details-marker { display: none; }
+.live-activity-title { font-weight: 600; color: var(--text); }
+.live-activity-body { padding: 4px 12px 10px; }
+.live-misc-header {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--dim); margin: 6px 0 4px; font-weight: 600;
+}
+.live-misc { list-style: none; margin: 0; padding: 0; }
+.live-misc.ended { opacity: 0.55; }
+.live-obs {
+  padding: 3px 0;
+  border-bottom: 1px dotted var(--border);
+}
+.live-obs:last-child { border-bottom: none; }
+.live-obs-host { color: var(--accent); }
+.live-obs-session { color: var(--text); text-decoration: none; }
+.live-obs-session:hover { text-decoration: underline; }
+.live-obs-summary { color: var(--dim); }
+.live-obs-kr { color: var(--accent); }
+.live-ended > summary {
+  cursor: pointer; font-size: 11px; color: var(--dim);
+  padding: 4px 0 2px; list-style: none;
+}
+.live-ended > summary::-webkit-details-marker { display: none; }

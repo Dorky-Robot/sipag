@@ -13,7 +13,7 @@
 use crate::serve::insights::{self, Insight};
 use crate::serve::workers::{publish_progress, ItemKind, Worker, WorkerCtx, WorkerItem};
 use anyhow::Result;
-use sipag_core::llm::{chat, env_host, env_model, ChatMessage, ChatOptions};
+use sipag_core::llm::{chat, env_host, ChatMessage, ChatOptions};
 use std::collections::BTreeSet;
 
 /// Worker name surfaced in events.
@@ -139,15 +139,19 @@ async fn synthesize(
     primary: &[Insight],
     secondary: &[Insight],
 ) -> Result<String> {
+    // Cap context size aggressively. gemma4:31b's prefill on long prompts
+    // can exceed Cloudflare's 100s edge timeout before any response byte
+    // ships, and the bridge keepalive only kicks in after upstream sends
+    // its response headers — too late. 8 insights × 160 chars keeps the
+    // prefill comfortably under that budget.
     let mut bullets = String::new();
-    for ins in primary.iter().chain(secondary.iter()).take(15) {
+    for ins in primary.iter().chain(secondary.iter()).take(8) {
         bullets.push_str(&format!(
-            "- [{cat}] {title} ({sha}, {date})\n  {body}\n",
+            "- [{cat}] {title} ({sha})\n  {body}\n",
             cat = ins.category,
             title = ins.title,
             sha = ins.commit_sha.chars().take(7).collect::<String>(),
-            date = ins.commit_date,
-            body = first_n_chars(&ins.body, 240),
+            body = first_n_chars(&ins.body, 160),
         ));
     }
 
@@ -171,10 +175,16 @@ async fn synthesize(
         ChatMessage::user(user_prompt),
     ];
 
+    // gemma4:31b is a thinking model — its `thinking` tokens count
+    // against `num_predict`. With ~1500 tokens of prompt context (15
+    // insights of up to 240 chars each plus system prompt), thinking
+    // can run 1000-3000 tokens before any visible content emerges.
+    // 4000 leaves comfortable room for thinking + the 4-8 short bullet
+    // points requested.
     let opts = ChatOptions {
-        model: env_model(),
         temperature: 0.4,
-        num_predict: Some(800),
+        num_predict: Some(4000),
+        ..ChatOptions::default()
     };
     let host = env_host();
     let answer = chat(http, &host, messages, opts).await?;

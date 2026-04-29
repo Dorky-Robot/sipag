@@ -27,6 +27,10 @@ pub struct BoardSnapshot {
     pub hosts: Vec<HostSummary>,
     /// host_id → vec of session names the host reports running.
     pub sessions: BTreeMap<String, Vec<String>>,
+    /// Observations the observer task has captured. Includes both
+    /// uncategorized (`project == "misc"`) and categorized records.
+    /// Sorted by `last_seen` desc.
+    pub observations: Vec<sipag_core::board::Observation>,
     pub error: Option<String>,
     /// Process-lifetime token used as a `?v=` cache-buster on JS asset
     /// URLs. Changes on every server restart so iPad Safari (and other
@@ -72,6 +76,7 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
                 projects: Vec::new(),
                 hosts: state.hosts.hosts.iter().map(host_summary).collect(),
                 sessions: BTreeMap::new(),
+                observations: Vec::new(),
                 error: Some(format!("{e}")),
                 boot_id: boot_id().to_string(),
             }
@@ -84,10 +89,14 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
         sessions.insert(h.id.clone(), names);
     }
 
+    let observations =
+        sipag_core::board::Observation::list(&state.sipag_dir, None).unwrap_or_default();
+
     BoardSnapshot {
         projects,
         hosts: state.hosts.hosts.iter().map(host_summary).collect(),
         sessions,
+        observations,
         error: None,
         boot_id: boot_id().to_string(),
     }
@@ -187,7 +196,7 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { "sipag" }
-                link rel="stylesheet" href="/style.css";
+                link rel="stylesheet" href=(format!("/style.css?v={}", snap.boot_id));
                 script src="/js/htmx.min.js" {}
                 // Cache-bust the JS each restart so iPad Safari can't
                 // serve stale copies. The version is the server's start
@@ -200,6 +209,7 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 #app {
                     (topbar(snap))
                     (attention_strip(snap))
+                    (live_activity(snap))
                     (board_main(snap))
                     (idea_box(&snap.projects, false))
                     // Mount points for HTMX OOB swaps and live (WS)
@@ -986,23 +996,30 @@ pub fn label_chips(labels: &[String], labels_endpoint: &str) -> Markup {
 }
 
 pub fn quick_label_row(labels: &[String], labels_endpoint: &str) -> Markup {
+    // Collapse the quick-toggle row behind a <details>. Applied
+    // labels stay visible (rendered by `label_chips` separately);
+    // the quick-add picker is opt-in to keep the per-item row from
+    // being noisy.
     html! {
-        div.quick-labels {
-            @for l in QUICK_LABELS {
-                @let active = labels.iter().any(|x| x == l);
-                @let cls = if active { "quick-label active" } else { "quick-label" };
-                @let payload = if active {
-                    format!("{{\"add\":\"\",\"remove\":\"{l}\"}}")
-                } else {
-                    format!("{{\"add\":\"{l}\",\"remove\":\"\"}}")
-                };
-                button class=(cls)
-                    "hx-post"=(labels_endpoint)
-                    "hx-vals"=(payload)
-                    "hx-target"="#board"
-                    "hx-swap"="outerHTML"
-                    title={(l) " — toggle"}
-                { (l) }
+        details.quick-toggle {
+            summary { "labels" }
+            div.quick-labels {
+                @for l in QUICK_LABELS {
+                    @let active = labels.iter().any(|x| x == l);
+                    @let cls = if active { "quick-label active" } else { "quick-label" };
+                    @let payload = if active {
+                        format!("{{\"add\":\"\",\"remove\":\"{l}\"}}")
+                    } else {
+                        format!("{{\"add\":\"{l}\",\"remove\":\"\"}}")
+                    };
+                    button class=(cls)
+                        "hx-post"=(labels_endpoint)
+                        "hx-vals"=(payload)
+                        "hx-target"="#board"
+                        "hx-swap"="outerHTML"
+                        title={(l) " — toggle"}
+                    { (l) }
+                }
             }
         }
     }
@@ -1113,6 +1130,97 @@ fn discourse_row(env: &Envelope) -> Markup {
             @let _ = actor; // referenced for future styling hooks
         }
     }
+}
+
+// ── live activity (observations) ────────────────────────────────────
+
+/// Tray of katulong sessions sipag has noticed across all configured
+/// hosts. Sessions filed under `misc` are uncategorized — the
+/// categorize worker (or the user) hasn't yet mapped them to a KR.
+/// Active sessions show first; ended ones grey out below.
+pub fn live_activity(snap: &BoardSnapshot) -> Markup {
+    if snap.observations.is_empty() {
+        return html! {};
+    }
+    // Split: active misc, active categorized (rendered inline with
+    // their KRs elsewhere — show count only here), ended misc.
+    let mut active_misc = Vec::new();
+    let mut active_cat: usize = 0;
+    let mut ended: Vec<&sipag_core::board::Observation> = Vec::new();
+    for obs in &snap.observations {
+        let alive = obs.status == "active";
+        let is_misc = obs.project == sipag_core::board::MISC_PROJECT;
+        match (alive, is_misc) {
+            (true, true) => active_misc.push(obs),
+            (true, false) => active_cat += 1,
+            (false, _) => ended.push(obs),
+        }
+    }
+
+    html! {
+        section.live-activity {
+            details open[!active_misc.is_empty()] {
+                summary {
+                    span.live-activity-title { "live activity" }
+                    span.subtle {
+                        " · " (active_misc.len()) " misc · " (active_cat) " categorized · " (ended.len()) " ended"
+                    }
+                }
+                div.live-activity-body {
+                    @if !active_misc.is_empty() {
+                        h3.live-misc-header { "misc" span.subtle { " — uncategorized sessions" } }
+                        ul.live-misc {
+                            @for obs in &active_misc {
+                                (live_obs_row(obs, find_host_url(snap, &obs.host)))
+                            }
+                        }
+                    }
+                    @if !ended.is_empty() {
+                        details.live-ended {
+                            summary { "ended (" (ended.len()) ")" }
+                            ul.live-misc.ended {
+                                @for obs in &ended {
+                                    (live_obs_row(obs, find_host_url(snap, &obs.host)))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn live_obs_row(
+    obs: &sipag_core::board::Observation,
+    host_url: Option<&str>,
+) -> Markup {
+    let katulong_url = host_url.map(|u| format!("{u}/sessions/{}", obs.session));
+    html! {
+        li.live-obs data-host=(obs.host) data-session=(obs.session) {
+            span.live-obs-host { (obs.host) }
+            span.subtle { "/" }
+            @if let Some(ref u) = katulong_url {
+                a.live-obs-session href=(u) target="_blank" rel="noopener" { (obs.session) }
+            } @else {
+                span.live-obs-session { (obs.session) }
+            }
+            span.live-obs-age.subtle { " · " (relative_time(&obs.last_seen)) }
+            @if !obs.summary.is_empty() {
+                span.live-obs-summary { " · " (obs.summary) }
+            }
+            @if obs.kr_id != 0 {
+                span.live-obs-kr { " · KR#" (obs.kr_id) " in " (obs.project) }
+            }
+        }
+    }
+}
+
+fn find_host_url<'a>(snap: &'a BoardSnapshot, host_id: &str) -> Option<&'a str> {
+    snap.hosts
+        .iter()
+        .find(|h| h.id == host_id)
+        .map(|h| h.url.as_str())
 }
 
 // ── attention strip + ticker ────────────────────────────────────────

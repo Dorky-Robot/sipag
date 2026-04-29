@@ -6,7 +6,7 @@
 
 use crate::serve::workers::{publish_progress, ItemKind, Worker, WorkerCtx, WorkerItem};
 use anyhow::Result;
-use sipag_core::llm::{chat, env_host, env_model, ChatMessage, ChatOptions};
+use sipag_core::llm::{chat, env_host, ChatMessage, ChatOptions};
 use sipag_core::pubsub::Envelope;
 
 const WORKER_NAME: &str = "expand";
@@ -36,9 +36,12 @@ impl Worker for ExpandWorker {
 
         publish_progress(&ctx.broker, &item, WORKER_NAME, "generating response…");
         let opts = ChatOptions {
-            model: env_model(),
             temperature: 0.6,
-            num_predict: Some(800),
+            // Same reasoning as research worker: thinking models burn
+            // a lot of the output budget on internal reasoning. The
+            // discourse history grows over time so headroom matters.
+            num_predict: Some(4000),
+            ..ChatOptions::default()
         };
         let host = env_host();
         let response = match chat(&ctx.http, &host, messages, opts).await {

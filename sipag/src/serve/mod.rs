@@ -16,6 +16,7 @@ mod error;
 mod htmx;
 mod insights;
 mod login;
+mod observers;
 mod state;
 mod tokens;
 mod workers;
@@ -71,8 +72,14 @@ async fn async_run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Resul
         );
     }
 
+    // Cloudflare's Browser Integrity Check 403s requests whose UA looks
+    // like a non-browser library (e.g. reqwest's default
+    // `reqwest/x.y.z`). When `OLLAMA_HOST` points at a tunnel-fronted
+    // bridge, those checks fire — keep "Mozilla" in the UA so we get
+    // through while still identifying ourselves as sipag.
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
+        .user_agent(concat!("Mozilla/5.0 sipag/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("failed to build reqwest client")?;
 
@@ -85,6 +92,11 @@ async fn async_run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Resul
     if workers_enabled {
         info!("workers enabled — scheduler will dispatch label-driven workers");
         workers::spawn_scheduler(state.clone());
+        // Observers track katulong sessions across all configured hosts
+        // and surface them as Observations under `misc`. Same gate as
+        // the worker scheduler so a `serve` without `--workers` is a
+        // pure read-only board.
+        observers::spawn(state.clone());
     } else {
         info!("workers disabled — pass --workers to enable autonomous dispatch");
     }

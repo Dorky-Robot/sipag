@@ -2645,6 +2645,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "futures-util",
  "log",
  "rand_core 0.6.4",
  "reqwest",

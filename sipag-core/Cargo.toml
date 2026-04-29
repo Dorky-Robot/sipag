@@ -16,7 +16,8 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # llm.rs talks to ollama over HTTP. reqwest is already pulled in
 # transitively through the binary crate; declaring it here keeps the
 # lib self-contained.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = { version = "0.3", default-features = false }
 # Auth subsystem — ported from katulong-auth.
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "fs", "rt", "macros"] }
