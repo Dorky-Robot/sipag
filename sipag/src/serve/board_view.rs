@@ -1195,22 +1195,43 @@ fn live_obs_row(
     obs: &sipag_core::board::Observation,
     host_url: Option<&str>,
 ) -> Markup {
-    let katulong_url = host_url.map(|u| format!("{u}/sessions/{}", obs.session));
+    // `?s=<name>` is katulong's deep-link primitive — its boot path
+    // (app.js around line 97) reads the param and calls
+    // `activateSession(name)` if a tile already exists for it, or
+    // creates one and makes it active otherwise. So clicking always
+    // resolves to the canonical "this tile is now front-and-center"
+    // state regardless of whether the session was already open.
+    //
+    // We deliberately do NOT set `target="_blank"`. On iOS/macOS,
+    // when the user has installed katulong's domain as a PWA, the OS
+    // routes plain in-scope navigations to the PWA; `target="_blank"`
+    // forces the external-browser path and defeats that. Without a
+    // target, devices without the PWA installed still get a sensible
+    // browser-tab open. (Sipag PWA users get sent OUT of the sipag
+    // PWA — the link is to a different origin, so this is the right
+    // behavior; we don't want sipag to host katulong as a fragment.)
+    let katulong_url = host_url.map(|u| format!("{u}/?s={}", urlencode(&obs.session)));
+    // The whole row is the tap target (better than a tiny inline link
+    // on touch). Anchor wraps everything so the OS still sees an
+    // ordinary navigation — keeping the PWA-routing behavior intact.
+    let inner = html! {
+        span.live-obs-host { (obs.host) }
+        span.subtle { "/" }
+        span.live-obs-session { (obs.session) }
+        span.live-obs-age.subtle { " · " (relative_time(&obs.last_seen)) }
+        @if !obs.summary.is_empty() {
+            span.live-obs-summary { " · " (obs.summary) }
+        }
+        @if obs.kr_id != 0 {
+            span.live-obs-kr { " · KR#" (obs.kr_id) " in " (obs.project) }
+        }
+    };
     html! {
         li.live-obs data-host=(obs.host) data-session=(obs.session) {
-            span.live-obs-host { (obs.host) }
-            span.subtle { "/" }
             @if let Some(ref u) = katulong_url {
-                a.live-obs-session href=(u) target="_blank" rel="noopener" { (obs.session) }
+                a.live-obs-link href=(u) rel="noopener" { (inner) }
             } @else {
-                span.live-obs-session { (obs.session) }
-            }
-            span.live-obs-age.subtle { " · " (relative_time(&obs.last_seen)) }
-            @if !obs.summary.is_empty() {
-                span.live-obs-summary { " · " (obs.summary) }
-            }
-            @if obs.kr_id != 0 {
-                span.live-obs-kr { " · KR#" (obs.kr_id) " in " (obs.project) }
+                span.live-obs-link { (inner) }
             }
         }
     }

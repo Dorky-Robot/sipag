@@ -696,13 +696,35 @@ details.quick-toggle[open] > summary {
 .live-misc { list-style: none; margin: 0; padding: 0; }
 .live-misc.ended { opacity: 0.55; }
 .live-obs {
-  padding: 3px 0;
   border-bottom: 1px dotted var(--border);
 }
 .live-obs:last-child { border-bottom: none; }
+/* Whole-row tap target. A tiny inline link inside a paragraph is too
+   small to hit reliably on touch, so the anchor wraps the entire row.
+   Hit cues: subtle row-level :active background + an arrow on the
+   right so users see it's tappable. */
+.live-obs-link {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  text-decoration: none;
+  color: inherit;
+  -webkit-tap-highlight-color: rgba(122, 162, 247, 0.18);
+  position: relative;
+  min-height: 28px;
+}
+.live-obs-link::after {
+  content: "↗";
+  margin-left: auto;
+  color: var(--dim);
+  padding-left: 12px;
+  font-size: 14px;
+}
+.live-obs-link:hover { background: var(--bg); }
+.live-obs-link:active { background: rgba(122, 162, 247, 0.12); }
 .live-obs-host { color: var(--accent); }
-.live-obs-session { color: var(--text); text-decoration: none; }
-.live-obs-session:hover { text-decoration: underline; }
+.live-obs-session { color: var(--text); font-weight: 500; }
 .live-obs-summary { color: var(--dim); }
 .live-obs-kr { color: var(--accent); }
 .live-ended > summary {
