@@ -151,6 +151,12 @@ is_within_safe_dir() {
 	resolved="${parent}/$(basename "$path")"
 	[[ "$resolved" == "${HOME}/.sipag/"* || "$resolved" == "${HOME}/.sipag" ]] && return 0
 	[[ "$resolved" == "${HOME}/.claude/"* || "$resolved" == "${HOME}/.claude" ]] && return 0
+	# Sibling worktrees in the dorky-robot stack — sipag and katulong
+	# co-evolve and the cross-instance-tile spike intentionally edits
+	# both at once. Restricted to .worktrees/ so main checkouts stay
+	# off-limits from this session.
+	[[ "$resolved" == "${HOME}/Projects/dorky_robot/katulong/.worktrees/"* ]] && return 0
+	[[ "$resolved" == "${HOME}/Projects/dorky_robot/sipag/.worktrees/"* ]] && return 0
 	return 1
 }
 
