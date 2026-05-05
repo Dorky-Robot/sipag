@@ -25,7 +25,7 @@ use maud::{html, Markup};
 use serde::Deserialize;
 use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, load_project, move_task, KeyResult,
-    KrStance, ProjectKind, Task, TaskStatus,
+    KrStance, Observation, ProjectKind, Task, TaskStatus, MISC_PROJECT,
 };
 use sipag_core::katulong::session_name;
 use tracing::warn;
@@ -52,10 +52,6 @@ pub fn routes() -> Router<AppState> {
             "/htmx/projects/:name/key-results/:id/done",
             post(kr_done_handler),
         )
-        .route(
-            "/htmx/projects/:name/key-results/:id/discourse",
-            post(kr_discourse_handler),
-        )
         .route("/htmx/projects/:name/tasks", post(create_task_handler))
         .route(
             "/htmx/projects/:name/tasks/:id",
@@ -66,18 +62,19 @@ pub fn routes() -> Router<AppState> {
             post(task_labels_handler),
         )
         .route(
-            "/htmx/projects/:name/tasks/:id/discourse",
-            post(task_discourse_handler),
-        )
-        .route(
             "/htmx/projects/:name/tasks/:id/dispatch",
             post(dispatch_task_handler),
         )
-        .route(
-            "/htmx/discourse/:kind/:project/:id",
-            get(discourse_fragment),
-        )
         .route("/htmx/attention", get(attention_fragment))
+        .route("/htmx/observations/:obs_id/kr", post(observation_kr_handler))
+        .route(
+            "/htmx/observations/:obs_id/kr/reject",
+            post(observation_kr_reject_handler),
+        )
+        .route(
+            "/htmx/sessions/:host_id/:uuid/respond",
+            post(claude_respond_handler),
+        )
         .route("/htmx/ticker", get(ticker_fragment))
         .route("/htmx/insights/hint", get(insights_hint))
         .route("/htmx/debug/topics", get(debug_topics))
@@ -767,62 +764,159 @@ async fn kr_done_handler(
     html_response(render_board(&state).await)
 }
 
-#[derive(Deserialize)]
-struct DiscoursePost {
-    text: String,
-}
-
-async fn kr_discourse_handler(
-    AxumPath((name, id)): AxumPath<(String, u64)>,
-    State(state): State<AppState>,
-    Form(body): Form<DiscoursePost>,
-) -> Response {
-    let trimmed = body.text.trim();
-    if trimmed.is_empty() {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    let topic = format!("key-results/{name}/{id}/discourse");
-    let payload = serde_json::json!({
-        "text": trimmed,
-        "actor": "human",
-    });
-    let _ = state.broker.publish(&topic, "human.message", payload);
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn task_discourse_handler(
-    AxumPath((name, id)): AxumPath<(String, u64)>,
-    State(state): State<AppState>,
-    Form(body): Form<DiscoursePost>,
-) -> Response {
-    let trimmed = body.text.trim();
-    if trimmed.is_empty() {
-        return StatusCode::NO_CONTENT.into_response();
-    }
-    let topic = format!("tasks/{name}/{id}/discourse");
-    let payload = serde_json::json!({
-        "text": trimmed,
-        "actor": "human",
-    });
-    let _ = state.broker.publish(&topic, "human.message", payload);
-    StatusCode::NO_CONTENT.into_response()
-}
-
-async fn discourse_fragment(
-    AxumPath((kind, project, id)): AxumPath<(String, String, u64)>,
-    State(state): State<AppState>,
-) -> Response {
-    if kind != "key-results" && kind != "tasks" {
-        return err_response(StatusCode::BAD_REQUEST, "invalid kind");
-    }
-    let topic = format!("{kind}/{project}/{id}/discourse");
-    let envs = state.broker.read(&topic, 0).unwrap_or_default();
-    html_response(board_view::discourse_panel(&topic, &envs))
-}
 
 async fn attention_fragment(State(state): State<AppState>) -> Response {
     let snap = board_view::load_snapshot(&state).await;
     html_response(board_view::attention_strip(&snap))
+}
+
+/// Mark the current gemma4 proposal for an observation as rejected.
+/// We cache `Rejected { hash }` keyed to the summary hash, so this only
+/// suppresses the proposal until katulong's summarizer rewrites the
+/// summary — at which point gemma4 takes another swing.
+async fn observation_kr_reject_handler(
+    AxumPath(obs_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Response {
+    use crate::serve::categorize::ProposalState;
+    let mut cache = state.kr_proposals.write().await;
+    let new_state = match cache.get(&obs_id) {
+        Some(ProposalState::Some { hash, .. }) => Some(ProposalState::Rejected { hash: *hash }),
+        Some(ProposalState::NoFit { hash }) => Some(ProposalState::Rejected { hash: *hash }),
+        // Nothing to reject — proposal is pending or absent. No-op,
+        // re-render so HTMX has something to swap.
+        _ => None,
+    };
+    if let Some(s) = new_state {
+        cache.insert(obs_id.clone(), s);
+    }
+    drop(cache);
+    let payload = serde_json::json!({
+        "obs": obs_id,
+        "actor": "human",
+    });
+    let _ = state
+        .broker
+        .publish("observations/activity", "kr.rejected", payload);
+    html_response(render_board(&state).await)
+}
+
+#[derive(Deserialize)]
+struct ClaudeRespondForm {
+    #[serde(default)]
+    text: String,
+}
+
+/// Forward a user-typed reply to katulong's `/api/claude/respond/:uuid`
+/// on the right host. Same shape as katulong's feed-tile reply input —
+/// types text, Enter sends, ends with a real Enter at the pane.
+async fn claude_respond_handler(
+    AxumPath((host_id, uuid)): AxumPath<(String, String)>,
+    State(state): State<AppState>,
+    Form(body): Form<ClaudeRespondForm>,
+) -> Response {
+    let trimmed = body.text.trim();
+    if trimmed.is_empty() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    let host = match state.hosts.find(&host_id) {
+        Some(h) => h,
+        None => return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {host_id}")),
+    };
+    let url = format!("{}/api/claude/respond/{}", host.base_url(), uuid);
+    let resp = match state
+        .http
+        .post(&url)
+        .bearer_auth(&host.api_key)
+        .json(&serde_json::json!({ "text": trimmed }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "POST /api/claude/respond failed");
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("respond on {}: {e}", host.id),
+            );
+        }
+    };
+    if !resp.status().is_success() {
+        let st = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return err_response(
+            StatusCode::BAD_GATEWAY,
+            format!("respond on {}: HTTP {st}: {txt}", host.id),
+        );
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+#[derive(Deserialize)]
+struct ObservationKrForm {
+    /// Objective id to file the observation under. Empty resets the
+    /// observation back to the misc tray (clears all kr_refs).
+    #[serde(default)]
+    objective: String,
+    /// KR id within the objective. Required when `objective` is non-empty.
+    #[serde(default)]
+    kr: u64,
+}
+
+/// Append a (objective, kr) ref to an observation, or clear all refs
+/// when the form is empty (back to misc). Cross-cutting by design — a
+/// single session can serve multiple KRs across multiple objectives.
+/// To support that without a sharper UI, every accept here adds a new
+/// ref rather than replacing; the user can clear-and-re-add if they
+/// want a single ref.
+async fn observation_kr_handler(
+    AxumPath(obs_id): AxumPath<String>,
+    State(state): State<AppState>,
+    Form(body): Form<ObservationKrForm>,
+) -> Response {
+    use sipag_core::board::KrRef;
+    let dir = load_dir();
+    let mut obs = match Observation::load(&dir, &obs_id) {
+        Ok(o) => o,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "observation not found"),
+    };
+    let objective = body.objective.trim().to_string();
+    if objective.is_empty() {
+        // Empty objective = clear categorization. Strip kr_refs and
+        // reset legacy fields back to misc so the inbox sees it again.
+        obs.kr_refs.clear();
+        obs.project = MISC_PROJECT.to_string();
+        obs.kr_id = 0;
+    } else {
+        let new_ref = KrRef { objective: objective.clone(), kr: body.kr };
+        // Idempotent — don't duplicate an existing ref.
+        if !obs.kr_refs.iter().any(|r| r.objective == new_ref.objective && r.kr == new_ref.kr) {
+            obs.kr_refs.push(new_ref);
+        }
+        // Legacy fields stay in sync with the FIRST ref so existing
+        // project-scoped views don't go blank during the transition.
+        if obs.project == MISC_PROJECT {
+            obs.project = objective.clone();
+            obs.kr_id = body.kr;
+        }
+    }
+    if let Err(e) = obs.save(&dir) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}"));
+    }
+    {
+        let mut cache = state.kr_proposals.write().await;
+        cache.remove(&obs_id);
+    }
+    let payload = serde_json::json!({
+        "obs": obs.id(),
+        "objective": objective,
+        "kr": body.kr,
+        "actor": "human",
+    });
+    let _ = state
+        .broker
+        .publish("observations/activity", "kr.assigned", payload);
+    html_response(render_board(&state).await)
 }
 
 async fn ticker_fragment(State(state): State<AppState>) -> Response {

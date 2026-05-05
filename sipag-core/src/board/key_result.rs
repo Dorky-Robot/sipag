@@ -142,6 +142,64 @@ impl KeyResult {
             .with_context(|| format!("failed to remove {}", path.display()))?;
         Ok(())
     }
+
+    // ── objective-scoped KRs (the new model) ────────────────────────
+    //
+    // KRs in the objective-shaped layout live at
+    // `~/.sipag/objectives/<id>/key-results/<n>.toml`. The struct shape
+    // is identical to project-scoped KRs; only the parent directory
+    // differs. Both APIs coexist while we migrate.
+
+    fn obj_dir(sipag_dir: &Path, objective_id: &str) -> PathBuf {
+        sipag_dir
+            .join("objectives")
+            .join(objective_id)
+            .join("key-results")
+    }
+
+    fn obj_file_path(sipag_dir: &Path, objective_id: &str, id: u64) -> PathBuf {
+        Self::obj_dir(sipag_dir, objective_id).join(format!("{:03}.toml", id))
+    }
+
+    pub fn load_for_objective(sipag_dir: &Path, objective_id: &str, id: u64) -> Result<Self> {
+        let path = Self::obj_file_path(sipag_dir, objective_id, id);
+        let content = std::fs::read_to_string(&path).with_context(|| {
+            format!("KR #{id} not found in objective {objective_id}")
+        })?;
+        let kr: Self = toml::from_str(&content)
+            .with_context(|| format!("invalid TOML in {}", path.display()))?;
+        Ok(kr)
+    }
+
+    pub fn save_for_objective(&self, sipag_dir: &Path, objective_id: &str) -> Result<()> {
+        let dir = Self::obj_dir(sipag_dir, objective_id);
+        std::fs::create_dir_all(&dir)?;
+        let path = Self::obj_file_path(sipag_dir, objective_id, self.id);
+        let content = toml::to_string_pretty(self)?;
+        atomic_write(&path, content.as_bytes())
+    }
+
+    pub fn list_for_objective(sipag_dir: &Path, objective_id: &str) -> Result<Vec<Self>> {
+        let dir = Self::obj_dir(sipag_dir, objective_id);
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path)?;
+            match toml::from_str::<Self>(&content) {
+                Ok(kr) => out.push(kr),
+                Err(e) => log::warn!("skipping malformed KR file {}: {}", path.display(), e),
+            }
+        }
+        out.sort_by_key(|k| k.id);
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

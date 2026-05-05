@@ -1,8 +1,11 @@
+use crate::serve::categorize::ProposalState;
 use sipag_core::auth::{AuthStore, WebAuthnService};
 use sipag_core::hosts::HostsConfig;
 use sipag_core::pubsub::Broker;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Shared application state passed to every handler.
 #[derive(Clone)]
@@ -29,4 +32,9 @@ pub struct AppState {
     /// Whether autonomous workers are running. The CLI flag
     /// `serve --workers` flips this on.
     pub workers_enabled: bool,
+    /// In-memory cache of gemma4 KR proposals for misc observations.
+    /// Keyed by Observation id (`<host>--<session>`). Re-fetched at
+    /// render time when the underlying summary hash changes; never
+    /// persisted (proposals are advisory render-time hints).
+    pub kr_proposals: Arc<RwLock<HashMap<String, ProposalState>>>,
 }

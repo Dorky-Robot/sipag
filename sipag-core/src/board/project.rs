@@ -19,7 +19,10 @@ pub enum ProjectKind {
     Standing,
 }
 
-/// A project on the board.
+/// A project on the board. In the new objective-shaped model the
+/// project is an *initiative* — the current best means of approaching
+/// one or more objectives, listed in `serves`. Projects without
+/// `serves` are orphan initiatives until linked.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub name: String,
@@ -28,6 +31,10 @@ pub struct Project {
     pub kind: ProjectKind,
     #[serde(default = "default_statuses")]
     pub statuses: Vec<String>,
+    /// Objective ids this project serves. Empty = orphan initiative.
+    /// A project may serve more than one objective.
+    #[serde(default)]
+    pub serves: Vec<String>,
 }
 
 fn default_statuses() -> Vec<String> {
@@ -76,6 +83,7 @@ mod tests {
             repo: "dorky-robot/katulong".to_string(),
             kind: ProjectKind::Objective,
             statuses: default_statuses(),
+            serves: Vec::new(),
         };
         project.save(dir.path()).unwrap();
 
@@ -110,6 +118,7 @@ mod tests {
             repo: "a/b".to_string(),
             kind: ProjectKind::Standing,
             statuses: vec!["open".to_string(), "closed".to_string()],
+            serves: Vec::new(),
         };
         project.save(dir.path()).unwrap();
 

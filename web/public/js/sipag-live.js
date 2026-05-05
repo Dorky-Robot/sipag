@@ -2,7 +2,7 @@
 //
 // Subscribes to:
 //   - workers/activity         → updates the top-right ticker, .working class
-//   - <discourse topics>       → appends rows into open discourse drawers
+//   - observations/activity    → pulses the matching session row + ticker
 //
 // The HTMX-rendered board is the source of truth for static content;
 // this script only handles live append / pulse animations / ticker.
@@ -111,35 +111,6 @@
     return String(s).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
   }
 
-  function appendDiscourse(topic, env) {
-    const node = document.querySelector(`.discourse[data-topic="${cssEscape(topic)}"] .discourse-log`);
-    if (!node) return;
-    const li = document.createElement("li");
-    li.className = "discourse-row";
-    li.dataset.kind = env.kind;
-    const role = roleLabel(env);
-    const text = (env.payload && (env.payload.text || env.payload.message)) || "";
-    li.innerHTML = `
-      <span class="discourse-ts">${escapeHtml(env.ts)}</span>
-      <span class="discourse-role">${escapeHtml(role)}</span>
-      <span class="discourse-text">${escapeHtml(text)}</span>
-    `;
-    node.appendChild(li);
-  }
-  function roleLabel(env) {
-    const w = (env.payload && env.payload.worker) || "?";
-    switch (env.kind) {
-      case "human.message": return "human";
-      case "assistant.message": return "worker:" + w;
-      case "worker.progress": return "worker:" + w + " (progress)";
-      case "worker.complete": return "worker:" + w;
-      case "worker.error": return "worker:" + w + " (error)";
-      case "label.changed": return "system: label";
-      case "done.toggled": return "system: done";
-      default: return env.kind;
-    }
-  }
-
   // 1. Subscribe to workers/activity from seq=0 — replay + live.
   t.subscribe("workers/activity", { fromSeq: 0 }, (env) => {
     const ticker = ensureTicker();
@@ -158,17 +129,30 @@
     }
   });
 
-  // 2. For every visible discourse panel, subscribe to its topic.
-  function wireDiscoursePanels() {
-    document.querySelectorAll(".discourse[data-topic]").forEach((node) => {
-      const topic = node.dataset.topic;
-      if (node.dataset.subscribed === "1") return;
-      node.dataset.subscribed = "1";
-      t.subscribe(topic, { fromSeq: 0 }, (env) => appendDiscourse(topic, env));
-    });
+  // 2. observations/activity — every observer / categorize / kr-assign
+  // event. We pulse the matching <li.live-obs> row so the misc tray
+  // visibly reacts when gemma4 finishes a proposal or a new session
+  // appears.
+  function pulseObservation(host, session) {
+    if (!host || !session) return;
+    const sel = `li.live-obs[data-host="${cssEscape(host)}"][data-session="${cssEscape(session)}"]`;
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.classList.remove("pulse"); // reset if already mid-animation
+    // Force reflow so re-adding the class restarts the animation
+    void el.offsetWidth;
+    el.classList.add("pulse");
+    setTimeout(() => el.classList.remove("pulse"), 1600);
   }
-  document.addEventListener("DOMContentLoaded", wireDiscoursePanels);
-  // Re-wire after each htmx swap because the board fragment can replace
-  // discourse panels wholesale.
-  document.body.addEventListener("htmx:afterSwap", wireDiscoursePanels);
+  t.subscribe("observations/activity", { fromSeq: 0 }, (env) => {
+    const ticker = ensureTicker();
+    ticker.appendChild(tickerRow(env));
+    while (ticker.children.length > TICKER_MAX) {
+      ticker.removeChild(ticker.firstChild);
+    }
+    const host = env.payload && env.payload.host;
+    const session = env.payload && env.payload.session;
+    pulseObservation(host, session);
+  });
+
 })();
