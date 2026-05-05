@@ -56,6 +56,13 @@ pub struct Observation {
     /// Empty until populated.
     #[serde(default)]
     pub summary: String,
+    /// Objective-shaped KR references — what this session contributes to.
+    /// Cross-cutting: one session can advance multiple KRs across multiple
+    /// objectives. When non-empty, the objective-shaped UI uses this as the
+    /// authoritative categorization. The legacy `project`/`kr_id` fields
+    /// remain for read-only back-compat with the project-scoped layout.
+    #[serde(default)]
+    pub kr_refs: Vec<super::KrRef>,
 }
 
 fn default_project() -> String {
@@ -169,6 +176,7 @@ mod tests {
             kr_id: 0,
             labels: vec![],
             summary: String::new(),
+            kr_refs: vec![],
         }
     }
 

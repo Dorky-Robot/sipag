@@ -10,6 +10,7 @@ mod auth;
 mod auth_middleware;
 mod board;
 mod board_view;
+mod categorize;
 mod cookie;
 mod devices;
 mod error;
@@ -147,6 +148,9 @@ async fn build_state(
         webauthn: Arc::new(webauthn),
         broker,
         workers_enabled,
+        kr_proposals: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
     })
 }
 

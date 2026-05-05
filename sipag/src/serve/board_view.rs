@@ -8,6 +8,9 @@
 //! Data loading mirrors `serve::board::list_projects` so the JSON API
 //! and the HTML view stay in sync.
 
+use crate::serve::categorize::{
+    propose_kr, summary_hash, KrChoice, KrProposal, ProposalState,
+};
 use crate::serve::state::AppState;
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sipag_core::board::{
@@ -15,7 +18,7 @@ use sipag_core::board::{
 };
 use sipag_core::hosts::Host;
 use sipag_core::pubsub::Envelope;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 // ── public data shape ────────────────────────────────────────────────
 
@@ -23,6 +26,9 @@ use std::collections::BTreeMap;
 /// fresh on every request — TOML reads are cheap and avoiding cache
 /// invalidation is worth more than micro-perf.
 pub struct BoardSnapshot {
+    /// Objectives — the asymptotic things we're optimizing for. Top of
+    /// the board. Each carries its KRs and the initiatives serving it.
+    pub objectives: Vec<ObjectiveView>,
     pub projects: Vec<ProjectView>,
     pub hosts: Vec<HostSummary>,
     /// host_id → vec of session names the host reports running.
@@ -36,6 +42,17 @@ pub struct BoardSnapshot {
     /// uncategorized (`project == "misc"`) and categorized records.
     /// Sorted by `last_seen` desc.
     pub observations: Vec<sipag_core::board::Observation>,
+    /// gemma4-suggested KR per misc observation id. Populated lazily by
+    /// background tasks; appears in the UI as an accept/pick-another chip.
+    pub proposals: HashMap<String, KrProposal>,
+    /// Every active (not-done) KR across all projects, used to populate
+    /// the "pick another" dropdown on each misc row.
+    pub kr_choices: Vec<KrChoice>,
+    /// Recent Claude-transcript entries per observation id. Fetched
+    /// from each host's `/api/claude-transcript/:uuid` endpoint at
+    /// snapshot time; rendered into the expanded `<details>` body so
+    /// the user can scan what Claude is doing without leaving sipag.
+    pub feeds: HashMap<String, Vec<FeedEntry>>,
     pub error: Option<String>,
     /// Process-lifetime token used as a `?v=` cache-buster on JS asset
     /// URLs. Changes on every server restart so iPad Safari (and other
@@ -52,6 +69,54 @@ pub struct LiveSessionMeta {
     pub summary_long: Option<String>,
     pub cwd: Option<String>,
     pub claude_uuid: Option<String>,
+}
+
+/// One Claude-transcript entry as exposed by katulong's
+/// `/api/claude-transcript/:uuid` — already normalized server-side.
+/// Only the fields sipag's row renders are kept.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum FeedEntry {
+    User {
+        #[serde(default)]
+        uuid: String,
+        #[serde(default)]
+        ts: i64,
+        #[serde(default)]
+        text: String,
+    },
+    Assistant {
+        #[serde(default)]
+        uuid: String,
+        #[serde(default)]
+        ts: i64,
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        tools: Vec<FeedTool>,
+    },
+    ToolResult {
+        #[serde(default)]
+        uuid: String,
+        #[serde(default)]
+        ts: i64,
+        #[serde(default)]
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FeedTool {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub target: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TranscriptResponse {
+    #[serde(default)]
+    entries: Vec<FeedEntry>,
 }
 
 /// Boot id assigned once per process. Used to cache-bust JS assets.
@@ -71,6 +136,19 @@ pub struct ProjectView {
     pub kind: ProjectKind,
     pub key_results: Vec<KeyResult>,
     pub tasks: Vec<Task>,
+    pub serves: Vec<String>,
+}
+
+/// One objective with its key results + the list of initiatives
+/// (project names) that serve it. KRs here are objective-scoped (live
+/// under `~/.sipag/objectives/<id>/key-results/`).
+pub struct ObjectiveView {
+    pub id: String,
+    pub name: String,
+    pub aspiration: String,
+    pub key_results: Vec<KeyResult>,
+    /// Project names whose `serves` list contains this objective's id.
+    pub serving_initiatives: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -89,11 +167,15 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
         Ok(p) => p,
         Err(e) => {
             return BoardSnapshot {
+                objectives: Vec::new(),
                 projects: Vec::new(),
                 hosts: state.hosts.hosts.iter().map(host_summary).collect(),
                 sessions: BTreeMap::new(),
                 live: BTreeMap::new(),
                 observations: Vec::new(),
+                proposals: HashMap::new(),
+                kr_choices: Vec::new(),
+                feeds: HashMap::new(),
                 error: Some(format!("{e}")),
                 boot_id: boot_id().to_string(),
             }
@@ -115,15 +197,208 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
     let observations =
         sipag_core::board::Observation::list(&state.sipag_dir, None).unwrap_or_default();
 
+    let objectives = load_objectives_blocking(&state.sipag_dir, &projects);
+    let kr_choices = build_kr_choices(&objectives);
+    let proposals = resolve_proposals(state, &observations, &live, &kr_choices).await;
+    let feeds = fetch_feeds(state, &observations, &live).await;
+
     BoardSnapshot {
+        objectives,
         projects,
         hosts: state.hosts.hosts.iter().map(host_summary).collect(),
         sessions,
         live,
         observations,
+        proposals,
+        kr_choices,
+        feeds,
         error: None,
         boot_id: boot_id().to_string(),
     }
+}
+
+/// For every misc observation that has a Claude UUID in its live meta,
+/// pull the last few transcript entries from the owning katulong host.
+/// Errors degrade silently (empty feed → no panel content). Polled
+/// per-render rather than streamed; the existing pulse signal carries
+/// the "something happened" cue for now.
+async fn fetch_feeds(
+    state: &AppState,
+    observations: &[sipag_core::board::Observation],
+    live: &BTreeMap<(String, String), LiveSessionMeta>,
+) -> HashMap<String, Vec<FeedEntry>> {
+    const FEED_LIMIT: u32 = 8;
+    let mut out = HashMap::new();
+    for obs in observations {
+        if obs.project != sipag_core::board::MISC_PROJECT {
+            continue;
+        }
+        let uuid = match live
+            .get(&(obs.host.clone(), obs.session.clone()))
+            .and_then(|m| m.claude_uuid.as_deref())
+        {
+            Some(u) if !u.is_empty() => u.to_string(),
+            _ => continue,
+        };
+        let host = match state.hosts.hosts.iter().find(|h| h.id == obs.host) {
+            Some(h) => h,
+            None => continue,
+        };
+        let entries = fetch_recent_transcript(state, host, &uuid, FEED_LIMIT).await;
+        if !entries.is_empty() {
+            out.insert(obs.id(), entries);
+        }
+    }
+    out
+}
+
+async fn fetch_recent_transcript(
+    state: &AppState,
+    host: &Host,
+    uuid: &str,
+    limit: u32,
+) -> Vec<FeedEntry> {
+    let url = format!(
+        "{}/api/claude-transcript/{}?limit={}",
+        host.base_url(),
+        uuid,
+        limit
+    );
+    let resp = match state
+        .http
+        .get(&url)
+        .bearer_auth(&host.api_key)
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    let body: TranscriptResponse = match resp.json().await {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    body.entries
+}
+
+/// Flatten every active (not-done) KR across all *objectives* into the
+/// list gemma4 picks from and the "pick another" dropdown shows.
+/// Project-level (legacy) KRs are deliberately excluded — categorize
+/// is the seam where we push everything into the objective-shaped model.
+fn build_kr_choices(objectives: &[ObjectiveView]) -> Vec<KrChoice> {
+    objectives
+        .iter()
+        .flat_map(|o| {
+            o.key_results
+                .iter()
+                .filter(|kr| !kr.done)
+                .map(|kr| KrChoice {
+                    objective: o.id.clone(),
+                    objective_aspiration: o.aspiration.clone(),
+                    kr: kr.id,
+                    kr_title: kr.title.clone(),
+                })
+        })
+        .collect()
+}
+
+/// Read the current proposal cache for every misc observation that has
+/// a non-empty live summary, and fire-and-forget background gemma4
+/// calls for cache misses / stale entries. The render uses whatever
+/// proposals are *already* resolved; new ones land on the next render.
+async fn resolve_proposals(
+    state: &AppState,
+    observations: &[sipag_core::board::Observation],
+    live: &BTreeMap<(String, String), LiveSessionMeta>,
+    kr_choices: &[KrChoice],
+) -> HashMap<String, KrProposal> {
+    let mut resolved: HashMap<String, KrProposal> = HashMap::new();
+    if kr_choices.is_empty() {
+        return resolved;
+    }
+    for obs in observations {
+        if obs.project != sipag_core::board::MISC_PROJECT {
+            continue;
+        }
+        let summary = match live
+            .get(&(obs.host.clone(), obs.session.clone()))
+            .and_then(|m| m.summary_short.as_deref())
+        {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => continue,
+        };
+        let id = obs.id();
+        let hash = summary_hash(&summary);
+
+        let needs_run = {
+            let cache = state.kr_proposals.read().await;
+            match cache.get(&id) {
+                Some(ProposalState::Some { proposal, hash: h }) if *h == hash => {
+                    resolved.insert(id.clone(), proposal.clone());
+                    false
+                }
+                Some(ProposalState::NoFit { hash: h }) if *h == hash => false,
+                Some(ProposalState::Rejected { hash: h }) if *h == hash => false,
+                Some(ProposalState::Pending) => false,
+                _ => true,
+            }
+        };
+
+        if needs_run {
+            // Mark Pending and fire background task. We don't .await it
+            // — the next render reads the cache and picks up the result.
+            {
+                let mut cache = state.kr_proposals.write().await;
+                cache.insert(id.clone(), ProposalState::Pending);
+            }
+            let http = state.http.clone();
+            let cache_ref = state.kr_proposals.clone();
+            let kr_choices = kr_choices.to_vec();
+            let summary = summary.clone();
+            let id_clone = id.clone();
+            let host = obs.host.clone();
+            let session = obs.session.clone();
+            let broker = state.broker.clone();
+            tokio::spawn(async move {
+                tracing::info!("categorize: spawning gemma4 call for {}/{}", host, session);
+                let started = std::time::Instant::now();
+                let proposal = propose_kr(&http, &summary, &kr_choices).await;
+                let elapsed = started.elapsed();
+                match &proposal {
+                    Some(p) => tracing::info!(
+                        "categorize: {}/{} → {}/kr#{} '{}' ({}%) in {:?}",
+                        host, session, p.objective, p.kr, p.kr_title, p.confidence, elapsed
+                    ),
+                    None => tracing::info!(
+                        "categorize: {}/{} → no fit in {:?}",
+                        host, session, elapsed
+                    ),
+                }
+                if let Some(ref p) = proposal {
+                    let payload = serde_json::json!({
+                        "host": host,
+                        "session": session,
+                        "objective": p.objective,
+                        "kr": p.kr,
+                        "kr_title": p.kr_title,
+                        "confidence": p.confidence,
+                        "reason": p.reason,
+                    });
+                    let _ = broker.publish("observations/activity", "kr.proposed", payload);
+                }
+                let new_state = match proposal {
+                    Some(p) => ProposalState::Some {
+                        proposal: p,
+                        hash,
+                    },
+                    None => ProposalState::NoFit { hash },
+                };
+                let mut cache = cache_ref.write().await;
+                cache.insert(id_clone, new_state);
+            });
+        }
+    }
+    resolved
 }
 
 fn host_summary(h: &Host) -> HostSummary {
@@ -138,7 +413,10 @@ fn load_projects_blocking(sipag_dir: &std::path::Path) -> anyhow::Result<Vec<Pro
     let mut out = Vec::with_capacity(names.len());
     for name in names {
         let Project {
-            name: pname, kind, ..
+            name: pname,
+            kind,
+            serves,
+            ..
         } = match load_project(sipag_dir, &name) {
             Ok(p) => p,
             Err(_) => continue,
@@ -150,9 +428,40 @@ fn load_projects_blocking(sipag_dir: &std::path::Path) -> anyhow::Result<Vec<Pro
             kind,
             key_results,
             tasks,
+            serves,
         });
     }
     Ok(out)
+}
+
+fn load_objectives_blocking(
+    sipag_dir: &std::path::Path,
+    projects: &[ProjectView],
+) -> Vec<ObjectiveView> {
+    let objectives = match sipag_core::board::Objective::list(sipag_dir) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    objectives
+        .into_iter()
+        .map(|o| {
+            let key_results =
+                sipag_core::board::KeyResult::list_for_objective(sipag_dir, &o.id)
+                    .unwrap_or_default();
+            let serving_initiatives = projects
+                .iter()
+                .filter(|p| p.serves.iter().any(|sid| sid == &o.id))
+                .map(|p| p.name.clone())
+                .collect();
+            ObjectiveView {
+                id: o.id,
+                name: o.name,
+                aspiration: o.aspiration,
+                key_results,
+                serving_initiatives,
+            }
+        })
+        .collect()
 }
 
 async fn fetch_sessions_full(state: &AppState, host: &Host) -> anyhow::Result<Vec<RemoteSession>> {
@@ -293,7 +602,6 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 #app {
                     (topbar(snap))
                     (attention_strip(snap))
-                    (live_activity(snap))
                     (board_main(snap))
                     (idea_box(&snap.projects, false))
                     // Mount points for HTMX OOB swaps and live (WS)
@@ -362,28 +670,163 @@ pub fn board_main(snap: &BoardSnapshot) -> Markup {
             "hx-trigger"="every 5s [!document.activeElement || !document.activeElement.matches('input,textarea')]"
             "hx-swap"="outerHTML"
         {
-            div.section-head { "objectives" }
-            @if objectives.is_empty() {
-                (empty_objectives())
+            (inbox(snap))
+
+            div.section-head { "objectives" span.subtle { " — what we're optimizing for, asymptotically" } }
+            @if snap.objectives.is_empty() {
+                (empty_objectives_state())
             } @else {
+                @for o in &snap.objectives {
+                    (objective_card_v2(snap, o))
+                }
+            }
+
+            div.section-head { "initiatives" span.subtle { " — current means of approach" } }
+            @if objectives.is_empty() && standing.is_empty() {
+                (empty_objectives())
+            }
+            @if !objectives.is_empty() {
                 @for p in &objectives {
-                    (objective_card(p, &snap.sessions, &snap.hosts))
+                    (objective_card(snap, p))
                 }
             }
             div.section-actions {
                 (new_objective_form(false))
             }
 
-            div.section-head { "standing" }
-            @if standing.is_empty() {
-                div.objective-empty.subtle { "no standing concerns yet" }
-            } @else {
+            @if !standing.is_empty() {
+                div.section-head { "keeping the lights on" span.subtle { " — operational" } }
                 @for p in &standing {
-                    (standing_card(p, &snap.sessions, &snap.hosts))
+                    (standing_card(snap, p))
+                }
+                div.section-actions {
+                    (new_standing_form(false))
+                }
+            } @else {
+                div.section-actions {
+                    (new_standing_form(false))
                 }
             }
-            div.section-actions {
-                (new_standing_form(false))
+
+            (ended_section(snap))
+        }
+    }
+}
+
+fn empty_objectives_state() -> Markup {
+    html! {
+        div.empty-state.subtle {
+            "no objectives yet — define an asymptotic outcome you're optimizing toward"
+        }
+    }
+}
+
+/// Render an objective: aspiration sentence + KRs + serving initiatives.
+/// KRs aggregate observations from any initiative serving the objective
+/// (via observation.kr_refs).
+fn objective_card_v2(snap: &BoardSnapshot, o: &ObjectiveView) -> Markup {
+    let active_session_count = snap
+        .observations
+        .iter()
+        .filter(|obs| {
+            obs.status == "active"
+                && obs.kr_refs.iter().any(|r| r.objective == o.id)
+        })
+        .count();
+    html! {
+        section.objective-v2 {
+            header.obj-v2-head {
+                h2.obj-v2-aspiration { (o.aspiration) }
+                div.obj-v2-meta.subtle {
+                    span.obj-v2-id { (o.name) }
+                    @if !o.serving_initiatives.is_empty() {
+                        span { " · served by " }
+                        @for (i, init) in o.serving_initiatives.iter().enumerate() {
+                            @if i > 0 { span { ", " } }
+                            span.obj-v2-initiative { (init) }
+                        }
+                    } @else {
+                        span { " · no initiative yet" }
+                    }
+                    @if active_session_count > 0 {
+                        span { " · " (active_session_count) " active session"
+                            @if active_session_count != 1 { "s" }
+                        }
+                    }
+                }
+            }
+            @if o.key_results.is_empty() {
+                div.obj-v2-empty.subtle { "no key results yet — what trends would show we're approaching it?" }
+            } @else {
+                div.obj-v2-krs {
+                    @for kr in &o.key_results {
+                        (objective_kr_row(snap, &o.id, kr))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render one KR under an objective. Aggregates two kinds of work
+/// across every initiative that serves the objective:
+/// - **Tasks** from any initiative whose `Task.key_results` contains
+///   this KR's id (legacy linkage — Task.key_results is `Vec<u64>` and
+///   resolves against the served objective's KRs by id).
+/// - **Active observations** that point at this KR via `kr_refs`.
+fn objective_kr_row(
+    snap: &BoardSnapshot,
+    objective_id: &str,
+    kr: &sipag_core::board::KeyResult,
+) -> Markup {
+    let stance = kr.stance.as_str();
+    let kr_obs: Vec<&sipag_core::board::Observation> = snap
+        .observations
+        .iter()
+        .filter(|obs| {
+            obs.status == "active"
+                && obs.kr_refs
+                    .iter()
+                    .any(|r| r.objective == objective_id && r.kr == kr.id)
+        })
+        .collect();
+    // Tasks from initiatives that serve this objective and reference
+    // this KR id. The (project, task) pair is preserved so each task's
+    // dispatch button + endpoints route correctly.
+    let kr_tasks: Vec<(&str, &Task)> = snap
+        .projects
+        .iter()
+        .filter(|p| p.serves.iter().any(|sid| sid == objective_id))
+        .flat_map(|p| {
+            p.tasks
+                .iter()
+                .filter(|t| is_active(t) && t.key_results.contains(&kr.id))
+                .map(move |t| (p.name.as_str(), t))
+        })
+        .collect();
+    let work_count = kr_tasks.len() + kr_obs.len();
+    html! {
+        div.obj-v2-kr {
+            div.obj-v2-kr-head {
+                span.kr-stance.{(stance)} { (stance_symbol(stance)) }
+                span.kr-title { (kr.title) }
+                @if work_count > 0 {
+                    span.kr-active-badge { (work_count) " active" }
+                }
+            }
+            @if !kr_tasks.is_empty() {
+                ul.tasks.kr-tasks {
+                    @for (project_name, t) in &kr_tasks {
+                        (task_row(t, project_name, &snap.sessions, &snap.hosts))
+                    }
+                }
+            }
+            @if !kr_obs.is_empty() {
+                ul.live-misc.kr-sessions {
+                    @for obs in &kr_obs {
+                        (live_obs_row(snap, obs))
+                    }
+                }
             }
         }
     }
@@ -402,15 +845,18 @@ fn empty_objectives() -> Markup {
 
 // ── objective card ──────────────────────────────────────────────────
 
-fn objective_card(
-    p: &ProjectView,
-    sessions: &BTreeMap<String, Vec<String>>,
-    hosts: &[HostSummary],
-) -> Markup {
+fn objective_card(snap: &BoardSnapshot, p: &ProjectView) -> Markup {
     let active: Vec<&Task> = p.tasks.iter().filter(|t| is_active(t)).collect();
     let project_seg = urlencode(&p.name);
     let project_endpoint = format!("/htmx/projects/{project_seg}");
     let loose: Vec<&&Task> = active.iter().filter(|t| t.key_results.is_empty()).collect();
+    let loose_obs = loose_observations_for_project(snap, &p.name);
+    let active_session_count: usize = p
+        .key_results
+        .iter()
+        .map(|k| observations_for_kr(snap, &p.name, k.id).len())
+        .sum::<usize>()
+        + loose_obs.len();
 
     html! {
         section.objective {
@@ -419,6 +865,10 @@ fn objective_card(
                 span.subtle {
                     (active.len()) " active · " (p.key_results.len()) " KR"
                     @if p.key_results.len() != 1 { "s" }
+                    @if active_session_count > 0 {
+                        " · " (active_session_count) " session"
+                        @if active_session_count != 1 { "s" }
+                    }
                 }
                 button.row-delete
                     "hx-delete"=(project_endpoint)
@@ -433,16 +883,25 @@ fn objective_card(
                 div.objective-empty { "no key results yet — what does success look like?" }
             } @else {
                 @for kr in &p.key_results {
-                    (kr_row(kr, &p.name, &active, sessions, hosts))
+                    (kr_row(snap, kr, &p.name, &active))
                 }
             }
 
-            @if !loose.is_empty() {
+            @if !loose.is_empty() || !loose_obs.is_empty() {
                 div.loose {
                     div.loose-head { "loose " span.subtle { "no KR" } }
-                    ul.tasks {
-                        @for t in &loose {
-                            (task_row(t, &p.name, sessions, hosts))
+                    @if !loose.is_empty() {
+                        ul.tasks {
+                            @for t in &loose {
+                                (task_row(t, &p.name, &snap.sessions, &snap.hosts))
+                            }
+                        }
+                    }
+                    @if !loose_obs.is_empty() {
+                        ul.live-misc {
+                            @for obs in &loose_obs {
+                                (live_obs_row(snap, obs))
+                            }
                         }
                     }
                 }
@@ -456,20 +915,23 @@ fn objective_card(
     }
 }
 
-fn standing_card(
-    p: &ProjectView,
-    sessions: &BTreeMap<String, Vec<String>>,
-    hosts: &[HostSummary],
-) -> Markup {
+fn standing_card(snap: &BoardSnapshot, p: &ProjectView) -> Markup {
     let active: Vec<&Task> = p.tasks.iter().filter(|t| is_active(t)).collect();
     let project_seg = urlencode(&p.name);
     let project_endpoint = format!("/htmx/projects/{project_seg}");
+    let project_obs = loose_observations_for_project(snap, &p.name);
 
     html! {
         section.standing {
             header.objective-head {
                 h2 { (p.name) }
-                span.subtle { (active.len()) " active" }
+                span.subtle {
+                    (active.len()) " active"
+                    @if !project_obs.is_empty() {
+                        " · " (project_obs.len()) " session"
+                        @if project_obs.len() != 1 { "s" }
+                    }
+                }
                 button.row-delete
                     "hx-delete"=(project_endpoint)
                     "hx-target"="#board"
@@ -478,12 +940,20 @@ fn standing_card(
                     title="delete standing"
                 { "×" }
             }
-            @if active.is_empty() {
+            @if active.is_empty() && project_obs.is_empty() {
                 div.objective-empty { "nothing now" }
-            } @else {
+            }
+            @if !active.is_empty() {
                 ul.tasks {
                     @for t in &active {
-                        (task_row(t, &p.name, sessions, hosts))
+                        (task_row(t, &p.name, &snap.sessions, &snap.hosts))
+                    }
+                }
+            }
+            @if !project_obs.is_empty() {
+                ul.live-misc {
+                    @for obs in &project_obs {
+                        (live_obs_row(snap, obs))
                     }
                 }
             }
@@ -496,23 +966,17 @@ fn standing_card(
 
 // ── KR row ──────────────────────────────────────────────────────────
 
-fn kr_row(
-    kr: &KeyResult,
-    project_name: &str,
-    active_tasks: &[&Task],
-    sessions: &BTreeMap<String, Vec<String>>,
-    hosts: &[HostSummary],
-) -> Markup {
+fn kr_row(snap: &BoardSnapshot, kr: &KeyResult, project_name: &str, active_tasks: &[&Task]) -> Markup {
     let stance = kr.stance.as_str();
     let project_seg = urlencode(project_name);
     let kr_endpoint = format!("/htmx/projects/{project_seg}/key-results/{}", kr.id);
     let labels_endpoint = format!("{kr_endpoint}/labels");
     let done_endpoint = format!("{kr_endpoint}/done");
-    let discourse_topic = format!("key-results/{}/{}/discourse", project_name, kr.id);
     let kr_tasks: Vec<&&Task> = active_tasks
         .iter()
         .filter(|t| t.key_results.contains(&kr.id))
         .collect();
+    let kr_obs = observations_for_kr(snap, project_name, kr.id);
     let working = kr.labels.iter().any(|l| l == "research" || l == "expand");
     let kr_class = if working {
         "kr working"
@@ -533,6 +997,11 @@ fn kr_row(
                     title={(stance) " — click to cycle"}
                 { (stance_symbol(stance)) }
                 span.kr-title { (kr.title) }
+                @if !kr_obs.is_empty() {
+                    span.kr-active-badge title="active sessions" {
+                        (kr_obs.len()) " active"
+                    }
+                }
                 button.kr-done
                     "hx-post"=(done_endpoint)
                     "hx-target"="#board"
@@ -549,11 +1018,17 @@ fn kr_row(
             }
             (label_chips(&kr.labels, &labels_endpoint))
             (quick_label_row(&kr.labels, &labels_endpoint))
-            (discourse_drawer(&discourse_topic, "key-results", project_name, kr.id))
             @if !kr_tasks.is_empty() {
                 ul.tasks.kr-tasks {
                     @for t in &kr_tasks {
-                        (task_row(t, project_name, sessions, hosts))
+                        (task_row(t, project_name, &snap.sessions, &snap.hosts))
+                    }
+                }
+            }
+            @if !kr_obs.is_empty() {
+                ul.live-misc.kr-sessions {
+                    @for obs in &kr_obs {
+                        (live_obs_row(snap, obs))
                     }
                 }
             }
@@ -575,7 +1050,6 @@ fn task_row(
     let task_endpoint = format!("/htmx/projects/{project_seg}/tasks/{}", task.id);
     let labels_endpoint = format!("{task_endpoint}/labels");
     let dispatch_endpoint = format!("/htmx/projects/{project_seg}/tasks/{}/dispatch", task.id);
-    let discourse_topic = format!("tasks/{}/{}/discourse", project_name, task.id);
     let dispatchable = !hosts.is_empty() && running_on.is_none();
     let single_host = hosts.len() == 1;
     let working = task.labels.iter().any(|l| l == "research" || l == "expand");
@@ -629,7 +1103,6 @@ fn task_row(
             }
             (label_chips(&task.labels, &labels_endpoint))
             (quick_label_row(&task.labels, &labels_endpoint))
-            (discourse_drawer(&discourse_topic, "tasks", project_name, task.id))
             @if let Some(host_id) = running_on {
                 div.task-foot { "▸ running on " (host_id) }
             }
@@ -1109,165 +1582,67 @@ pub fn quick_label_row(labels: &[String], labels_endpoint: &str) -> Markup {
     }
 }
 
-// ── discourse drawer ────────────────────────────────────────────────
-
-pub fn discourse_drawer(topic: &str, kind: &str, project: &str, id: u64) -> Markup {
-    let panel_url = format!("/htmx/discourse/{}/{}/{}", kind, urlencode(project), id);
-    let post_url = format!(
-        "/htmx/projects/{}/{}/{}/discourse",
-        urlencode(project),
-        kind,
-        id
-    );
-    html! {
-        details.discourse-drawer {
-            summary.discourse-toggle { "discourse" }
-            div.discourse data-topic=(topic)
-                "hx-get"=(panel_url)
-                "hx-trigger"="toggle from:closest details once"
-                "hx-target"="this"
-                "hx-swap"="innerHTML"
-            {
-                div.discourse-empty.subtle { "loading…" }
-            }
-            form.discourse-post
-                "hx-post"=(post_url)
-                "hx-target"="this"
-                "hx-swap"="none"
-            {
-                input type="text" name="text" placeholder="add to the conversation…" autocomplete="off";
-                button type="submit" { "post" }
-            }
-        }
-    }
-}
-
-pub fn discourse_panel(topic: &str, envs: &[Envelope]) -> Markup {
-    html! {
-        ul.discourse-log data-topic=(topic) {
-            @if envs.is_empty() {
-                li.discourse-empty.subtle { "no discourse yet — ping a worker or post a thought" }
-            } @else {
-                @for env in envs {
-                    (discourse_row(env))
-                }
-            }
-        }
-    }
-}
-
-fn discourse_row(env: &Envelope) -> Markup {
-    let role = env.kind.as_str();
-    let actor = env
-        .payload
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or(role);
-    let worker = env.payload.get("worker").and_then(|v| v.as_str());
-    let text = env
-        .payload
-        .get("text")
-        .and_then(|v| v.as_str())
-        .or_else(|| env.payload.get("message").and_then(|v| v.as_str()))
-        .unwrap_or("");
-    let citations: Vec<&str> = env
-        .payload
-        .get("citations")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|c| c.as_str()).collect())
-        .unwrap_or_default();
-
-    let role_label = match role {
-        "human.message" => "human".to_string(),
-        "assistant.message" => format!("worker:{}", worker.unwrap_or("ollama")),
-        "worker.progress" => format!("worker:{} (progress)", worker.unwrap_or("?")),
-        "worker.complete" => format!("worker:{}", worker.unwrap_or("?")),
-        "worker.error" => format!("worker:{} (error)", worker.unwrap_or("?")),
-        "label.changed" => "system: label".to_string(),
-        "done.toggled" => "system: done".to_string(),
-        other => other.to_string(),
-    };
-
-    html! {
-        li.discourse-row data-kind=(role) {
-            span.discourse-ts { (env.ts) }
-            span.discourse-role { (role_label) }
-            @if !text.is_empty() {
-                span.discourse-text { (text) }
-            }
-            @if role == "label.changed" {
-                @let add = env.payload.get("add").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                @let remove = env.payload.get("remove").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                span.discourse-text {
-                    @for a in &add { "+" (a.as_str().unwrap_or("")) " " }
-                    @for r in &remove { "-" (r.as_str().unwrap_or("")) " " }
-                }
-            }
-            @if !citations.is_empty() {
-                span.discourse-citations {
-                    @for sha in &citations {
-                        @let short: String = sha.chars().take(7).collect();
-                        span.cite { (short) }
-                    }
-                }
-            }
-            @let _ = actor; // referenced for future styling hooks
-        }
-    }
-}
-
 // ── live activity (observations) ────────────────────────────────────
 
 /// Tray of katulong sessions sipag has noticed across all configured
 /// hosts. Sessions filed under `misc` are uncategorized — the
 /// categorize worker (or the user) hasn't yet mapped them to a KR.
 /// Active sessions show first; ended ones grey out below.
-pub fn live_activity(snap: &BoardSnapshot) -> Markup {
-    if snap.observations.is_empty() {
+/// Triage queue at the top of the board: active sessions that haven't
+/// been categorized yet. Hidden when empty. Categorized sessions are
+/// rendered inline under their KR; ended sessions live in
+/// `ended_section` at the bottom.
+pub fn inbox(snap: &BoardSnapshot) -> Markup {
+    // A session is "uncategorized" when neither the legacy project
+    // field nor the new kr_refs has any signal.
+    let active_misc: Vec<&sipag_core::board::Observation> = snap
+        .observations
+        .iter()
+        .filter(|o| {
+            o.status == "active"
+                && o.project == sipag_core::board::MISC_PROJECT
+                && o.kr_refs.is_empty()
+        })
+        .collect();
+    if active_misc.is_empty() {
         return html! {};
     }
-    // Split: active misc, active categorized (rendered inline with
-    // their KRs elsewhere — show count only here), ended misc.
-    let mut active_misc = Vec::new();
-    let mut active_cat: usize = 0;
-    let mut ended: Vec<&sipag_core::board::Observation> = Vec::new();
-    for obs in &snap.observations {
-        let alive = obs.status == "active";
-        let is_misc = obs.project == sipag_core::board::MISC_PROJECT;
-        match (alive, is_misc) {
-            (true, true) => active_misc.push(obs),
-            (true, false) => active_cat += 1,
-            (false, _) => ended.push(obs),
+    html! {
+        section.inbox {
+            div.section-head {
+                "inbox"
+                span.subtle { " · " (active_misc.len()) " to triage" }
+            }
+            ul.live-misc {
+                @for obs in &active_misc {
+                    (live_obs_row(snap, obs))
+                }
+            }
         }
     }
+}
 
+/// Collapsed history of ended observations. Rendered at the bottom of
+/// the board, off the way of the live work.
+pub fn ended_section(snap: &BoardSnapshot) -> Markup {
+    let ended: Vec<&sipag_core::board::Observation> = snap
+        .observations
+        .iter()
+        .filter(|o| o.status != "active")
+        .collect();
+    if ended.is_empty() {
+        return html! {};
+    }
     html! {
-        section.live-activity {
-            details open[!active_misc.is_empty()] {
+        section.ended-section {
+            details.live-ended {
                 summary {
-                    span.live-activity-title { "live activity" }
-                    span.subtle {
-                        " · " (active_misc.len()) " misc · " (active_cat) " categorized · " (ended.len()) " ended"
-                    }
+                    span.section-head-inline { "ended" }
+                    span.subtle { " · " (ended.len()) }
                 }
-                div.live-activity-body {
-                    @if !active_misc.is_empty() {
-                        h3.live-misc-header { "misc" span.subtle { " — uncategorized sessions" } }
-                        ul.live-misc {
-                            @for obs in &active_misc {
-                                (live_obs_row(obs, find_host_url(snap, &obs.host), snap.live.get(&(obs.host.clone(), obs.session.clone()))))
-                            }
-                        }
-                    }
-                    @if !ended.is_empty() {
-                        details.live-ended {
-                            summary { "ended (" (ended.len()) ")" }
-                            ul.live-misc.ended {
-                                @for obs in &ended {
-                                    (live_obs_row(obs, find_host_url(snap, &obs.host), snap.live.get(&(obs.host.clone(), obs.session.clone()))))
-                                }
-                            }
-                        }
+                ul.live-misc.ended {
+                    @for obs in &ended {
+                        (live_obs_row(snap, obs))
                     }
                 }
             }
@@ -1275,11 +1650,38 @@ pub fn live_activity(snap: &BoardSnapshot) -> Markup {
     }
 }
 
-fn live_obs_row(
-    obs: &sipag_core::board::Observation,
-    host_url: Option<&str>,
-    live: Option<&LiveSessionMeta>,
-) -> Markup {
+/// Active observations that belong under (project, kr_id). Used by
+/// kr_row to render rolled-up sessions inline.
+fn observations_for_kr<'a>(
+    snap: &'a BoardSnapshot,
+    project: &str,
+    kr_id: u64,
+) -> Vec<&'a sipag_core::board::Observation> {
+    snap.observations
+        .iter()
+        .filter(|o| o.status == "active" && o.project == project && o.kr_id == kr_id)
+        .collect()
+}
+
+/// Active observations categorized to a project but not to any KR
+/// within it (kr_id == 0). Rendered in the project's "loose" area so
+/// they're visible even when not yet attached to a specific outcome.
+fn loose_observations_for_project<'a>(
+    snap: &'a BoardSnapshot,
+    project: &str,
+) -> Vec<&'a sipag_core::board::Observation> {
+    snap.observations
+        .iter()
+        .filter(|o| o.status == "active" && o.project == project && o.kr_id == 0)
+        .collect()
+}
+
+fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> Markup {
+    let host_url = find_host_url(snap, &obs.host);
+    let live = snap.live.get(&(obs.host.clone(), obs.session.clone()));
+    let proposal = snap.proposals.get(&obs.id());
+    let kr_choices = &snap.kr_choices;
+    let _feed = snap.feeds.get(&obs.id()); // reserved for gemma4 task-progress inference
     // `?s=<name>` is katulong's deep-link primitive — its boot path
     // (app.js around line 97) reads the param and calls
     // `activateSession(name)` if a tile already exists for it, or
@@ -1371,6 +1773,16 @@ fn live_obs_row(
                             "no live context yet — will populate on next summarizer cycle"
                         }
                     }
+                    @if obs.project != sipag_core::board::MISC_PROJECT && obs.kr_id != 0 {
+                        (progress_panel(snap, &obs.project, obs.kr_id))
+                    } @else if obs.project == sipag_core::board::MISC_PROJECT && !kr_choices.is_empty() {
+                        (kr_proposal_chip(&obs.id(), proposal, kr_choices))
+                    }
+                    @if let Some(uuid) = claude_uuid {
+                        @if !uuid.is_empty() {
+                            (reply_input(&obs.host, uuid))
+                        }
+                    }
                 }
             }
         }
@@ -1383,6 +1795,164 @@ fn path_basename(p: &str) -> &str {
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or(p)
+}
+
+/// Render the KR's tasks as a checklist for a categorized session.
+/// Tap the box → cycles status (todo → in-progress → review → done).
+/// This is the feature-level "what's done" view that replaced the
+/// per-tool bullets.
+fn progress_panel(snap: &BoardSnapshot, project_name: &str, kr_id: u64) -> Markup {
+    let project = match snap.projects.iter().find(|p| p.name == project_name) {
+        Some(p) => p,
+        None => return html! {},
+    };
+    let kr_title = project
+        .key_results
+        .iter()
+        .find(|k| k.id == kr_id)
+        .map(|k| k.title.as_str())
+        .unwrap_or("");
+    let tasks: Vec<&Task> = project
+        .tasks
+        .iter()
+        .filter(|t| t.key_results.contains(&kr_id))
+        .collect();
+    html! {
+        div.progress-panel {
+            div.progress-panel-header {
+                span.progress-panel-label.subtle { "progress" }
+                @if !kr_title.is_empty() {
+                    span.progress-panel-kr-title { (kr_title) }
+                }
+            }
+            @if tasks.is_empty() {
+                p.progress-panel-empty.subtle {
+                    "no tasks under this KR yet — add one from the project to track progress"
+                }
+            } @else {
+                ul.progress-tasks {
+                    @for t in &tasks {
+                        (progress_task_row(project_name, t))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn progress_task_row(project_name: &str, t: &Task) -> Markup {
+    let url = format!("/htmx/projects/{}/tasks/{}", urlencode(project_name), t.id);
+    let (glyph, classmod) = match t.status {
+        TaskStatus::Done => ("☑", "done"),
+        TaskStatus::Review => ("◐", "review"),
+        TaskStatus::InProgress => ("◧", "in-progress"),
+        TaskStatus::Todo => ("☐", "todo"),
+        TaskStatus::Backlog => ("·", "backlog"),
+        TaskStatus::Custom(_) => ("·", "custom"),
+    };
+    let class = format!("progress-task progress-task-{}", classmod);
+    html! {
+        li.(class) data-task-id=(t.id) {
+            form.progress-task-toggle
+                "hx-patch"=(url)
+                "hx-target"="main.board"
+                "hx-swap"="outerHTML" {
+                input type="hidden" name="action" value="cycle-status";
+                button.progress-task-checkbox type="submit" aria-label="cycle status" {
+                    (glyph)
+                }
+            }
+            span.progress-task-title { (t.title) }
+        }
+    }
+}
+
+/// Reply-to-Claude input. Submitting POSTs to sipag's bridge endpoint,
+/// which forwards to katulong's /api/claude/respond/:uuid on the host.
+fn reply_input(host_id: &str, uuid: &str) -> Markup {
+    let url = format!(
+        "/htmx/sessions/{}/{}/respond",
+        urlencode(host_id),
+        urlencode(uuid)
+    );
+    html! {
+        form.reply-form
+            "hx-post"=(url)
+            "hx-swap"="none"
+            "hx-on::after-request"="this.reset()" {
+            input.reply-input
+                type="text"
+                name="text"
+                placeholder="reply to claude — Enter to send"
+                autocomplete="off";
+            button.reply-send type="submit" aria-label="send" { "⏎" }
+        }
+    }
+}
+
+/// The categorize affordance inside an expanded misc row. Either
+/// renders gemma4's proposal with an accept button, or just the
+/// pick-another dropdown when gemma4 hasn't returned anything yet.
+fn kr_proposal_chip(
+    obs_id: &str,
+    proposal: Option<&KrProposal>,
+    kr_choices: &[KrChoice],
+) -> Markup {
+    let post_url = format!("/htmx/observations/{}/kr", urlencode(obs_id));
+    let reject_url = format!("/htmx/observations/{}/kr/reject", urlencode(obs_id));
+    html! {
+        div.kr-proposal {
+            @if let Some(p) = proposal {
+                div.kr-proposal-row {
+                    span.kr-proposal-label.subtle { "fits → " }
+                    span.kr-proposal-objective.subtle { (p.objective) " / " }
+                    span.kr-proposal-target { (p.kr_title) }
+                    span.kr-proposal-confidence.subtle { " (" (p.confidence) "%)" }
+                    @if !p.reason.is_empty() {
+                        span.kr-proposal-reason.subtle { " — " (p.reason) }
+                    }
+                    div.kr-proposal-actions {
+                        form.kr-proposal-accept-form
+                            "hx-post"=(post_url)
+                            "hx-target"="main.board"
+                            "hx-swap"="outerHTML" {
+                            input type="hidden" name="objective" value=(p.objective);
+                            input type="hidden" name="kr" value=(p.kr);
+                            button.kr-proposal-accept type="submit" { "accept" }
+                        }
+                        form.kr-proposal-reject-form
+                            "hx-post"=(reject_url)
+                            "hx-target"="main.board"
+                            "hx-swap"="outerHTML" {
+                            button.kr-proposal-reject type="submit" { "reject" }
+                        }
+                    }
+                }
+            } @else {
+                span.kr-proposal-label.subtle { "uncategorized — " }
+            }
+            details.kr-proposal-pick-another {
+                summary { "pick another" }
+                ul.kr-proposal-list {
+                    @for kr in kr_choices {
+                        li {
+                            form
+                                "hx-post"=(post_url)
+                                "hx-target"="main.board"
+                                "hx-swap"="outerHTML" {
+                                input type="hidden" name="objective" value=(kr.objective);
+                                input type="hidden" name="kr" value=(kr.kr);
+                                button type="submit" {
+                                    span.subtle { (kr.objective) " / " }
+                                    (kr.kr_title)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn find_host_url<'a>(snap: &'a BoardSnapshot, host_id: &str) -> Option<&'a str> {

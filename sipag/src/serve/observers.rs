@@ -134,10 +134,10 @@ fn upsert_observation(
     let (mut obs, was_new) = if path.exists() {
         match Observation::load(&state.sipag_dir, &id) {
             Ok(o) => (o, false),
-            Err(_) => (fresh(host, s, now), true),
+            Err(_) => (fresh(host, s, now, &state.sipag_dir), true),
         }
     } else {
-        (fresh(host, s, now), true)
+        (fresh(host, s, now, &state.sipag_dir), true)
     };
 
     // Update mutable fields. We never overwrite first_seen, project,
@@ -214,7 +214,8 @@ fn mark_missing_as_ended(
     Ok(())
 }
 
-fn fresh(host: &Host, s: &KatulongSession, now: &str) -> Observation {
+fn fresh(host: &Host, s: &KatulongSession, now: &str, sipag_dir: &std::path::Path) -> Observation {
+    let (project, kr_id) = infer_categorization(&s.name, sipag_dir);
     Observation {
         host: host.id.clone(),
         session: s.name.clone(),
@@ -222,11 +223,48 @@ fn fresh(host: &Host, s: &KatulongSession, now: &str) -> Observation {
         first_seen: now.to_string(),
         last_seen: now.to_string(),
         status: if s.alive { "active".into() } else { "ended".into() },
-        project: sipag_core::board::MISC_PROJECT.to_string(),
-        kr_id: 0,
+        project,
+        kr_id,
         labels: Vec::new(),
         summary: String::new(),
+        kr_refs: Vec::new(),
     }
+}
+
+/// If a katulong session name follows sipag's dispatch convention
+/// `{project}--{role}` AND that project + role exist in sipag, return
+/// the matching project name and (when the task targets exactly one
+/// KR) its KR id. Otherwise the session lands in misc and gemma4 will
+/// propose a categorization later.
+///
+/// Sessions a user starts directly in katulong won't match this
+/// pattern and naturally land in misc — the gemma4 proposal flow is
+/// exactly for those.
+fn infer_categorization(session_name: &str, sipag_dir: &std::path::Path) -> (String, u64) {
+    let misc = (sipag_core::board::MISC_PROJECT.to_string(), 0u64);
+    let (project_name, role) = match session_name.split_once("--") {
+        Some((p, r)) if !p.is_empty() && !r.is_empty() => (p, r),
+        _ => return misc,
+    };
+    if sipag_core::board::load_project(sipag_dir, project_name).is_err() {
+        return misc;
+    }
+    let tasks = match sipag_core::board::list_tasks(sipag_dir, project_name, None) {
+        Ok(t) => t,
+        Err(_) => return (project_name.to_string(), 0),
+    };
+    let kr_id = tasks
+        .iter()
+        .find(|t| t.role == role)
+        .and_then(|t| {
+            if t.key_results.len() == 1 {
+                Some(t.key_results[0])
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    (project_name.to_string(), kr_id)
 }
 
 /// Subset of katulong's `/sessions` response we care about.
