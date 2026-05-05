@@ -1,4 +1,3 @@
-node_modules/
 # Ignore everything in public/js/ by default, then un-ignore the
 # specific files we vendor by hand. Note: the rule can't have a
 # trailing slash or the negations below are silently dropped.
@@ -7,6 +6,4 @@ public/js/*
 !public/js/transport.js
 !public/js/sipag-live.js
 !public/js/sipag-debug.js
-.shadow-cljs/
-.cpcache/
 *.log

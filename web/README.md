@@ -1,17 +1,20 @@
-# sipag web — Week-1 agent-manager spike
+# sipag web
 
-Vanilla ClojureScript SPA, served by `sipag serve`. Displays live crew
-status across whatever katulong instances you list in `~/.sipag/hosts.toml`
-— one, several, or many.
+The browser frontend served by `sipag serve`. The page is rendered
+server-side by maud templates in `sipag/src/serve/board_view.rs`; the
+files in `public/` are static assets only.
 
 ## Stack
 
-- **shadow-cljs** via npm — Java required (`brew install openjdk` if
-  you don't have one).
-- **Vanilla ClojureScript** — no Reagent, no re-frame, no libs. Direct
-  DOM interop through `goog.dom`. One atom + `add-watch` → re-render.
-- **Rust `sipag serve`** — axum + reqwest; proxies to each katulong with
-  `Authorization: Bearer <apiKey>` and ships this directory's `public/`.
+- **HTMX** for partial swaps (`htmx.min.js` is vendored — no npm).
+- **Hand-written JS** in `public/js/` for the WebSocket transport
+  (`transport.js`), live-DOM glue (`sipag-live.js`), and the in-page
+  debug panel (`sipag-debug.js`).
+- **Rust `sipag serve`** — axum + reqwest; proxies each katulong with
+  `Authorization: Bearer <apiKey>` and serves this directory's
+  `public/`.
+
+No build step on this side. Edit a file in `public/`, refresh.
 
 ## One-time setup
 
@@ -27,41 +30,21 @@ chmod 600 ~/.sipag/hosts.toml    # it contains API keys
 # For the local host:
 #   jq -r .apiKey ~/.katulong/remote.json
 # Paste each value into the matching `apiKey` field in hosts.toml.
-
-# 2. Install shadow-cljs + its deps.
-cd web
-npm install
 ```
 
-## Run (two shells)
+## Run
 
 ```sh
-# shell A — keep the cljs bundle fresh
-cd web
-npm run watch        # shadow-cljs watch app → public/js/app.js
-
-# shell B — the backplane
 cargo run -p sipag -- serve --port 7100
 ```
 
-Open <http://localhost:7100>. You should see one column per host you
-configured, each showing its projects and worker statuses. Everything
-is real — the browser talks to a Rust server, which talks to each
-configured katulong.
+Open <http://localhost:7100>. You'll see live activity across every
+host in `hosts.toml`, plus your projects and key results.
 
-## What this proves
+## History
 
-- End-to-end pipe from a cljs SPA through a Rust proxy to live katulong
-  APIs across any number of hosts.
-- API keys never leave the Rust process.
-- Zero katulong changes — the browser tile in katulong can point at
-  <http://localhost:7100> today.
-
-## What's deliberately missing (Booster 4 on purpose)
-
-- No SSE fan-in of `/crew/output` — polling every 5s.
-- No dispatch (`POST /crew/spawn`) — read-only.
-- No projects/tasks/roles view — just what `/crew/status` returns.
-- No katulong integration (`apps.toml`, picker entry) — that's Week 2.
-
-See `docs/as-katulong-tile.md` for the week-by-week plan.
+This directory used to be a vanilla ClojureScript SPA built with
+shadow-cljs. The htmx rewrite (commit on `spike/w1-htmx`) replaced
+`web/src/sipag/app.cljs` with server-rendered maud templates so the
+page works without a JS build step. See `docs/as-katulong-tile.md` for
+the original Week-1 cljs design notes.

@@ -47,19 +47,9 @@ dev: fmt lint test
 clean:
 	cargo clean
 
-# ── Web spike (Week 1) ────────────────────────────────────────────────────────
-# ClojureScript SPA served by `sipag serve`. See web/README.md.
-web-install:
-	cd web && npm install
-
-web-watch:
-	cd web && npm run watch
-
-web-build:
-	cd web && npm run release
-
-web-clean:
-	cd web && npm run clean
+# ── Web ───────────────────────────────────────────────────────────────────────
+# Frontend is server-rendered (maud) + vendored HTMX/JS in `web/public/`.
+# No build step — edit a file under `web/public/` and refresh.
 
 serve:
 	cargo run -p sipag -- serve --port 7100
