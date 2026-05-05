@@ -27,6 +27,11 @@ pub struct BoardSnapshot {
     pub hosts: Vec<HostSummary>,
     /// host_id → vec of session names the host reports running.
     pub sessions: BTreeMap<String, Vec<String>>,
+    /// (host_id, session_name) → live meta from katulong's GET /sessions.
+    /// Source of truth lives in each host's ~/.katulong/sessions.json;
+    /// sipag re-fetches on every snapshot rather than caching to disk so
+    /// there's no second source of truth to drift.
+    pub live: BTreeMap<(String, String), LiveSessionMeta>,
     /// Observations the observer task has captured. Includes both
     /// uncategorized (`project == "misc"`) and categorized records.
     /// Sorted by `last_seen` desc.
@@ -36,6 +41,17 @@ pub struct BoardSnapshot {
     /// URLs. Changes on every server restart so iPad Safari (and other
     /// aggressive HTTP caches) can't keep serving stale transport.js.
     pub boot_id: String,
+}
+
+/// Subset of katulong's `/sessions[i].meta` that the board renders.
+/// Re-fetched on every snapshot — never persisted on the sipag side.
+#[derive(Default)]
+pub struct LiveSessionMeta {
+    pub auto_title: Option<String>,
+    pub summary_short: Option<String>,
+    pub summary_long: Option<String>,
+    pub cwd: Option<String>,
+    pub claude_uuid: Option<String>,
 }
 
 /// Boot id assigned once per process. Used to cache-bust JS assets.
@@ -76,6 +92,7 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
                 projects: Vec::new(),
                 hosts: state.hosts.hosts.iter().map(host_summary).collect(),
                 sessions: BTreeMap::new(),
+                live: BTreeMap::new(),
                 observations: Vec::new(),
                 error: Some(format!("{e}")),
                 boot_id: boot_id().to_string(),
@@ -84,9 +101,15 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
     };
 
     let mut sessions = BTreeMap::new();
+    let mut live = BTreeMap::new();
     for h in &state.hosts.hosts {
-        let names = fetch_session_names(state, h).await.unwrap_or_default();
+        let rows = fetch_sessions_full(state, h).await.unwrap_or_default();
+        let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
         sessions.insert(h.id.clone(), names);
+        for r in rows {
+            let key = (h.id.clone(), r.name.clone());
+            live.insert(key, r.into_live_meta());
+        }
     }
 
     let observations =
@@ -96,6 +119,7 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
         projects,
         hosts: state.hosts.hosts.iter().map(host_summary).collect(),
         sessions,
+        live,
         observations,
         error: None,
         boot_id: boot_id().to_string(),
@@ -131,12 +155,7 @@ fn load_projects_blocking(sipag_dir: &std::path::Path) -> anyhow::Result<Vec<Pro
     Ok(out)
 }
 
-async fn fetch_session_names(state: &AppState, host: &Host) -> anyhow::Result<Vec<String>> {
-    #[derive(serde::Deserialize)]
-    struct Sess {
-        #[serde(default)]
-        name: String,
-    }
+async fn fetch_sessions_full(state: &AppState, host: &Host) -> anyhow::Result<Vec<RemoteSession>> {
     let url = format!("{}/sessions", host.base_url());
     let resp = state
         .http
@@ -147,8 +166,73 @@ async fn fetch_session_names(state: &AppState, host: &Host) -> anyhow::Result<Ve
     if !resp.status().is_success() {
         return Ok(Vec::new());
     }
-    let rows: Vec<Sess> = resp.json().await.unwrap_or_default();
-    Ok(rows.into_iter().map(|s| s.name).collect())
+    Ok(resp.json().await.unwrap_or_default())
+}
+
+/// Subset of katulong's `/sessions` row that the board cares about.
+#[derive(serde::Deserialize)]
+struct RemoteSession {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    meta: Option<RemoteMeta>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RemoteMeta {
+    #[serde(rename = "autoTitle", default)]
+    auto_title: Option<String>,
+    #[serde(default)]
+    summary: Option<RemoteSummary>,
+    #[serde(default)]
+    pane: Option<RemotePane>,
+    #[serde(default)]
+    claude: Option<RemoteClaude>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RemoteSummary {
+    #[serde(default)]
+    short: Option<String>,
+    #[serde(default)]
+    long: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RemotePane {
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct RemoteClaude {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+impl RemoteSession {
+    fn into_live_meta(self) -> LiveSessionMeta {
+        let meta = self.meta.unwrap_or_default();
+        let cwd = meta
+            .pane
+            .as_ref()
+            .and_then(|p| p.cwd.clone())
+            .or_else(|| meta.claude.as_ref().and_then(|c| c.cwd.clone()));
+        let claude_uuid = meta.claude.as_ref().and_then(|c| c.uuid.clone());
+        let (summary_short, summary_long) = meta
+            .summary
+            .map(|s| (s.short, s.long))
+            .unwrap_or((None, None));
+        LiveSessionMeta {
+            auto_title: meta.auto_title,
+            summary_short,
+            summary_long,
+            cwd,
+            claude_uuid,
+        }
+    }
 }
 
 // ── helpers ─────────────────────────────────────────────────────────
@@ -1171,7 +1255,7 @@ pub fn live_activity(snap: &BoardSnapshot) -> Markup {
                         h3.live-misc-header { "misc" span.subtle { " — uncategorized sessions" } }
                         ul.live-misc {
                             @for obs in &active_misc {
-                                (live_obs_row(obs, find_host_url(snap, &obs.host)))
+                                (live_obs_row(obs, find_host_url(snap, &obs.host), snap.live.get(&(obs.host.clone(), obs.session.clone()))))
                             }
                         }
                     }
@@ -1180,7 +1264,7 @@ pub fn live_activity(snap: &BoardSnapshot) -> Markup {
                             summary { "ended (" (ended.len()) ")" }
                             ul.live-misc.ended {
                                 @for obs in &ended {
-                                    (live_obs_row(obs, find_host_url(snap, &obs.host)))
+                                    (live_obs_row(obs, find_host_url(snap, &obs.host), snap.live.get(&(obs.host.clone(), obs.session.clone()))))
                                 }
                             }
                         }
@@ -1194,6 +1278,7 @@ pub fn live_activity(snap: &BoardSnapshot) -> Markup {
 fn live_obs_row(
     obs: &sipag_core::board::Observation,
     host_url: Option<&str>,
+    live: Option<&LiveSessionMeta>,
 ) -> Markup {
     // `?s=<name>` is katulong's deep-link primitive — its boot path
     // (app.js around line 97) reads the param and calls
@@ -1211,30 +1296,93 @@ fn live_obs_row(
     // PWA — the link is to a different origin, so this is the right
     // behavior; we don't want sipag to host katulong as a fragment.)
     let katulong_url = host_url.map(|u| format!("{u}/?s={}", urlencode(&obs.session)));
-    // The whole row is the tap target (better than a tiny inline link
-    // on touch). Anchor wraps everything so the OS still sees an
-    // ordinary navigation — keeping the PWA-routing behavior intact.
-    let inner = html! {
-        span.live-obs-host { (obs.host) }
-        span.subtle { "/" }
-        span.live-obs-session { (obs.session) }
-        span.live-obs-age.subtle { " · " (relative_time(&obs.last_seen)) }
-        @if !obs.summary.is_empty() {
-            span.live-obs-summary { " · " (obs.summary) }
-        }
-        @if obs.kr_id != 0 {
-            span.live-obs-kr { " · KR#" (obs.kr_id) " in " (obs.project) }
-        }
-    };
+    let auto_title = live.and_then(|l| l.auto_title.as_deref());
+    let summary_short = live.and_then(|l| l.summary_short.as_deref());
+    let summary_long = live.and_then(|l| l.summary_long.as_deref());
+    let cwd_full = live.and_then(|l| l.cwd.as_deref());
+    let cwd_basename = cwd_full.map(path_basename);
+    let claude_uuid = live.and_then(|l| l.claude_uuid.as_deref());
+    // data-key persists open state across the 5s board poll — the
+    // restoration script in sipag-live.js stores opened keys in a Set
+    // and re-opens them after every htmx swap.
+    let key = format!("{}--{}", obs.host, obs.session);
+    let has_detail_body = summary_long.map_or(false, |s| !s.is_empty())
+        || cwd_full.map_or(false, |s| !s.is_empty())
+        || claude_uuid.map_or(false, |s| !s.is_empty());
+
     html! {
         li.live-obs data-host=(obs.host) data-session=(obs.session) {
-            @if let Some(ref u) = katulong_url {
-                a.live-obs-link href=(u) rel="noopener" { (inner) }
-            } @else {
-                span.live-obs-link { (inner) }
+            details.live-obs-details data-key=(key) {
+                summary.live-obs-summary-row {
+                    span.live-obs-host { (obs.host) }
+                    span.subtle { "/" }
+                    span.live-obs-session { (obs.session) }
+                    @if let Some(t) = auto_title {
+                        @if t != obs.session && !t.is_empty() {
+                            span.live-obs-title { " · " (t) }
+                        }
+                    }
+                    @if let Some(c) = cwd_basename {
+                        @if !c.is_empty() {
+                            span.live-obs-cwd.subtle { " · " (c) }
+                        }
+                    }
+                    span.live-obs-age.subtle { " · " (relative_time(&obs.last_seen)) }
+                    @if let Some(s) = summary_short {
+                        @if !s.is_empty() {
+                            span.live-obs-live-summary.subtle { " — " (s) }
+                        }
+                    }
+                    @if !obs.summary.is_empty() {
+                        span.live-obs-categorized-summary { " · " (obs.summary) }
+                    }
+                    @if obs.kr_id != 0 {
+                        span.live-obs-kr { " · KR#" (obs.kr_id) " in " (obs.project) }
+                    }
+                }
+                @if let Some(ref u) = katulong_url {
+                    a.live-obs-deeplink href=(u) rel="noopener" aria-label="Open in katulong" { "↗" }
+                }
+                div.live-obs-detail {
+                    @if has_detail_body {
+                        @if let Some(long) = summary_long {
+                            @if !long.is_empty() {
+                                p.live-obs-detail-summary { (long) }
+                            }
+                        }
+                        @if let Some(c) = cwd_full {
+                            @if !c.is_empty() {
+                                div.live-obs-detail-meta {
+                                    span.subtle { "cwd " }
+                                    code { (c) }
+                                }
+                            }
+                        }
+                        @if let Some(uuid) = claude_uuid {
+                            @if !uuid.is_empty() {
+                                div.live-obs-detail-meta {
+                                    span.subtle { "claude " }
+                                    code { (uuid) }
+                                }
+                            }
+                        }
+                    } @else {
+                        p.live-obs-detail-empty.subtle {
+                            "no live context yet — will populate on next summarizer cycle"
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+fn path_basename(p: &str) -> &str {
+    p.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(p)
 }
 
 fn find_host_url<'a>(snap: &'a BoardSnapshot, host_id: &str) -> Option<&'a str> {

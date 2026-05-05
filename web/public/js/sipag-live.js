@@ -7,6 +7,54 @@
 // The HTMX-rendered board is the source of truth for static content;
 // this script only handles live append / pulse animations / ticker.
 
+// Preserve <details data-key=...> open state across HTMX swaps. Without
+// this every 5s board poll would slam every expanded session-detail
+// closed. We track the user's intent in a Set keyed by data-key and
+// re-apply it after each swap.
+(function () {
+  const openKeys = new Set();
+
+  function captureOpen(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll("details[data-key]").forEach((d) => {
+      const k = d.getAttribute("data-key");
+      if (!k) return;
+      if (d.open) openKeys.add(k);
+      else openKeys.delete(k);
+    });
+  }
+
+  function reapplyOpen(root) {
+    if (!root || !root.querySelectorAll) return;
+    root.querySelectorAll("details[data-key]").forEach((d) => {
+      const k = d.getAttribute("data-key");
+      if (k && openKeys.has(k)) d.open = true;
+    });
+  }
+
+  // Track user toggles directly so we don't lose state if a swap
+  // happens with no opened details in the outgoing tree.
+  document.addEventListener("toggle", (e) => {
+    const d = e.target;
+    if (!d || d.tagName !== "DETAILS") return;
+    const k = d.getAttribute && d.getAttribute("data-key");
+    if (!k) return;
+    if (d.open) openKeys.add(k);
+    else openKeys.delete(k);
+  }, true);
+
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    captureOpen(e.detail && e.detail.target);
+  });
+  document.addEventListener("htmx:afterSwap", (e) => {
+    reapplyOpen(e.detail && e.detail.target);
+  });
+  // Also re-apply after the very first board render (in case the user
+  // hard-refreshed with details open in the previous session — we can't
+  // restore *those*, but we want to be idempotent if they re-toggle).
+  document.addEventListener("DOMContentLoaded", () => reapplyOpen(document));
+})();
+
 (function () {
   if (!window.sipagTransport) return;
   const t = window.sipagTransport.connect("/ws");

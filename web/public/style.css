@@ -699,34 +699,81 @@ details.quick-toggle[open] > summary {
   border-bottom: 1px dotted var(--border);
 }
 .live-obs:last-child { border-bottom: none; }
-/* Whole-row tap target. A tiny inline link inside a paragraph is too
-   small to hit reliably on touch, so the anchor wraps the entire row.
-   Hit cues: subtle row-level :active background + an arrow on the
-   right so users see it's tappable. */
-.live-obs-link {
+/* Each row is a <details>; the <summary> is the tap target that
+   toggles the inline detail panel. The deep-link is overlaid on the
+   right edge so clicking it navigates instead of toggling. */
+.live-obs-details {
+  position: relative;
+}
+.live-obs-summary-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  padding: 10px 12px;
-  text-decoration: none;
-  color: inherit;
+  padding: 10px 36px 10px 12px;
+  cursor: pointer;
+  list-style: none;
   -webkit-tap-highlight-color: rgba(122, 162, 247, 0.18);
-  position: relative;
   min-height: 28px;
 }
-.live-obs-link::after {
-  content: "↗";
-  margin-left: auto;
+.live-obs-summary-row::-webkit-details-marker { display: none; }
+.live-obs-summary-row::marker { content: ""; }
+.live-obs-summary-row:hover { background: var(--bg); }
+.live-obs-summary-row:active { background: rgba(122, 162, 247, 0.12); }
+.live-obs-deeplink {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
   color: var(--dim);
-  padding-left: 12px;
+  text-decoration: none;
   font-size: 14px;
+  z-index: 1;
+  -webkit-tap-highlight-color: rgba(122, 162, 247, 0.18);
 }
-.live-obs-link:hover { background: var(--bg); }
-.live-obs-link:active { background: rgba(122, 162, 247, 0.12); }
+.live-obs-deeplink:hover { color: var(--accent); background: var(--bg); }
+.live-obs-details[open] .live-obs-deeplink {
+  /* Once expanded, anchor the link to the summary row only, not the
+     full expanded height. */
+  height: auto;
+  top: 10px;
+  bottom: auto;
+}
 .live-obs-host { color: var(--accent); }
 .live-obs-session { color: var(--text); font-weight: 500; }
-.live-obs-summary { color: var(--dim); }
+.live-obs-categorized-summary { color: var(--dim); }
 .live-obs-kr { color: var(--accent); }
+.live-obs-detail {
+  padding: 8px 16px 14px;
+  background: rgba(122, 162, 247, 0.04);
+  border-top: 1px dotted var(--border);
+}
+.live-obs-detail-summary {
+  margin: 4px 0 8px;
+  line-height: 1.5;
+  color: var(--text);
+  font-size: 13px;
+}
+.live-obs-detail-meta {
+  font-size: 11px;
+  color: var(--dim);
+  margin: 2px 0;
+  font-family: inherit;
+}
+.live-obs-detail-meta code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+}
+.live-obs-detail-empty {
+  margin: 4px 0;
+  font-size: 12px;
+  font-style: italic;
+}
 .live-ended > summary {
   cursor: pointer; font-size: 11px; color: var(--dim);
   padding: 4px 0 2px; list-style: none;
