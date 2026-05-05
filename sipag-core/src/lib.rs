@@ -1,5 +1,9 @@
+pub mod auth;
 pub mod board;
 pub mod config;
 pub mod feature;
+pub mod hosts;
 pub mod katulong;
+pub mod llm;
+pub mod pubsub;
 pub mod refine;

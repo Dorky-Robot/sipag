@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dorkyrobot.sipag</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/felixflores/Projects/dorky_robot/sipag/.worktrees/htmx-spike/target/release/sipag</string>
+    <string>serve</string>
+    <string>--port</string>
+    <string>7100</string>
+    <string>--web-root</string>
+    <string>/Users/felixflores/Projects/dorky_robot/sipag/.worktrees/htmx-spike/web/public</string>
+    <string>--workers</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/felixflores/Projects/dorky_robot/sipag/.worktrees/htmx-spike</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>OLLAMA_HOST</key>
+    <string>https://ollama-mac2024.felixflor.es</string>
+    <key>OLLAMA_MODEL</key>
+    <string>gemma4:31b</string>
+    <key>OLLAMA_AUTH</key>
+    <string>@/Users/felixflores/.sipag/ollama-bridge.token</string>
+    <key>SIPAG_PUBLIC_URL</key>
+    <string>https://sipag.felixflor.es</string>
+    <key>RUST_LOG</key>
+    <string>sipag=info,tower_http=info</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/felixflores</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/felixflores/Library/Logs/sipag/launchd-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/felixflores/Library/Logs/sipag/launchd-stderr.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

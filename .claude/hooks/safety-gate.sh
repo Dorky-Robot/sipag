@@ -255,9 +255,17 @@ Bash)
 		check_rm_safe "$cmd"
 	fi
 
-	# SSH to known trusted hosts is allowed.
-	if echo "$cmd" | grep -qE '^ssh (mini|mac-2019) '; then
+	# SSH/SCP to known trusted hosts is allowed. Kept inclusive to cover
+	# the aliases actually present in the author's ~/.ssh/config:
+	#   - direct LAN aliases: mini, mac2019, mac2024
+	#   - cloudflare-tunneled aliases (cloudflare-* with cloudflared
+	#     ProxyCommand) for when a host isn't on the home LAN
+	#   - historical hyphenated spellings (mac-2019)
+	if echo "$cmd" | grep -qE '^ssh (mini|mac2019|mac2024|mac-2019|cloudflare-mac2019|cloudflare-mac2024|cloudflare-mini) '; then
 		allow "SSH to trusted host"
+	fi
+	if echo "$cmd" | grep -qE '^scp (-[A-Za-z0-9]+ )*[^ ]+ (mini|mac2019|mac2024|mac-2019|cloudflare-mac2019|cloudflare-mac2024|cloudflare-mini):'; then
+		allow "SCP to trusted host"
 	fi
 
 	# Deny check is the only gate — if it matches, deny; otherwise allow.

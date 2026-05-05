@@ -16,6 +16,11 @@ const GIT_HASH: &str = env!("CARGO_GIT_SHA");
     about = "Work dispatcher for Claude Code crews",
     long_about = "sipag is a board-driven dispatcher that ships tasks to katulong sessions.\n\nRun with no arguments to launch the interactive TUI."
 )]
+// `version: ()` is a clap-only field that wires `-v`/`--version` to
+// the version-printing action — it has no value and no public use,
+// so clippy's manual-non-exhaustive lint mistakes the shape for an
+// API constraint. It isn't.
+#[allow(clippy::manual_non_exhaustive)]
 pub struct Cli {
     #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
     version: (),
@@ -132,6 +137,29 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Run the agent-manager web server
+    ///
+    /// Server-rendered HTMX UI (maud templates) plus a JSON `/api/*`
+    /// surface for programmatic clients. Proxies the katulong mesh
+    /// defined in ~/.sipag/hosts.toml; API keys stay server-side.
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value_t = 7100)]
+        port: u16,
+
+        /// Directory of static assets served as a fallback (style.css,
+        /// htmx.min.js, favicons). The HTML for `/` is rendered by the
+        /// server, not loaded from disk.
+        #[arg(long, default_value = "web/public")]
+        web_root: std::path::PathBuf,
+
+        /// Enable autonomous workers (research, expand, …). When off
+        /// (default) the server still ships the UI, pubsub, WS, and
+        /// HTMX CRUD; only the label-driven dispatcher is gated.
+        #[arg(long, default_value_t = false)]
+        workers: bool,
+    },
+
     /// Print version
     Version,
 }
@@ -233,6 +261,11 @@ pub fn run(cli: Cli) -> Result<()> {
             from_seq,
             json,
         }) => run_sub(&topic, from_seq, json),
+        Some(Commands::Serve {
+            port,
+            web_root,
+            workers,
+        }) => crate::serve::run(port, web_root, workers),
         Some(Commands::Version) => run_version(),
     }
 }

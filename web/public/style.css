@@ -1,0 +1,781 @@
+/* sipag — OKR-shaped view.
+   Three sections (objectives, standing, ideas), traffic-light KRs,
+   inline + buttons that expand into small forms. No kanban. */
+
+:root {
+  --bg:      #0e1013;
+  --surface: #14181d;
+  --elev:    #1a1f26;
+  --border:  #262c34;
+  --text:    #e6e8eb;
+  --dim:     #9aa3ae;
+  --subtle:  #6b7380;
+  --accent:  #7aa2f7;
+  --green:   #9ece6a;
+  --yellow:  #e0af68;
+  --red:     #f7768e;
+  --done:    #7aa2f7;
+  --mono:    ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg); color: var(--text);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
+
+#app {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 24px 20px 140px;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── topbar ─────────────────────────────────────────── */
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0 18px;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 2;
+  margin-bottom: 18px;
+}
+.topbar h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.subtle  { color: var(--subtle); font-size: 13px; }
+.spacer  { flex: 1; }
+
+.mesh-chip {
+  font-size: 12px;
+  color: var(--dim);
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+.err-chip {
+  color: var(--red);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* ── sections ───────────────────────────────────────── */
+
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+}
+
+.section-head {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--subtle);
+  margin: 18px 0 6px;
+}
+.section-head:first-child { margin-top: 0; }
+
+.section-actions {
+  margin-bottom: 18px;
+}
+
+/* ── objective / standing card ─────────────────────── */
+
+.objective, .standing {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+
+.objective-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.objective-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.objective-empty {
+  color: var(--subtle);
+  font-style: italic;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.objective-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+/* ── delete buttons ─────────────────────────────────── */
+
+/* Hover-revealed × on each row. Visible always on touch devices
+   (no hover) so they're not unreachable on iPad. */
+.row-delete {
+  background: transparent;
+  border: none;
+  color: var(--subtle);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.task:hover .row-delete,
+.kr-head:hover .row-delete,
+.objective-head:hover .row-delete,
+.idea:hover .row-delete {
+  opacity: 1;
+}
+.row-delete:hover { color: var(--red); background: rgba(247,118,142,0.1); }
+@media (pointer: coarse) {
+  .row-delete { opacity: 0.6; }
+}
+
+/* ── dispatch button ───────────────────────────────── */
+
+.dispatch-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 1px 7px;
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono);
+  cursor: pointer;
+  line-height: 1;
+}
+.dispatch-btn:hover {
+  background: var(--accent);
+  color: var(--bg);
+  border-color: var(--accent);
+}
+
+/* ── dispatch picker (multi-host) ─────────────────── */
+
+.dispatch-picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+.dispatch-picker {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-width: 320px;
+  max-width: 480px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+}
+.dispatch-picker-head {
+  font-size: 13px;
+  color: var(--dim);
+  margin-bottom: 8px;
+}
+.dispatch-picker ul {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dispatch-picker li button {
+  width: 100%;
+  text-align: left;
+  background: var(--elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+.dispatch-picker li button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.dispatch-picker-cancel {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.dispatch-picker-cancel:hover { color: var(--text); }
+
+/* ── toast ──────────────────────────────────────────── */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 60px;
+  transform: translateX(-50%);
+  background: var(--accent);
+  color: var(--bg);
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-family: var(--mono);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  z-index: 20;
+  animation: toast-in 0.15s ease-out;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* ── idea activate ──────────────────────────────────── */
+
+.idea-activate {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  margin-left: auto;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.idea:hover .idea-activate { opacity: 1; }
+.idea-activate:hover { background: var(--accent); color: var(--bg); }
+@media (pointer: coarse) {
+  .idea-activate { opacity: 1; }
+}
+
+/* ── KR row ─────────────────────────────────────────── */
+
+.kr {
+  padding: 8px 0 10px;
+  border-bottom: 1px dashed var(--border);
+}
+.kr:last-of-type { border-bottom: none; }
+
+.kr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.kr-head .kr-title { flex: 1; }
+
+.kr-stance {
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  padding: 2px 6px;
+  margin-right: 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  vertical-align: -3px;
+}
+.kr-stance:hover { background: var(--elev); }
+.kr-stance.green  { color: var(--green); }
+.kr-stance.yellow { color: var(--yellow); }
+.kr-stance.red    { color: var(--red); }
+.kr-stance.done   { color: var(--done); }
+
+.kr-title {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.kr-tasks {
+  margin-top: 6px;
+  margin-left: 32px;
+}
+
+/* ── tasks ──────────────────────────────────────────── */
+
+.tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.task {
+  background: var(--elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.task-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-id {
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 2.5em;
+}
+.task-title { color: var(--text); flex: 1; min-width: 0; }
+.task-foot {
+  margin-top: 4px;
+  color: var(--green);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* Status chip is a real button now — clicking cycles the task's
+   status. Border-less, low-key, but reveals it's interactive on
+   hover. */
+.status-chip {
+  font-size: 11px;
+  text-transform: lowercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  cursor: pointer;
+  background: var(--bg);
+  border: 1px solid transparent;
+  color: var(--dim);
+  font-family: var(--mono);
+  font: inherit;
+  font-size: 11px;
+}
+.status-chip:hover { border-color: var(--border); }
+.status-chip.in-progress { color: var(--green);  background: rgba(158,206,106,0.12); }
+.status-chip.review      { color: var(--yellow); background: rgba(224,175,104,0.12); }
+.status-chip.done        { color: var(--done);   background: rgba(122,162,247,0.12); }
+.status-chip.todo        { color: var(--dim);    background: var(--bg); }
+.status-chip.backlog     { color: var(--subtle); background: var(--bg); }
+
+.labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.label {
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: var(--mono);
+}
+
+/* ── loose bucket ───────────────────────────────────── */
+
+.loose {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.loose-head {
+  font-size: 12px;
+  color: var(--subtle);
+  margin-bottom: 6px;
+}
+
+/* ── inline forms ───────────────────────────────────── */
+
+.form { display: inline-flex; }
+.form.open { display: block; flex-basis: 100%; }
+
+.form-toggle {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--dim);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.form-toggle:hover { color: var(--text); border-style: solid; }
+
+.form-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.form-input {
+  background: var(--elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.form-input:focus { border-color: var(--accent); }
+
+.form-actions {
+  display: flex;
+  gap: 6px;
+}
+.form-submit, .form-cancel {
+  background: var(--elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.form-submit { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.form-submit:hover { filter: brightness(1.1); }
+.form-cancel { color: var(--dim); }
+.form-cancel:hover { color: var(--text); }
+
+/* ── label chips + quick toggles ───────────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chip-x {
+  background: transparent;
+  border: none;
+  color: var(--subtle);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 2px;
+  line-height: 1;
+}
+.chip-x:hover { color: var(--text); }
+
+.label-add {
+  display: inline-flex;
+  margin: 0;
+}
+.label-add input {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--dim);
+  border-radius: 4px;
+  padding: 1px 8px;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  width: 70px;
+}
+.label-add input:focus {
+  outline: none;
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--text);
+  width: 140px;
+}
+
+/* `<details>` wrapper around the quick-toggle row. Collapsed by
+   default — tap the small "labels" affordance to expand. Keeps the
+   per-item card from drowning in seven default-styled buttons. */
+details.quick-toggle { display: inline-block; margin-left: 6px; }
+details.quick-toggle > summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--subtle);
+  font-family: var(--mono);
+  padding: 1px 8px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  display: inline-block;
+}
+details.quick-toggle > summary::-webkit-details-marker { display: none; }
+details.quick-toggle > summary:hover { color: var(--text); border-style: solid; }
+details.quick-toggle[open] > summary {
+  color: var(--text);
+  border-style: solid;
+  border-color: var(--accent);
+}
+
+.quick-labels {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+}
+.quick-label {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-family: var(--mono);
+}
+.quick-label:hover { color: var(--text); border-color: var(--accent); }
+.quick-label.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(122, 162, 247, 0.08);
+}
+
+/* ── idea box (bottom drawer) ───────────────────────── */
+
+.idea-box {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 8px 20px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.idea-box.open { box-shadow: 0 -8px 24px rgba(0,0,0,0.4); }
+
+.idea-toggle {
+  background: transparent;
+  color: var(--dim);
+  border: none;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: left;
+  width: 100%;
+}
+.idea-toggle:not([disabled]):hover { color: var(--text); }
+.idea-toggle[disabled] { cursor: default; color: var(--subtle); }
+
+.ideas {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.idea {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--dim);
+}
+.idea:hover { color: var(--text); }
+
+/* ── empty state ────────────────────────────────────── */
+
+.empty-state {
+  padding: 28px 20px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  margin-bottom: 18px;
+}
+.empty-state h2 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+.empty-state p {
+  margin: 0 0 12px;
+  color: var(--dim);
+}
+.empty-state pre {
+  margin: 0 0 8px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-x: auto;
+}
+.empty-state code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+/* ── insights hint pane (htmx /htmx/insights/hint) ──────────── */
+
+.hint-pane { margin-top: 8px; min-height: 1px; }
+.hint-rows {
+  list-style: none; margin: 0; padding: 0;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); overflow: hidden;
+}
+.hint-row {
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.hint-row:last-child { border-bottom: none; }
+.hint-cat { font-size: 14px; text-align: center; }
+.hint-decision .hint-cat { color: var(--accent); }
+.hint-pattern  .hint-cat { color: var(--accent); }
+.hint-scar     .hint-cat { color: var(--red); }
+.hint-learning .hint-cat { color: var(--green); }
+.hint-title { color: var(--text); font-size: 13px; line-height: 1.35; }
+.hint-meta { font-size: 11px; color: var(--subtle); white-space: nowrap; }
+
+/* ── live activity tray (observations from katulong sessions) ──────── */
+
+.live-activity {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.live-activity > details > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 6px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.live-activity > details > summary::-webkit-details-marker { display: none; }
+.live-activity-title { font-weight: 600; color: var(--text); }
+.live-activity-body { padding: 4px 12px 10px; }
+.live-misc-header {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--dim); margin: 6px 0 4px; font-weight: 600;
+}
+.live-misc { list-style: none; margin: 0; padding: 0; }
+.live-misc.ended { opacity: 0.55; }
+.live-obs {
+  border-bottom: 1px dotted var(--border);
+}
+.live-obs:last-child { border-bottom: none; }
+/* Each row is a <details>; the <summary> is the tap target that
+   toggles the inline detail panel. The deep-link is overlaid on the
+   right edge so clicking it navigates instead of toggling. */
+.live-obs-details {
+  position: relative;
+}
+.live-obs-summary-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 36px 10px 12px;
+  cursor: pointer;
+  list-style: none;
+  -webkit-tap-highlight-color: rgba(122, 162, 247, 0.18);
+  min-height: 28px;
+}
+.live-obs-summary-row::-webkit-details-marker { display: none; }
+.live-obs-summary-row::marker { content: ""; }
+.live-obs-summary-row:hover { background: var(--bg); }
+.live-obs-summary-row:active { background: rgba(122, 162, 247, 0.12); }
+.live-obs-deeplink {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 14px;
+  z-index: 1;
+  -webkit-tap-highlight-color: rgba(122, 162, 247, 0.18);
+}
+.live-obs-deeplink:hover { color: var(--accent); background: var(--bg); }
+.live-obs-details[open] .live-obs-deeplink {
+  /* Once expanded, anchor the link to the summary row only, not the
+     full expanded height. */
+  height: auto;
+  top: 10px;
+  bottom: auto;
+}
+.live-obs-host { color: var(--accent); }
+.live-obs-session { color: var(--text); font-weight: 500; }
+.live-obs-categorized-summary { color: var(--dim); }
+.live-obs-kr { color: var(--accent); }
+.live-obs-detail {
+  padding: 8px 16px 14px;
+  background: rgba(122, 162, 247, 0.04);
+  border-top: 1px dotted var(--border);
+}
+.live-obs-detail-summary {
+  margin: 4px 0 8px;
+  line-height: 1.5;
+  color: var(--text);
+  font-size: 13px;
+}
+.live-obs-detail-meta {
+  font-size: 11px;
+  color: var(--dim);
+  margin: 2px 0;
+  font-family: inherit;
+}
+.live-obs-detail-meta code {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 11px;
+}
+.live-obs-detail-empty {
+  margin: 4px 0;
+  font-size: 12px;
+  font-style: italic;
+}
+.live-ended > summary {
+  cursor: pointer; font-size: 11px; color: var(--dim);
+  padding: 4px 0 2px; list-style: none;
+}
+.live-ended > summary::-webkit-details-marker { display: none; }

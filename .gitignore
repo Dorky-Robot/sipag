@@ -9,4 +9,6 @@
 target/
 node_modules/
 .tmp-*
+.smoke-tmp/
+.worktrees/
 tao.db

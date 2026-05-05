@@ -1,4 +1,4 @@
-.PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness
+.PHONY: build install uninstall test lint fmt fmt-check dev clean machete install-hooks review review-security review-architecture review-correctness web-install web-watch web-build web-clean serve
 
 BIN_DIR   ?= $(HOME)/.cargo/bin
 
@@ -46,6 +46,13 @@ dev: fmt lint test
 
 clean:
 	cargo clean
+
+# ── Web ───────────────────────────────────────────────────────────────────────
+# Frontend is server-rendered (maud) + vendored HTMX/JS in `web/public/`.
+# No build step — edit a file under `web/public/` and refresh.
+
+serve:
+	cargo run -p sipag -- serve --port 7100
 
 # ── Hook installation ─────────────────────────────────────────────────────────
 # Run once after cloning to activate pre-commit and pre-push quality gates.

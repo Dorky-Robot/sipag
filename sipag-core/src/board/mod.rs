@@ -13,11 +13,15 @@
 //!         001.toml
 //! ```
 
+mod key_result;
+mod observation;
 mod project;
 mod role;
 mod task;
 
-pub use project::Project;
+pub use key_result::{KeyResult, KrStance};
+pub use observation::{Observation, MISC_PROJECT};
+pub use project::{Project, ProjectKind};
 pub use role::Role;
 pub use task::{Task, TaskStatus};
 
@@ -126,6 +130,7 @@ pub fn add_task(
         status: default_status,
         role: role.unwrap_or("dev").to_string(),
         labels: labels.to_vec(),
+        key_results: Vec::new(),
         created: now.clone(),
         updated: now,
     };
@@ -143,16 +148,28 @@ pub fn move_task(sipag_dir: &Path, project: &str, task_id: u64, new_status: &str
     Ok(task)
 }
 
-/// Create a new project.
+/// Create a new project. Defaults to ProjectKind::Objective.
 pub fn create_project(
     sipag_dir: &Path,
     name: &str,
     repo: &str,
     statuses: Option<Vec<String>>,
 ) -> Result<Project> {
+    create_project_with_kind(sipag_dir, name, repo, ProjectKind::Objective, statuses)
+}
+
+/// Create a new project with an explicit kind (objective vs standing).
+pub fn create_project_with_kind(
+    sipag_dir: &Path,
+    name: &str,
+    repo: &str,
+    kind: ProjectKind,
+    statuses: Option<Vec<String>>,
+) -> Result<Project> {
     let project = Project {
         name: name.to_string(),
         repo: repo.to_string(),
+        kind,
         statuses: statuses.unwrap_or_else(|| {
             vec![
                 "backlog".to_string(),
@@ -172,8 +189,29 @@ pub fn list_roles(sipag_dir: &Path, project: &str) -> Result<Vec<Role>> {
     Role::list(sipag_dir, project)
 }
 
+/// Delete a project — recursively removes its directory under
+/// `<sipag_dir>/projects/<name>/`. No-op when the directory is
+/// already gone. Loud when the parent directory is missing or
+/// the path resolves outside `<sipag_dir>/projects/`.
+pub fn delete_project(sipag_dir: &Path, name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        anyhow::bail!("invalid project name: {name}");
+    }
+    let path = projects_dir(sipag_dir).join(name);
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&path)
+        .with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(())
+}
+
 /// Atomic write: write to a temp file in the same directory, then rename.
-pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+///
+/// Promoted to `pub` so the auth modules can persist credential/
+/// session/setup-token files using the same crash-safe pattern as the
+/// board records.
+pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

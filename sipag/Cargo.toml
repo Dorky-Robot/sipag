@@ -16,7 +16,36 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# `sipag serve` — axum server that proxies the configured katulongs
+# and serves the maud-rendered HTMX frontend in `web/public/`. No
+# feature gate yet; if this outgrows the sipag crate we'll extract it.
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+thiserror = "1"
+url = "2"
+# Spike: HTMX server-side rendering. maud gives compile-checked HTML
+# templates with no runtime template language. Tiny dep, zero new
+# tooling — pairs with htmx.min.js dropped into web/public/.
+maud = "0.26"
+# Workers use async fns in a trait object — async_trait keeps the
+# trait dyn-compatible without the unstable `dyn AsyncFn` feature.
+async-trait = "0.1"
+
+# WebAuthn lives in sipag-core::auth — the binary crate just wires
+# handlers around the AuthStore and WebAuthnService.
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# In-process axum integration tests for the auth surface.
+axum-test = "16"
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+serde_json = "1"
