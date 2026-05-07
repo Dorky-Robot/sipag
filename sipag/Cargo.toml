@@ -36,6 +36,15 @@ maud = "0.26"
 # Workers use async fns in a trait object — async_trait keeps the
 # trait dyn-compatible without the unstable `dyn AsyncFn` feature.
 async-trait = "0.1"
+# Dev-loop accelerator. tower-livereload injects a tiny browser-side
+# script that polls /livereload; the layer's version flips on every
+# server restart, which prompts the browser to reload. Only mounted
+# when SIPAG_DEV=1 — production never sees it.
+tower-livereload = "0.9"
+# Filesystem watcher for the dev loop. When SIPAG_DEV=1 we watch
+# web/public/ and call the livereload reloader on change — that way
+# CSS/JS edits don't have to round-trip through a server restart.
+notify = "6"
 
 # WebAuthn lives in sipag-core::auth — the binary crate just wires
 # handlers around the AuthStore and WebAuthnService.

@@ -210,7 +210,85 @@ fn build_router_inner(state: AppState, web_root: PathBuf, test_loopback_peer: bo
             auth_middleware::ensure_connect_info,
         ))
     };
-    with_ci.with_state(state)
+    let with_ci = with_ci.with_state(state);
+    // Dev-loop accelerator. SIPAG_DEV=1 mounts tower-livereload, which
+    // injects a tiny browser-side script that polls /livereload. The
+    // layer's version flips on every server restart (triggers iPad
+    // refresh after `cargo watch` rebuilds) AND when the static-file
+    // watcher below sees a change (triggers iPad refresh on CSS/JS
+    // edits without restarting sipag). Production never sees this —
+    // the env var is only set by `bin/sipag-dev`.
+    if std::env::var("SIPAG_DEV").as_deref() == Ok("1") {
+        let layer = tower_livereload::LiveReloadLayer::new();
+        let reloader = layer.reloader();
+        spawn_static_watcher(web_root, reloader);
+        with_ci.layer(layer)
+    } else {
+        with_ci
+    }
+}
+
+/// Watch `web_root` recursively for changes and ping the livereload
+/// reloader. Debounces rapid bursts (e.g., editor saves that hit
+/// multiple files in quick succession) so we send at most one reload
+/// per ~150ms of activity. Runs on a dedicated OS thread because
+/// `notify`'s recommended_watcher uses a blocking std::sync::mpsc
+/// callback channel.
+fn spawn_static_watcher(web_root: PathBuf, reloader: tower_livereload::Reloader) {
+    use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    std::thread::Builder::new()
+        .name("sipag-livereload".into())
+        .spawn(move || {
+            let (tx, rx) = channel();
+            let mut watcher: RecommendedWatcher =
+                match notify::recommended_watcher(move |res| {
+                    let _ = tx.send(res);
+                }) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!("livereload watcher init: {e}");
+                        return;
+                    }
+                };
+            if let Err(e) = watcher.watch(&web_root, RecursiveMode::Recursive) {
+                tracing::warn!("livereload watch '{}' failed: {e}", web_root.display());
+                return;
+            }
+            tracing::info!(
+                "livereload: watching {} for static changes",
+                web_root.display()
+            );
+            // The watcher must outlive this thread; pinning it in a
+            // local var keeps it alive for the loop below.
+            let _watcher_keepalive = watcher;
+            loop {
+                let evt = match rx.recv() {
+                    Ok(Ok(e)) => e,
+                    Ok(Err(e)) => {
+                        tracing::warn!("livereload watcher error: {e}");
+                        continue;
+                    }
+                    Err(_) => break, // sender dropped — server shutting down
+                };
+                if !matches!(
+                    evt.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
+                    continue;
+                }
+                // Debounce: drain any siblings that arrive within a
+                // short window (editors often touch a temp file then
+                // rename, surfacing as 2-3 events per save).
+                std::thread::sleep(Duration::from_millis(150));
+                while rx.try_recv().is_ok() {}
+                tracing::info!("livereload: static change → triggering reload");
+                reloader.reload();
+            }
+        })
+        .expect("spawn livereload watcher thread");
 }
 
 async fn shutdown_signal() {
