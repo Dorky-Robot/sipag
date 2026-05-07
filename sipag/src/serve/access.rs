@@ -2,7 +2,7 @@
 //!
 //! Critical security boundary. Localhost requests bypass WebAuthn
 //! because local shell access is already root-equivalent; remote
-//! requests must present a valid session cookie. Mis-classifying a
+//! requests must present a valid session cookie. Misclassifying a
 //! tunnel connection as localhost would hand the internet a free shell.
 //!
 //! Cloudflare Tunnel and ngrok bridge traffic through a local

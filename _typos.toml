@@ -3,6 +3,16 @@
 # Domain-specific terms and proper nouns that typos should not flag.
 # Documentation: https://github.com/crate-ci/typos/blob/master/docs/reference.md
 
+[files]
+# Minified vendor JS is full of single/double-letter identifiers that
+# typos parses as misspelled words (e.g. `ue` flagged as "use", `Pn`
+# as "On"). These files come from upstream and we don't author them,
+# so spell-checking them produces only noise.
+extend-exclude = [
+    "web/public/js/*.min.js",
+    "web/public/vendor/",
+]
+
 [default.extend-words]
 # Project names and stack components
 sipag   = "sipag"     # this project
@@ -20,3 +30,4 @@ complected   = "complected"
 
 # Intentional misspellings in test fixtures (Levenshtein distance tests)
 imge = "imge"
+abd  = "abd"

@@ -211,7 +211,9 @@ pub async fn chat(
     let mut out = String::new();
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| LlmError::Transport(e.to_string()))?;
-        buf.push_str(std::str::from_utf8(&bytes).map_err(|e| LlmError::BadResponse(e.to_string()))?);
+        buf.push_str(
+            std::str::from_utf8(&bytes).map_err(|e| LlmError::BadResponse(e.to_string()))?,
+        );
         while let Some(idx) = buf.find('\n') {
             let line = buf[..idx].to_string();
             buf.drain(..=idx);

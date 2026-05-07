@@ -1,0 +1,14 @@
+# gitleaks fingerprint allowlist
+#
+# Legacy false positives from `extras/hosts.toml.example` — the file
+# contains placeholder text like `<paste-from-host-a's-~/...>` that
+# gitleaks flags as a high-entropy generic-api-key. The current example
+# uses lower-entropy placeholders, but older commits in history still
+# have the higher-entropy form, and gitleaks scans the full commit
+# graph on every push.
+#
+# These fingerprints are stable — they identify a specific
+# (commit, file, rule, line) tuple — so allowing them here only
+# silences the known false positives without weakening the scan.
+5f7a8cf5846245b73c825e7f8141299383bbb7c9:extras/hosts.toml.example:generic-api-key:14
+5f7a8cf5846245b73c825e7f8141299383bbb7c9:extras/hosts.toml.example:generic-api-key:19

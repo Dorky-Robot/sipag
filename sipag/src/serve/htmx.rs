@@ -66,7 +66,10 @@ pub fn routes() -> Router<AppState> {
             post(dispatch_task_handler),
         )
         .route("/htmx/attention", get(attention_fragment))
-        .route("/htmx/observations/:obs_id/kr", post(observation_kr_handler))
+        .route(
+            "/htmx/observations/:obs_id/kr",
+            post(observation_kr_handler),
+        )
         .route(
             "/htmx/observations/:obs_id/kr/reject",
             post(observation_kr_reject_handler),
@@ -797,7 +800,6 @@ async fn kr_done_handler(
     html_response(render_board(&state).await)
 }
 
-
 async fn attention_fragment(State(state): State<AppState>) -> Response {
     let snap = board_view::load_snapshot(&state).await;
     html_response(board_view::attention_strip(&snap))
@@ -996,9 +998,16 @@ async fn observation_kr_handler(
         obs.project = MISC_PROJECT.to_string();
         obs.kr_id = 0;
     } else {
-        let new_ref = KrRef { objective: objective.clone(), kr: body.kr };
+        let new_ref = KrRef {
+            objective: objective.clone(),
+            kr: body.kr,
+        };
         // Idempotent — don't duplicate an existing ref.
-        if !obs.kr_refs.iter().any(|r| r.objective == new_ref.objective && r.kr == new_ref.kr) {
+        if !obs
+            .kr_refs
+            .iter()
+            .any(|r| r.objective == new_ref.objective && r.kr == new_ref.kr)
+        {
             obs.kr_refs.push(new_ref);
         }
         // Legacy fields stay in sync with the FIRST ref so existing
@@ -1036,15 +1045,9 @@ async fn observation_kr_handler(
 /// Lookups are best-effort — missing project / objective / KR
 /// degrade silently to whatever sections we can fill. The minimum
 /// useful output is always at least the Task section.
-fn build_dispatch_prompt(
-    sipag_dir: &std::path::Path,
-    project_name: &str,
-    task: &Task,
-) -> String {
+fn build_dispatch_prompt(sipag_dir: &std::path::Path, project_name: &str, task: &Task) -> String {
     let project = sipag_core::board::load_project(sipag_dir, project_name).ok();
-    let first_objective_id = project
-        .as_ref()
-        .and_then(|p| p.serves.first().cloned());
+    let first_objective_id = project.as_ref().and_then(|p| p.serves.first().cloned());
     let aspiration = first_objective_id
         .as_ref()
         .and_then(|id| sipag_core::board::Objective::load(sipag_dir, id).ok())
@@ -1119,11 +1122,7 @@ async fn verify_and_heal_dispatch(
     const POST_HEAL_WAIT: Duration = Duration::from_secs(5);
     const MAX_HEAL_ATTEMPTS: u8 = 3;
 
-    let exec_url = format!(
-        "{}/sessions/by-id/{}/exec",
-        host.base_url(),
-        session_id
-    );
+    let exec_url = format!("{}/sessions/by-id/{}/exec", host.base_url(), session_id);
 
     // Phase 1: wait for the claude TUI to be ready, auto-approving
     // the trust-this-folder prompt if seen. Trust prompt only shows
@@ -1171,7 +1170,14 @@ async fn verify_and_heal_dispatch(
     sleep(POST_PASTE_WAIT).await;
     if check_agent_running(&state, &host, &session_id).await {
         publish_dispatch_outcome(
-            &state, &host.id, &session_name_str, &project_name, task_id, "success", 0, "",
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "success",
+            0,
+            "",
         );
         return;
     }
@@ -1216,8 +1222,14 @@ async fn verify_and_heal_dispatch(
         if recovery.input.is_empty() {
             tracing::info!(attempt, reason = %recovery.reason, "gemma4 marked dispatch unrecoverable");
             publish_dispatch_outcome(
-                &state, &host.id, &session_name_str, &project_name, task_id,
-                "unrecoverable", attempt, &recovery.reason,
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "unrecoverable",
+                attempt,
+                &recovery.reason,
             );
             return;
         }
@@ -1237,8 +1249,14 @@ async fn verify_and_heal_dispatch(
         if check_agent_running(&state, &host, &session_id).await {
             tracing::info!(attempt, "self-heal succeeded");
             publish_dispatch_outcome(
-                &state, &host.id, &session_name_str, &project_name, task_id,
-                "self-healed", attempt, &recovery.reason,
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "self-healed",
+                attempt,
+                &recovery.reason,
             );
             return;
         }
@@ -1250,8 +1268,14 @@ async fn verify_and_heal_dispatch(
         "self-heal exhausted attempts; giving up"
     );
     publish_dispatch_outcome(
-        &state, &host.id, &session_name_str, &project_name, task_id,
-        "failed", MAX_HEAL_ATTEMPTS, "exhausted attempts",
+        &state,
+        &host.id,
+        &session_name_str,
+        &project_name,
+        task_id,
+        "failed",
+        MAX_HEAL_ATTEMPTS,
+        "exhausted attempts",
     );
 }
 
@@ -1333,9 +1357,8 @@ async fn propose_recovery(
         If the situation is unrecoverable (e.g., wrong host, missing dependency that \
         you can't install from this shell), reply with input set to \"\" and a reason.";
 
-    let user = format!(
-        "Intended command:\n{intended_command}\n\nRecent pane scrollback:\n{scrollback}",
-    );
+    let user =
+        format!("Intended command:\n{intended_command}\n\nRecent pane scrollback:\n{scrollback}",);
 
     let opts = ChatOptions {
         model: env_model(),
@@ -1380,6 +1403,7 @@ async fn propose_recovery(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn publish_dispatch_outcome(
     state: &AppState,
     host_id: &str,
@@ -1424,8 +1448,7 @@ fn wrap_bracketed_paste(text: &str) -> String {
 /// directory; sipag auto-selects "yes" so dispatch isn't blocked by
 /// a one-time prompt the human can't see from the iPad.
 fn pane_shows_trust_prompt(pane: &str) -> bool {
-    pane.contains("trust the files in this folder")
-        || pane.contains("Do you trust")
+    pane.contains("trust the files in this folder") || pane.contains("Do you trust")
 }
 
 #[cfg(test)]
@@ -1435,10 +1458,7 @@ mod dispatch_helpers_tests {
     #[test]
     fn launch_cmd_appends_cr() {
         assert_eq!(build_launch_cmd("claude"), "claude\r");
-        assert_eq!(
-            build_launch_cmd("claude --resume"),
-            "claude --resume\r"
-        );
+        assert_eq!(build_launch_cmd("claude --resume"), "claude --resume\r");
     }
 
     #[test]
@@ -1466,7 +1486,8 @@ mod dispatch_helpers_tests {
         // The whole reason we abandoned shell-quoting: $, `, ', ",
         // backslashes, and unicode all need to reach claude as-typed.
         // Bracketed paste passes raw bytes through — no escaping at all.
-        let prompt = "use $HOME and `whoami` and \"quotes\" and \u{2014} em-dash \u{2018}smart\u{2019}";
+        let prompt =
+            "use $HOME and `whoami` and \"quotes\" and \u{2014} em-dash \u{2018}smart\u{2019}";
         let wrapped = wrap_bracketed_paste(prompt);
         let inner = &wrapped["\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
         assert_eq!(inner, prompt);
@@ -1488,4 +1509,3 @@ mod dispatch_helpers_tests {
         assert!(!pane_shows_trust_prompt("claude is thinking..."));
     }
 }
-

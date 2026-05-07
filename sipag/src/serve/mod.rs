@@ -148,9 +148,7 @@ async fn build_state(
         webauthn: Arc::new(webauthn),
         broker,
         workers_enabled,
-        kr_proposals: Arc::new(tokio::sync::RwLock::new(
-            std::collections::HashMap::new(),
-        )),
+        kr_proposals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     })
 }
 
@@ -243,16 +241,15 @@ fn spawn_static_watcher(web_root: PathBuf, reloader: tower_livereload::Reloader)
         .name("sipag-livereload".into())
         .spawn(move || {
             let (tx, rx) = channel();
-            let mut watcher: RecommendedWatcher =
-                match notify::recommended_watcher(move |res| {
-                    let _ = tx.send(res);
-                }) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!("livereload watcher init: {e}");
-                        return;
-                    }
-                };
+            let mut watcher: RecommendedWatcher = match notify::recommended_watcher(move |res| {
+                let _ = tx.send(res);
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!("livereload watcher init: {e}");
+                    return;
+                }
+            };
             if let Err(e) = watcher.watch(&web_root, RecursiveMode::Recursive) {
                 tracing::warn!("livereload watch '{}' failed: {e}", web_root.display());
                 return;

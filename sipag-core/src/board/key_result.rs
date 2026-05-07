@@ -163,9 +163,8 @@ impl KeyResult {
 
     pub fn load_for_objective(sipag_dir: &Path, objective_id: &str, id: u64) -> Result<Self> {
         let path = Self::obj_file_path(sipag_dir, objective_id, id);
-        let content = std::fs::read_to_string(&path).with_context(|| {
-            format!("KR #{id} not found in objective {objective_id}")
-        })?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("KR #{id} not found in objective {objective_id}"))?;
         let kr: Self = toml::from_str(&content)
             .with_context(|| format!("invalid TOML in {}", path.display()))?;
         Ok(kr)

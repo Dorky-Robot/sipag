@@ -16,7 +16,7 @@
 //!    and the staleness floor matches the rest of sipag's UI cadence.
 //!
 //! When katulong gains a `sessions/lifecycle` pub/sub topic, this file
-//! is the natural place to add a subscriber that suplements the poll.
+//! is the natural place to add a subscriber that supplements the poll.
 
 use crate::serve::state::AppState;
 use anyhow::{Context, Result};
@@ -93,9 +93,7 @@ async fn scan_host(state: &AppState, host: &Host) -> Result<usize> {
         .await
         .context("parse katulong /sessions response")?;
 
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let live_ids: HashSet<String> = body
         .iter()
         .map(|s| Observation::id_for(&host.id, &s.name))
@@ -104,11 +102,7 @@ async fn scan_host(state: &AppState, host: &Host) -> Result<usize> {
     // Upsert each live session.
     for s in &body {
         if let Err(e) = upsert_observation(state, host, s, &now) {
-            tracing::warn!(
-                "observers: upsert {}--{} failed: {e}",
-                host.id,
-                s.name
-            );
+            tracing::warn!("observers: upsert {}--{} failed: {e}", host.id, s.name);
         }
     }
 
@@ -122,12 +116,7 @@ async fn scan_host(state: &AppState, host: &Host) -> Result<usize> {
     Ok(body.len())
 }
 
-fn upsert_observation(
-    state: &AppState,
-    host: &Host,
-    s: &KatulongSession,
-    now: &str,
-) -> Result<()> {
+fn upsert_observation(state: &AppState, host: &Host, s: &KatulongSession, now: &str) -> Result<()> {
     let id = Observation::id_for(&host.id, &s.name);
     let path = Observation::path(&state.sipag_dir, &id);
 
@@ -145,7 +134,11 @@ fn upsert_observation(
     // categorize worker.
     obs.last_seen = now.to_string();
     obs.session_id = s.id.clone();
-    obs.status = if s.alive { "active".into() } else { "ended".into() };
+    obs.status = if s.alive {
+        "active".into()
+    } else {
+        "ended".into()
+    };
 
     // Archive katulong-side meta on the observation — once captured,
     // these fields outlive the session's presence in /sessions and let
@@ -246,7 +239,11 @@ fn fresh(host: &Host, s: &KatulongSession, now: &str, sipag_dir: &std::path::Pat
         session_id: s.id.clone(),
         first_seen: now.to_string(),
         last_seen: now.to_string(),
-        status: if s.alive { "active".into() } else { "ended".into() },
+        status: if s.alive {
+            "active".into()
+        } else {
+            "ended".into()
+        },
         project,
         kr_id,
         labels: Vec::new(),
@@ -360,13 +357,11 @@ impl KatulongSession {
             .and_then(|s| s.long.as_deref())
     }
     fn meta_cwd(&self) -> Option<&str> {
-        self.meta
-            .as_ref()
-            .and_then(|m| {
-                m.pane
-                    .as_ref()
-                    .and_then(|p| p.cwd.as_deref())
-                    .or_else(|| m.claude.as_ref().and_then(|c| c.cwd.as_deref()))
-            })
+        self.meta.as_ref().and_then(|m| {
+            m.pane
+                .as_ref()
+                .and_then(|p| p.cwd.as_deref())
+                .or_else(|| m.claude.as_ref().and_then(|c| c.cwd.as_deref()))
+        })
     }
 }

@@ -44,10 +44,7 @@ pub enum ProposalState {
     /// Background task in flight; render skips the chip this cycle.
     Pending,
     /// gemma4 had a suggestion. `hash` keys it to a specific summary.
-    Some {
-        proposal: KrProposal,
-        hash: u64,
-    },
+    Some { proposal: KrProposal, hash: u64 },
     /// gemma4 said "no fit". Same hash semantics.
     NoFit { hash: u64 },
     /// User rejected the previous proposal at this summary hash. Don't
@@ -106,7 +103,8 @@ pub async fn propose_kr(
         uncategorized than to muddy the data. Use confidence<50 only when you're \
         guessing.";
 
-    let user = format!("Session summary: {summary}\n\nAvailable KRs (across objectives):\n{krs_text}");
+    let user =
+        format!("Session summary: {summary}\n\nAvailable KRs (across objectives):\n{krs_text}");
 
     // gemma4:31b is a reasoning model — it spends ~200 tokens "thinking"
     // before emitting the actual JSON content. A tight num_predict (e.g.

@@ -8,9 +8,7 @@
 //! Data loading mirrors `serve::board::list_projects` so the JSON API
 //! and the HTML view stay in sync.
 
-use crate::serve::categorize::{
-    propose_kr, summary_hash, KrChoice, KrProposal, ProposalState,
-};
+use crate::serve::categorize::{propose_kr, summary_hash, KrChoice, KrProposal, ProposalState};
 use crate::serve::state::AppState;
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sipag_core::board::{
@@ -75,6 +73,10 @@ pub struct LiveSessionMeta {
 /// Only the fields sipag's row renders are kept.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
+// uuid + ts are deserialized for completeness / future dedup + sort
+// keys, but no consumer reads them yet. Suppress dead_code so the
+// schema can grow without churning the struct each time.
+#[allow(dead_code)]
 pub enum FeedEntry {
     User {
         #[serde(default)]
@@ -263,13 +265,7 @@ async fn fetch_recent_transcript(
         uuid,
         limit
     );
-    let resp = match state
-        .http
-        .get(&url)
-        .bearer_auth(&host.api_key)
-        .send()
-        .await
-    {
+    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return Vec::new(),
     };
@@ -366,12 +362,17 @@ async fn resolve_proposals(
                 match &proposal {
                     Some(p) => tracing::info!(
                         "categorize: {}/{} → {}/kr#{} '{}' ({}%) in {:?}",
-                        host, session, p.objective, p.kr, p.kr_title, p.confidence, elapsed
+                        host,
+                        session,
+                        p.objective,
+                        p.kr,
+                        p.kr_title,
+                        p.confidence,
+                        elapsed
                     ),
-                    None => tracing::info!(
-                        "categorize: {}/{} → no fit in {:?}",
-                        host, session, elapsed
-                    ),
+                    None => {
+                        tracing::info!("categorize: {}/{} → no fit in {:?}", host, session, elapsed)
+                    }
                 }
                 if let Some(ref p) = proposal {
                     let payload = serde_json::json!({
@@ -386,10 +387,7 @@ async fn resolve_proposals(
                     let _ = broker.publish("observations/activity", "kr.proposed", payload);
                 }
                 let new_state = match proposal {
-                    Some(p) => ProposalState::Some {
-                        proposal: p,
-                        hash,
-                    },
+                    Some(p) => ProposalState::Some { proposal: p, hash },
                     None => ProposalState::NoFit { hash },
                 };
                 let mut cache = cache_ref.write().await;
@@ -444,9 +442,8 @@ fn load_objectives_blocking(
     objectives
         .into_iter()
         .map(|o| {
-            let key_results =
-                sipag_core::board::KeyResult::list_for_objective(sipag_dir, &o.id)
-                    .unwrap_or_default();
+            let key_results = sipag_core::board::KeyResult::list_for_objective(sipag_dir, &o.id)
+                .unwrap_or_default();
             let serving_initiatives = projects
                 .iter()
                 .filter(|p| p.serves.iter().any(|sid| sid == &o.id))
@@ -724,10 +721,7 @@ fn objective_card_v2(snap: &BoardSnapshot, o: &ObjectiveView) -> Markup {
     let active_session_count = snap
         .observations
         .iter()
-        .filter(|obs| {
-            obs.status == "active"
-                && obs.kr_refs.iter().any(|r| r.objective == o.id)
-        })
+        .filter(|obs| obs.status == "active" && obs.kr_refs.iter().any(|r| r.objective == o.id))
         .count();
     html! {
         section.objective-v2 {
@@ -781,7 +775,8 @@ fn objective_kr_row(
         .iter()
         .filter(|obs| {
             obs.status == "active"
-                && obs.kr_refs
+                && obs
+                    .kr_refs
                     .iter()
                     .any(|r| r.objective == objective_id && r.kr == kr.id)
         })
@@ -962,7 +957,12 @@ fn standing_card(snap: &BoardSnapshot, p: &ProjectView) -> Markup {
 
 // ── KR row ──────────────────────────────────────────────────────────
 
-fn kr_row(snap: &BoardSnapshot, kr: &KeyResult, project_name: &str, active_tasks: &[&Task]) -> Markup {
+fn kr_row(
+    snap: &BoardSnapshot,
+    kr: &KeyResult,
+    project_name: &str,
+    active_tasks: &[&Task],
+) -> Markup {
     let stance = kr.stance.as_str();
     let project_seg = urlencode(project_name);
     let kr_endpoint = format!("/htmx/projects/{project_seg}/key-results/{}", kr.id);
@@ -1154,13 +1154,13 @@ pub fn idea_box(projects: &[ProjectView], open: bool) -> Markup {
             { (arrow) " idea box · " (ideas.len()) }
             @if open {
                 ul.ideas {
-                    @for (t, pn) in &ideas {
-                        @let project_seg = urlencode(pn);
+                    @for (t, proj_name) in &ideas {
+                        @let project_seg = urlencode(proj_name);
                         @let task_endpoint = format!("/htmx/projects/{project_seg}/tasks/{}", t.id);
                         li.idea {
                             span.task-id { "#" (t.id) }
                             span.task-title { (t.title) }
-                            span.subtle { " · " (pn) }
+                            span.subtle { " · " (proj_name) }
                             button.idea-activate
                                 "hx-patch"=(task_endpoint)
                                 "hx-vals"="{\"action\":\"activate\"}"
@@ -1690,21 +1690,21 @@ fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> M
     let proposal = snap.proposals.get(&obs.id());
     let kr_choices = &snap.kr_choices;
     let _feed = snap.feeds.get(&obs.id()); // reserved for gemma4 task-progress inference
-    // `?s=<name>` is katulong's deep-link primitive — its boot path
-    // (app.js around line 97) reads the param and calls
-    // `activateSession(name)` if a tile already exists for it, or
-    // creates one and makes it active otherwise. So clicking always
-    // resolves to the canonical "this tile is now front-and-center"
-    // state regardless of whether the session was already open.
-    //
-    // We deliberately do NOT set `target="_blank"`. On iOS/macOS,
-    // when the user has installed katulong's domain as a PWA, the OS
-    // routes plain in-scope navigations to the PWA; `target="_blank"`
-    // forces the external-browser path and defeats that. Without a
-    // target, devices without the PWA installed still get a sensible
-    // browser-tab open. (Sipag PWA users get sent OUT of the sipag
-    // PWA — the link is to a different origin, so this is the right
-    // behavior; we don't want sipag to host katulong as a fragment.)
+                                           // `?s=<name>` is katulong's deep-link primitive — its boot path
+                                           // (app.js around line 97) reads the param and calls
+                                           // `activateSession(name)` if a tile already exists for it, or
+                                           // creates one and makes it active otherwise. So clicking always
+                                           // resolves to the canonical "this tile is now front-and-center"
+                                           // state regardless of whether the session was already open.
+                                           //
+                                           // We deliberately do NOT set `target="_blank"`. On iOS/macOS,
+                                           // when the user has installed katulong's domain as a PWA, the OS
+                                           // routes plain in-scope navigations to the PWA; `target="_blank"`
+                                           // forces the external-browser path and defeats that. Without a
+                                           // target, devices without the PWA installed still get a sensible
+                                           // browser-tab open. (Sipag PWA users get sent OUT of the sipag
+                                           // PWA — the link is to a different origin, so this is the right
+                                           // behavior; we don't want sipag to host katulong as a fragment.)
     let katulong_url = host_url.map(|u| format!("{u}/?s={}", urlencode(&obs.session)));
     // Prefer live snapshot data when present (active sessions); fall
     // back to the archived obs.* fields. This is what gives ended
@@ -1728,9 +1728,9 @@ fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> M
     // and re-opens them after every htmx swap.
     let key = format!("{}--{}", obs.host, obs.session);
     let is_ended = obs.status != "active";
-    let has_detail_body = summary_long.map_or(false, |s| !s.is_empty())
-        || cwd_full.map_or(false, |s| !s.is_empty())
-        || claude_uuid.map_or(false, |s| !s.is_empty());
+    let has_detail_body = summary_long.is_some_and(|s| !s.is_empty())
+        || cwd_full.is_some_and(|s| !s.is_empty())
+        || claude_uuid.is_some_and(|s| !s.is_empty());
 
     html! {
         li.live-obs data-host=(obs.host) data-session=(obs.session) {
