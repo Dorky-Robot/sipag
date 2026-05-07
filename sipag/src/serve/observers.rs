@@ -147,6 +147,30 @@ fn upsert_observation(
     obs.session_id = s.id.clone();
     obs.status = if s.alive { "active".into() } else { "ended".into() };
 
+    // Archive katulong-side meta on the observation — once captured,
+    // these fields outlive the session's presence in /sessions and let
+    // the ended-row detail panel render without any host round-trip.
+    if let Some(uuid) = s.meta_claude_uuid() {
+        if !uuid.is_empty() {
+            obs.claude_uuid = uuid.to_string();
+        }
+    }
+    if let Some(title) = s.meta_auto_title() {
+        if !title.is_empty() {
+            obs.auto_title = title.to_string();
+        }
+    }
+    if let Some(long) = s.meta_summary_long() {
+        if !long.is_empty() {
+            obs.summary_long = long.to_string();
+        }
+    }
+    if let Some(cwd) = s.meta_cwd() {
+        if !cwd.is_empty() {
+            obs.cwd = cwd.to_string();
+        }
+    }
+
     obs.save(&state.sipag_dir)?;
 
     if was_new {
@@ -228,6 +252,10 @@ fn fresh(host: &Host, s: &KatulongSession, now: &str, sipag_dir: &std::path::Pat
         labels: Vec::new(),
         summary: String::new(),
         kr_refs: Vec::new(),
+        claude_uuid: String::new(),
+        auto_title: String::new(),
+        summary_long: String::new(),
+        cwd: String::new(),
     }
 }
 
@@ -269,13 +297,76 @@ fn infer_categorization(session_name: &str, sipag_dir: &std::path::Path) -> (Str
 
 /// Subset of katulong's `/sessions` response we care about.
 /// The full payload also includes tmuxSession, tmuxPane, hasChildProcesses,
-/// external, icon, meta — we intentionally ignore those for the
-/// observation-level view. The categorize worker can re-fetch via REST
-/// when it needs deeper signal.
+/// external, icon — we intentionally ignore those for the
+/// observation-level view. We *do* pluck the bits of `meta` we want to
+/// archive on the Observation so ended sessions still have a label,
+/// summary, and Claude UUID after katulong stops listing them.
 #[derive(Debug, Deserialize)]
 struct KatulongSession {
     id: String,
     name: String,
     #[serde(default)]
     alive: bool,
+    #[serde(default)]
+    meta: Option<KatulongMeta>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct KatulongMeta {
+    #[serde(rename = "autoTitle", default)]
+    auto_title: Option<String>,
+    #[serde(default)]
+    summary: Option<KatulongSummary>,
+    #[serde(default)]
+    pane: Option<KatulongPane>,
+    #[serde(default)]
+    claude: Option<KatulongClaude>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct KatulongSummary {
+    #[serde(default)]
+    long: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct KatulongPane {
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct KatulongClaude {
+    #[serde(default)]
+    uuid: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+impl KatulongSession {
+    fn meta_claude_uuid(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.claude.as_ref())
+            .and_then(|c| c.uuid.as_deref())
+    }
+    fn meta_auto_title(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.auto_title.as_deref())
+    }
+    fn meta_summary_long(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.summary.as_ref())
+            .and_then(|s| s.long.as_deref())
+    }
+    fn meta_cwd(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|m| {
+                m.pane
+                    .as_ref()
+                    .and_then(|p| p.cwd.as_deref())
+                    .or_else(|| m.claude.as_ref().and_then(|c| c.cwd.as_deref()))
+            })
+    }
 }

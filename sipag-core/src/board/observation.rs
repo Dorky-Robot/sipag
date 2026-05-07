@@ -63,6 +63,26 @@ pub struct Observation {
     /// remain for read-only back-compat with the project-scoped layout.
     #[serde(default)]
     pub kr_refs: Vec<super::KrRef>,
+    /// Claude session UUID — captured from katulong's `/sessions[].meta.claude.uuid`
+    /// when first observed. Persists past the session's lifetime so the
+    /// ended-session detail panel can pull the transcript even after katulong
+    /// stops listing the session in /sessions.
+    #[serde(default)]
+    pub claude_uuid: String,
+    /// Auto-detected title from katulong's session summarizer
+    /// (`meta.autoTitle`). Captured-on-observe so ended sessions still
+    /// have a human-readable label.
+    #[serde(default)]
+    pub auto_title: String,
+    /// Long-form summary from katulong's summarizer (`meta.summary.long`).
+    /// Captured-on-observe so the ended-session detail panel has something
+    /// to show without re-fetching from the host.
+    #[serde(default)]
+    pub summary_long: String,
+    /// Working directory of the session at observation time
+    /// (`meta.pane.cwd` falling back to `meta.claude.cwd`).
+    #[serde(default)]
+    pub cwd: String,
 }
 
 fn default_project() -> String {
@@ -177,6 +197,10 @@ mod tests {
             labels: vec![],
             summary: String::new(),
             kr_refs: vec![],
+            claude_uuid: String::new(),
+            auto_title: String::new(),
+            summary_long: String::new(),
+            cwd: String::new(),
         }
     }
 
