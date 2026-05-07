@@ -17,7 +17,6 @@ use sipag_core::board::{
     list_project_names, list_tasks, load_project, KeyResult, Project, ProjectKind, Task, TaskStatus,
 };
 use sipag_core::hosts::Host;
-use sipag_core::pubsub::Envelope;
 use std::collections::{BTreeMap, HashMap};
 
 // ── public data shape ────────────────────────────────────────────────
@@ -591,6 +590,12 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 title { "sipag" }
                 link rel="stylesheet" href=(format!("/style.css?v={}", snap.boot_id));
                 script src="/js/htmx.min.js" {}
+                // idiomorph-ext registers a "morph" swap algorithm
+                // with htmx so the 5s board poll only updates the bits
+                // that actually changed instead of nuking the whole
+                // <main>. Preserves <details> open state, scroll
+                // position, focus, and hover/inspection.
+                script src="/js/idiomorph-ext.min.js" {}
                 // Cache-bust the JS each restart so iPad Safari can't
                 // serve stale copies. The version is the server's start
                 // time as millis (set in build_state).
@@ -598,24 +603,15 @@ pub fn page(snap: &BoardSnapshot) -> Markup {
                 script src=(format!("/js/sipag-live.js?v={}", snap.boot_id)) defer {}
                 script src=(format!("/js/sipag-debug.js?v={}", snap.boot_id)) defer {}
             }
-            body {
+            body "hx-ext"="morph" {
                 #app {
                     (topbar(snap))
                     (attention_strip(snap))
                     (board_main(snap))
                     (idea_box(&snap.projects, false))
-                    // Mount points for HTMX OOB swaps and live (WS)
-                    // updates. The ticker also polls every 5s as a
-                    // fallback so iPad Safari (which silently blocks
-                    // WebSockets to this origin under privacy mode)
-                    // still gets recent worker activity, just delayed.
+                    // Mount points for HTMX OOB swaps and toasts.
                     div #dispatch-picker-mount {}
                     div #toast-mount {}
-                    div
-                        #ticker.ticker
-                        "hx-get"="/htmx/ticker"
-                        "hx-trigger"="every 5s [!document.activeElement || !document.activeElement.matches('input,textarea')]"
-                        "hx-swap"="innerHTML" {}
                 }
                 script {
                     (PreEscaped(INLINE_JS))
@@ -668,7 +664,7 @@ pub fn board_main(snap: &BoardSnapshot) -> Markup {
             id="board"
             "hx-get"="/htmx/board"
             "hx-trigger"="every 5s [!document.activeElement || !document.activeElement.matches('input,textarea')]"
-            "hx-swap"="outerHTML"
+            "hx-swap"="morph"
         {
             (inbox(snap))
 
@@ -1104,7 +1100,18 @@ fn task_row(
             (label_chips(&task.labels, &labels_endpoint))
             (quick_label_row(&task.labels, &labels_endpoint))
             @if let Some(host_id) = running_on {
-                div.task-foot { "▸ running on " (host_id) }
+                @let session_name = format!("{}--{}", project_name, task.role);
+                @let host_url = hosts.iter().find(|h| h.id == host_id).map(|h| h.url.as_str());
+                div.task-foot {
+                    span.subtle { "▸ running on " (host_id) " " }
+                    @if let Some(url) = host_url {
+                        a.task-jump
+                            href={(url) "/?s=" (urlencode(&session_name))}
+                            rel="noopener"
+                            title={"jump to " (session_name) " on " (host_id)}
+                        { "↗" }
+                    }
+                }
             }
         }
     }
@@ -1639,6 +1646,7 @@ pub fn ended_section(snap: &BoardSnapshot) -> Markup {
                 summary {
                     span.section-head-inline { "ended" }
                     span.subtle { " · " (ended.len()) }
+                    span.ended-chevron.subtle { " ▸" }
                 }
                 ul.live-misc.ended {
                     @for obs in &ended {
@@ -1698,16 +1706,28 @@ fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> M
     // PWA — the link is to a different origin, so this is the right
     // behavior; we don't want sipag to host katulong as a fragment.)
     let katulong_url = host_url.map(|u| format!("{u}/?s={}", urlencode(&obs.session)));
-    let auto_title = live.and_then(|l| l.auto_title.as_deref());
+    // Prefer live snapshot data when present (active sessions); fall
+    // back to the archived obs.* fields. This is what gives ended
+    // sessions a meaningful row label after katulong stops listing them.
+    let auto_title = live
+        .and_then(|l| l.auto_title.as_deref())
+        .or_else(|| Some(obs.auto_title.as_str()).filter(|s| !s.is_empty()));
     let summary_short = live.and_then(|l| l.summary_short.as_deref());
-    let summary_long = live.and_then(|l| l.summary_long.as_deref());
-    let cwd_full = live.and_then(|l| l.cwd.as_deref());
+    let summary_long = live
+        .and_then(|l| l.summary_long.as_deref())
+        .or_else(|| Some(obs.summary_long.as_str()).filter(|s| !s.is_empty()));
+    let cwd_full = live
+        .and_then(|l| l.cwd.as_deref())
+        .or_else(|| Some(obs.cwd.as_str()).filter(|s| !s.is_empty()));
     let cwd_basename = cwd_full.map(path_basename);
-    let claude_uuid = live.and_then(|l| l.claude_uuid.as_deref());
+    let claude_uuid = live
+        .and_then(|l| l.claude_uuid.as_deref())
+        .or_else(|| Some(obs.claude_uuid.as_str()).filter(|s| !s.is_empty()));
     // data-key persists open state across the 5s board poll — the
     // restoration script in sipag-live.js stores opened keys in a Set
     // and re-opens them after every htmx swap.
     let key = format!("{}--{}", obs.host, obs.session);
+    let is_ended = obs.status != "active";
     let has_detail_body = summary_long.map_or(false, |s| !s.is_empty())
         || cwd_full.map_or(false, |s| !s.is_empty())
         || claude_uuid.map_or(false, |s| !s.is_empty());
@@ -1745,47 +1765,237 @@ fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> M
                 @if let Some(ref u) = katulong_url {
                     a.live-obs-deeplink href=(u) rel="noopener" aria-label="Open in katulong" { "↗" }
                 }
-                div.live-obs-detail {
-                    @if has_detail_body {
-                        @if let Some(long) = summary_long {
-                            @if !long.is_empty() {
-                                p.live-obs-detail-summary { (long) }
-                            }
-                        }
-                        @if let Some(c) = cwd_full {
-                            @if !c.is_empty() {
-                                div.live-obs-detail-meta {
-                                    span.subtle { "cwd " }
-                                    code { (c) }
+                @if is_ended {
+                    (ended_detail_body(snap, obs, summary_long, cwd_full, claude_uuid))
+                } @else {
+                    div.live-obs-detail {
+                        @if has_detail_body {
+                            @if let Some(long) = summary_long {
+                                @if !long.is_empty() {
+                                    p.live-obs-detail-summary { (long) }
                                 }
                             }
+                            @if let Some(c) = cwd_full {
+                                @if !c.is_empty() {
+                                    div.live-obs-detail-meta {
+                                        span.subtle { "cwd " }
+                                        code { (c) }
+                                    }
+                                }
+                            }
+                            @if let Some(uuid) = claude_uuid {
+                                @if !uuid.is_empty() {
+                                    div.live-obs-detail-meta {
+                                        span.subtle { "claude " }
+                                        code { (uuid) }
+                                    }
+                                }
+                            }
+                        } @else {
+                            p.live-obs-detail-empty.subtle {
+                                "no live context yet — will populate on next summarizer cycle"
+                            }
+                        }
+                        @if obs.project != sipag_core::board::MISC_PROJECT && obs.kr_id != 0 {
+                            (progress_panel(snap, &obs.project, obs.kr_id))
+                        } @else if obs.project == sipag_core::board::MISC_PROJECT && !kr_choices.is_empty() {
+                            (kr_proposal_chip(&obs.id(), proposal, kr_choices))
                         }
                         @if let Some(uuid) = claude_uuid {
                             @if !uuid.is_empty() {
-                                div.live-obs-detail-meta {
-                                    span.subtle { "claude " }
-                                    code { (uuid) }
-                                }
+                                (reply_input(&obs.host, uuid))
                             }
-                        }
-                    } @else {
-                        p.live-obs-detail-empty.subtle {
-                            "no live context yet — will populate on next summarizer cycle"
-                        }
-                    }
-                    @if obs.project != sipag_core::board::MISC_PROJECT && obs.kr_id != 0 {
-                        (progress_panel(snap, &obs.project, obs.kr_id))
-                    } @else if obs.project == sipag_core::board::MISC_PROJECT && !kr_choices.is_empty() {
-                        (kr_proposal_chip(&obs.id(), proposal, kr_choices))
-                    }
-                    @if let Some(uuid) = claude_uuid {
-                        @if !uuid.is_empty() {
-                            (reply_input(&obs.host, uuid))
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// Detail body for ended observations: a tag strip (objectives + KRs +
+/// initiative + cwd + Claude UUID) and a two-tab panel (summary &
+/// learnings / full transcript). Transcript is lazy-loaded via HTMX
+/// when the user activates that tab.
+fn ended_detail_body(
+    snap: &BoardSnapshot,
+    obs: &sipag_core::board::Observation,
+    summary_long: Option<&str>,
+    cwd_full: Option<&str>,
+    claude_uuid: Option<&str>,
+) -> Markup {
+    let id = obs.id();
+    let tab_name = format!("ended-tab-{}", id);
+    let summary_tab_id = format!("ended-tab-summary-{}", id);
+    let transcript_tab_id = format!("ended-tab-transcript-{}", id);
+    let transcript_panel_id = format!("ended-panel-transcript-{}", id);
+    let transcript_url = format!("/htmx/observations/{}/transcript", urlencode(&id));
+
+    // Build the tag list. Each KR ref → (objective, kr title). The
+    // initiative is the legacy obs.project field when set to a real
+    // project name.
+    let mut objectives_seen: std::collections::BTreeSet<String> = Default::default();
+    let mut tag_chips: Vec<Markup> = Vec::new();
+    for kref in &obs.kr_refs {
+        let kr_title = snap
+            .objectives
+            .iter()
+            .find(|o| o.id == kref.objective)
+            .and_then(|o| o.key_results.iter().find(|k| k.id == kref.kr))
+            .map(|k| k.title.clone())
+            .unwrap_or_else(|| format!("KR#{}", kref.kr));
+        let obj_label = kref.objective.clone();
+        if objectives_seen.insert(obj_label.clone()) {
+            tag_chips.push(html! {
+                span.ended-tag.ended-tag-objective {
+                    span.ended-tag-key { "objective" }
+                    span.ended-tag-val { (obj_label) }
+                }
+            });
+        }
+        tag_chips.push(html! {
+            span.ended-tag.ended-tag-kr {
+                span.ended-tag-key { "kr" }
+                span.ended-tag-val { (kr_title) }
+            }
+        });
+    }
+    if !obs.project.is_empty() && obs.project != sipag_core::board::MISC_PROJECT {
+        tag_chips.push(html! {
+            span.ended-tag.ended-tag-initiative {
+                span.ended-tag-key { "initiative" }
+                span.ended-tag-val { (obs.project) }
+            }
+        });
+    }
+    if let Some(c) = cwd_full {
+        if !c.is_empty() {
+            tag_chips.push(html! {
+                span.ended-tag.ended-tag-cwd {
+                    span.ended-tag-key { "cwd" }
+                    span.ended-tag-val { code { (c) } }
+                }
+            });
+        }
+    }
+    if let Some(u) = claude_uuid {
+        if !u.is_empty() {
+            let short: String = u.chars().take(8).collect();
+            tag_chips.push(html! {
+                span.ended-tag.ended-tag-uuid {
+                    span.ended-tag-key { "claude" }
+                    span.ended-tag-val { code { (short) "…" } }
+                }
+            });
+        }
+    }
+
+    html! {
+        div.live-obs-detail.ended-detail {
+            @if tag_chips.is_empty() {
+                p.live-obs-detail-empty.subtle {
+                    "no tags captured for this session — it ran before sipag started archiving meta"
+                }
+            } @else {
+                div.ended-tags {
+                    @for chip in &tag_chips { (chip) }
+                }
+            }
+            div.ended-tabs {
+                input #(summary_tab_id) type="radio" name=(tab_name) checked;
+                label.ended-tab-label for=(summary_tab_id) { "summary & learnings" }
+                input #(transcript_tab_id) type="radio" name=(tab_name);
+                label.ended-tab-label for=(transcript_tab_id)
+                    "hx-get"=(transcript_url)
+                    "hx-target"={"#" (transcript_panel_id)}
+                    "hx-trigger"="click once"
+                    "hx-swap"="innerHTML" {
+                    "transcript"
+                }
+                div.ended-panel.ended-panel-summary {
+                    @if let Some(long) = summary_long {
+                        @if !long.is_empty() {
+                            p.live-obs-detail-summary { (long) }
+                        } @else {
+                            p.live-obs-detail-empty.subtle {
+                                "no summary captured before this session ended"
+                            }
+                        }
+                    } @else {
+                        p.live-obs-detail-empty.subtle {
+                            "no summary captured before this session ended"
+                        }
+                    }
+                    @if obs.status == "ended" {
+                        p.subtle.ended-meta {
+                            "ran from " (relative_time(&obs.first_seen))
+                            " to " (relative_time(&obs.last_seen))
+                        }
+                    }
+                }
+                div.ended-panel.ended-panel-transcript id=(transcript_panel_id) {
+                    p.subtle { "click the transcript tab above to load…" }
+                }
+            }
+        }
+    }
+}
+
+/// Render a list of FeedEntry into HTML for the transcript tab. Used
+/// by the transcript endpoint's HTMX response.
+pub fn transcript_panel(entries: &[FeedEntry]) -> Markup {
+    if entries.is_empty() {
+        return html! {
+            div.transcript-empty.subtle {
+                "transcript is empty (or wasn't recorded for this session)"
+            }
+        };
+    }
+    html! {
+        ol.transcript-list {
+            @for e in entries {
+                (transcript_row(e))
+            }
+        }
+    }
+}
+
+fn transcript_row(entry: &FeedEntry) -> Markup {
+    match entry {
+        FeedEntry::User { text, .. } => html! {
+            li.transcript-row.transcript-user {
+                span.transcript-marker { "›" }
+                span.transcript-text { (text) }
+            }
+        },
+        FeedEntry::Assistant { text, tools, .. } => html! {
+            li.transcript-row.transcript-assistant {
+                span.transcript-marker { "‹" }
+                @if let Some(t) = text {
+                    @if !t.is_empty() {
+                        span.transcript-text { (t) }
+                    }
+                }
+                @if !tools.is_empty() {
+                    div.transcript-tools {
+                        @for tool in tools {
+                            span.transcript-tool {
+                                span.transcript-tool-name { (tool.name) }
+                                @if !tool.target.is_empty() {
+                                    span.transcript-tool-target.subtle { " " (tool.target) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        FeedEntry::ToolResult { text, .. } => html! {
+            li.transcript-row.transcript-tool-result {
+                span.transcript-marker { "⚙" }
+                span.transcript-text { (text) }
+            }
+        },
     }
 }
 
@@ -2000,25 +2210,6 @@ pub fn attention_strip(snap: &BoardSnapshot) -> Markup {
                         span.attention-id { "#" (id) }
                         span.attention-title { (title) }
                     }
-                }
-            }
-        }
-    }
-}
-
-pub fn ticker(envs: &[Envelope]) -> Markup {
-    html! {
-        @for env in envs {
-            div.ticker-row data-kind=(env.kind) {
-                span.ticker-ts { (env.ts) }
-                span.ticker-kind { (env.kind) }
-                @let worker = env.payload.get("worker").and_then(|v| v.as_str()).unwrap_or("");
-                @let pkind = env.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                @let project = env.payload.get("project").and_then(|v| v.as_str()).unwrap_or("");
-                @let id = env.payload.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
-                span.ticker-worker { (worker) }
-                @if !pkind.is_empty() {
-                    span.ticker-target { (pkind) " " (project) " #" (id) }
                 }
             }
         }

@@ -72,10 +72,13 @@ pub fn routes() -> Router<AppState> {
             post(observation_kr_reject_handler),
         )
         .route(
+            "/htmx/observations/:obs_id/transcript",
+            get(observation_transcript_handler),
+        )
+        .route(
             "/htmx/sessions/:host_id/:uuid/respond",
             post(claude_respond_handler),
         )
-        .route("/htmx/ticker", get(ticker_fragment))
         .route("/htmx/insights/hint", get(insights_hint))
         .route("/htmx/debug/topics", get(debug_topics))
 }
@@ -547,9 +550,19 @@ async fn dispatch_task_handler(
     let role_command = sipag_core::board::Role::load(&dir, &project_name, &task.role)
         .map(|r| r.command)
         .unwrap_or_else(|_| "claude".to_string());
-    let title_quoted =
-        serde_json::to_string(&task.title).unwrap_or_else(|_| format!("\"task #{id}\""));
-    let agent_cmd = format!("{role_command} -p {title_quoted}");
+    // Build a context-rich prompt: the "why" (objective aspiration +
+    // KR), a nudge to grep the project's commit history with diwa
+    // before writing code, then the actual task. Mirrors how a human
+    // would brief Claude when starting a session manually.
+    let prompt = build_dispatch_prompt(&dir, &project_name, &task);
+    // Two-step dispatch: sync exec sends just the launch command
+    // (e.g. `claude\r`) so we get fast HTTP feedback if katulong is
+    // unreachable. The background task waits for claude's TUI to be
+    // ready (auto-approving the trust prompt if seen), then pastes
+    // the prompt as one bracketed-paste message — same shape as a
+    // human typing into the TUI, with normal permission prompts left
+    // intact for human approval from the iPad.
+    let launch_cmd = build_launch_cmd(&role_command);
     let session = session_name(&project_name, &task.role);
 
     let create_url = format!("{}/sessions", host.base_url());
@@ -598,7 +611,7 @@ async fn dispatch_task_handler(
         .http
         .post(&exec_url)
         .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "input": agent_cmd }))
+        .json(&serde_json::json!({ "input": launch_cmd }))
         .send()
         .await
     {
@@ -624,6 +637,26 @@ async fn dispatch_task_handler(
             error = %e,
             "task move to in-progress failed (worker is already running)"
         );
+    }
+
+    // Spawn a background task that waits for claude's TUI to be
+    // ready, auto-approves the one-time trust prompt if seen, pastes
+    // the task prompt as one message, then verifies + heals via
+    // gemma4. The HTTP response goes back to the iPad immediately;
+    // outcome surfaces via `dispatch.outcome` broker events.
+    if let Some(sid) = session_id.clone() {
+        let state_bg = state.clone();
+        let host_bg = host.clone();
+        let project_bg = project_name.clone();
+        let session_bg = session.clone();
+        let role_bg = role_command.clone();
+        let prompt_bg = prompt.clone();
+        tokio::spawn(async move {
+            verify_and_heal_dispatch(
+                state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
+            )
+            .await;
+        });
     }
 
     let toast_msg = format!("dispatched #{id} on {} · {}", host.id, session);
@@ -768,6 +801,81 @@ async fn kr_done_handler(
 async fn attention_fragment(State(state): State<AppState>) -> Response {
     let snap = board_view::load_snapshot(&state).await;
     html_response(board_view::attention_strip(&snap))
+}
+
+/// Lazy-loaded transcript fragment for an ended (or active) session.
+/// Bridges to katulong's `/api/claude-transcript/:uuid` on the host the
+/// observation lives on. Returns an HTML fragment that swaps into the
+/// transcript tab panel. Falls back to a friendly "not available" when
+/// katulong's endpoint 404s (broker meta missing — known issue queued
+/// as a katulong task).
+async fn observation_transcript_handler(
+    AxumPath(obs_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Response {
+    let dir = load_dir();
+    let obs = match Observation::load(&dir, &obs_id) {
+        Ok(o) => o,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "observation not found"),
+    };
+    if obs.claude_uuid.is_empty() {
+        return html_response(maud::html! {
+            div.transcript-empty.subtle {
+                "no Claude session UUID was captured for this observation — "
+                "transcript not available"
+            }
+        });
+    }
+    let host = match state.hosts.find(&obs.host) {
+        Some(h) => h,
+        None => {
+            return html_response(maud::html! {
+                div.transcript-empty.subtle {
+                    "host '" (obs.host) "' is no longer configured — transcript not available"
+                }
+            });
+        }
+    };
+    let url = format!(
+        "{}/api/claude-transcript/{}?limit=500",
+        host.base_url(),
+        obs.claude_uuid
+    );
+    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return html_response(maud::html! {
+                div.transcript-empty.subtle {
+                    "transcript fetch failed: " (e.to_string())
+                }
+            });
+        }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return html_response(maud::html! {
+            div.transcript-empty.subtle {
+                "transcript not available (HTTP " (status.as_u16()) ")"
+                @if !body.is_empty() {
+                    " — " (body)
+                }
+            }
+        });
+    }
+    let parsed: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return html_response(maud::html! {
+                div.transcript-empty.subtle { "transcript response was malformed" }
+            });
+        }
+    };
+    let entries: Vec<board_view::FeedEntry> = parsed
+        .get("entries")
+        .and_then(|e| serde_json::from_value(e.clone()).ok())
+        .unwrap_or_default();
+    html_response(board_view::transcript_panel(&entries))
 }
 
 /// Mark the current gemma4 proposal for an observation as rejected.
@@ -919,10 +1027,465 @@ async fn observation_kr_handler(
     html_response(render_board(&state).await)
 }
 
-async fn ticker_fragment(State(state): State<AppState>) -> Response {
-    let envs = state.broker.read("workers/activity", 0).unwrap_or_default();
-    let last_n: Vec<_> = envs.iter().rev().take(5).cloned().collect();
-    let mut chronological = last_n;
-    chronological.reverse();
-    html_response(board_view::ticker(&chronological))
+/// Compose the prompt fed to `claude -p` when sipag dispatches a
+/// task. Three sections: **Context** (initiative + objective
+/// aspiration + KR title — the "why"), a **Research** nudge that
+/// directs the agent to use `diwa` before touching code, and the
+/// **Task** itself (the user-authored task title).
+///
+/// Lookups are best-effort — missing project / objective / KR
+/// degrade silently to whatever sections we can fill. The minimum
+/// useful output is always at least the Task section.
+fn build_dispatch_prompt(
+    sipag_dir: &std::path::Path,
+    project_name: &str,
+    task: &Task,
+) -> String {
+    let project = sipag_core::board::load_project(sipag_dir, project_name).ok();
+    let first_objective_id = project
+        .as_ref()
+        .and_then(|p| p.serves.first().cloned());
+    let aspiration = first_objective_id
+        .as_ref()
+        .and_then(|id| sipag_core::board::Objective::load(sipag_dir, id).ok())
+        .map(|o| o.aspiration);
+    let kr_title = match (&first_objective_id, task.key_results.first().copied()) {
+        (Some(obj_id), Some(kr_id)) if kr_id != 0 => {
+            sipag_core::board::KeyResult::load_for_objective(sipag_dir, obj_id, kr_id)
+                .ok()
+                .map(|k| k.title)
+        }
+        _ => None,
+    };
+
+    let mut out = String::new();
+    out.push_str("## Context\n\n");
+    out.push_str(&format!("Initiative: **{}**\n", project_name));
+    if let Some(asp) = aspiration.filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Objective: \"{}\"\n", asp));
+    }
+    if let Some(kr) = kr_title.filter(|s| !s.is_empty()) {
+        out.push_str(&format!("Key Result: \"{}\"\n", kr));
+    }
+    out.push_str("\n## Research first\n\n");
+    out.push_str(&format!(
+        "Before touching code, run `diwa search {project_name} \"<terms relevant to this task>\"` \
+         to ground yourself in past decisions, prior attempts, and related work in this initiative. \
+         Skim the most relevant commits and let any cited files / SHAs / PR numbers expand into \
+         further `diwa search` queries. Don't write code until the picture is clear.\n",
+    ));
+    out.push_str("\n## Task\n\n");
+    out.push_str(&task.title);
+    out
 }
+
+/// Background driver that runs after every dispatch.
+///
+/// 1. Poll the pane for up to ~6s waiting for claude's TUI. If the
+///    one-time "Do you trust the files in this folder?" prompt
+///    appears, auto-select option 1 (yes) — the human can't see this
+///    prompt from the iPad and dispatch would otherwise stall on it.
+/// 2. Send the task prompt as a single bracketed-paste message so
+///    multi-line markdown lands as one chat turn instead of
+///    submitting on the first internal newline.
+/// 3. Poll `/sessions/by-id/<sid>/status` — if `agent.running` is true,
+///    publish `dispatch.success` and exit.
+/// 4. Otherwise, enter a bounded recovery loop:
+///    - Fetch recent pane scrollback via `/sessions/by-id/<sid>/output?lines=80`.
+///    - Hand `(intended_command, scrollback)` to gemma4 and ask for the
+///      next keystrokes to recover.
+///    - POST gemma4's keystrokes to `/sessions/by-id/<sid>/exec`.
+///    - Wait + recheck status. If it took, publish success; otherwise
+///      iterate up to MAX_HEAL_ATTEMPTS times.
+/// 5. Surface the final outcome on the `observations/activity` topic
+///    so the UI's pulse animation fires on the corresponding row.
+#[allow(clippy::too_many_arguments)]
+async fn verify_and_heal_dispatch(
+    state: AppState,
+    host: sipag_core::hosts::Host,
+    session_id: String,
+    role_command: String,
+    prompt: String,
+    project_name: String,
+    task_id: u64,
+    session_name_str: String,
+) {
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    const TUI_WAIT_TICKS: u8 = 12; // ~6s total at 500ms cadence
+    const TUI_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+    const POST_PASTE_WAIT: Duration = Duration::from_secs(3);
+    const POST_HEAL_WAIT: Duration = Duration::from_secs(5);
+    const MAX_HEAL_ATTEMPTS: u8 = 3;
+
+    let exec_url = format!(
+        "{}/sessions/by-id/{}/exec",
+        host.base_url(),
+        session_id
+    );
+
+    // Phase 1: wait for the claude TUI to be ready, auto-approving
+    // the trust-this-folder prompt if seen. Trust prompt only shows
+    // on first invocation in a fresh directory; most dispatches will
+    // skip straight to "TUI visible" within a tick or two.
+    let mut trust_approved = false;
+    for _ in 0..TUI_WAIT_TICKS {
+        sleep(TUI_WAIT_INTERVAL).await;
+        let pane = fetch_pane_scrollback(&state, &host, &session_id).await;
+        if !trust_approved && pane_shows_trust_prompt(&pane) {
+            tracing::info!(
+                host = %host.id,
+                session = %session_name_str,
+                "trust prompt detected — sending '1' to approve"
+            );
+            let _ = state
+                .http
+                .post(&exec_url)
+                .bearer_auth(&host.api_key)
+                .json(&serde_json::json!({ "input": "1\r" }))
+                .send()
+                .await;
+            trust_approved = true;
+            // Loop again to wait for the TUI to settle after approval.
+            continue;
+        }
+        // No trust prompt; assume claude is ready (or near-ready) and
+        // proceed to paste. A small race here is fine — if the paste
+        // arrives before the input box is interactive, the heal loop
+        // will pick up the slack via gemma4.
+        break;
+    }
+
+    // Phase 2: paste the prompt as one message.
+    let prompt_input = wrap_bracketed_paste(&prompt);
+    let _ = state
+        .http
+        .post(&exec_url)
+        .bearer_auth(&host.api_key)
+        .json(&serde_json::json!({ "input": prompt_input }))
+        .send()
+        .await;
+
+    // Phase 3: verify claude is processing.
+    sleep(POST_PASTE_WAIT).await;
+    if check_agent_running(&state, &host, &session_id).await {
+        publish_dispatch_outcome(
+            &state, &host.id, &session_name_str, &project_name, task_id, "success", 0, "",
+        );
+        return;
+    }
+
+    tracing::warn!(
+        host = %host.id,
+        session = %session_name_str,
+        task = task_id,
+        "dispatch verification failed — entering gemma4 self-heal loop"
+    );
+
+    // Synthetic "intended command" description for gemma4. The model
+    // sees what we tried to accomplish (launch + paste) so it can
+    // reason about scrollback and propose recovery keystrokes.
+    let intended_command = format!(
+        "Launch `{role_command}` interactively in the pane, then paste this prompt as a single \
+         bracketed-paste message:\n---\n{prompt}\n---"
+    );
+
+    for attempt in 1..=MAX_HEAL_ATTEMPTS {
+        let scrollback = fetch_pane_scrollback(&state, &host, &session_id).await;
+        let recovery = match propose_recovery(&state, &intended_command, &scrollback).await {
+            Some(r) => r,
+            None => {
+                tracing::warn!(
+                    attempt,
+                    "gemma4 declined to propose a recovery action — giving up"
+                );
+                publish_dispatch_outcome(
+                    &state,
+                    &host.id,
+                    &session_name_str,
+                    &project_name,
+                    task_id,
+                    "unrecoverable",
+                    attempt,
+                    "gemma4 declined to propose recovery",
+                );
+                return;
+            }
+        };
+        if recovery.input.is_empty() {
+            tracing::info!(attempt, reason = %recovery.reason, "gemma4 marked dispatch unrecoverable");
+            publish_dispatch_outcome(
+                &state, &host.id, &session_name_str, &project_name, task_id,
+                "unrecoverable", attempt, &recovery.reason,
+            );
+            return;
+        }
+        tracing::info!(
+            attempt,
+            reason = %recovery.reason,
+            "gemma4 proposed recovery keystrokes; sending"
+        );
+        let _ = state
+            .http
+            .post(&exec_url)
+            .bearer_auth(&host.api_key)
+            .json(&serde_json::json!({ "input": recovery.input }))
+            .send()
+            .await;
+        sleep(POST_HEAL_WAIT).await;
+        if check_agent_running(&state, &host, &session_id).await {
+            tracing::info!(attempt, "self-heal succeeded");
+            publish_dispatch_outcome(
+                &state, &host.id, &session_name_str, &project_name, task_id,
+                "self-healed", attempt, &recovery.reason,
+            );
+            return;
+        }
+    }
+
+    tracing::warn!(
+        host = %host.id,
+        session = %session_name_str,
+        "self-heal exhausted attempts; giving up"
+    );
+    publish_dispatch_outcome(
+        &state, &host.id, &session_name_str, &project_name, task_id,
+        "failed", MAX_HEAL_ATTEMPTS, "exhausted attempts",
+    );
+}
+
+async fn check_agent_running(
+    state: &AppState,
+    host: &sipag_core::hosts::Host,
+    session_id: &str,
+) -> bool {
+    let url = format!("{}/sessions/by-id/{}/status", host.base_url(), session_id);
+    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return false,
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    body.get("agent")
+        .and_then(|a| a.get("running"))
+        .and_then(|r| r.as_bool())
+        .unwrap_or(false)
+}
+
+async fn fetch_pane_scrollback(
+    state: &AppState,
+    host: &sipag_core::hosts::Host,
+    session_id: &str,
+) -> String {
+    let url = format!(
+        "{}/sessions/by-id/{}/output?lines=80",
+        host.base_url(),
+        session_id
+    );
+    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return String::new(),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    body.get("data")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+struct RecoveryProposal {
+    input: String,
+    reason: String,
+}
+
+/// Ask gemma4 for the next keystrokes to recover a stuck dispatch.
+/// Returns `None` only on transport / parse errors so the caller can
+/// distinguish "model declined" (Some with empty input) from "we
+/// couldn't even ask."
+async fn propose_recovery(
+    state: &AppState,
+    intended_command: &str,
+    scrollback: &str,
+) -> Option<RecoveryProposal> {
+    use sipag_core::llm::{chat, env_auth, env_host, env_model, ChatMessage, ChatOptions};
+
+    let system = "You are a self-healing dispatch agent for a remote interactive shell.\n\
+        Sipag tried to type a command into a tmux pane on a katulong host but the agent \
+        didn't launch. Your job: look at what's currently in the pane and propose the \
+        next keystrokes that will get the intended command running.\n\
+        \n\
+        The shell may be in any of these states: in a stuck multi-line continuation \
+        (PS2 prompt), inside another REPL, mid-output of a long-running command, \
+        showing a recoverable error from a previous attempt. You can send any keys, \
+        including newlines (\\n for Enter) and control characters (\\u0003 for Ctrl-C, \
+        \\u0004 for Ctrl-D, etc.). Be conservative: prefer small steps that observe \
+        before committing.\n\
+        \n\
+        Reply with a single JSON object on one line. No markdown, no commentary.\n\
+        Schema: {\"input\": \"<keys to send next>\", \"reason\": \"<one short phrase>\"}\n\
+        \n\
+        If the situation is unrecoverable (e.g., wrong host, missing dependency that \
+        you can't install from this shell), reply with input set to \"\" and a reason.";
+
+    let user = format!(
+        "Intended command:\n{intended_command}\n\nRecent pane scrollback:\n{scrollback}",
+    );
+
+    let opts = ChatOptions {
+        model: env_model(),
+        temperature: 0.2,
+        num_predict: Some(1024),
+        auth_bearer: env_auth(),
+    };
+    let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
+    let raw = match chat(&state.http, &env_host(), messages, opts).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("dispatch heal: gemma4 call failed: {e}");
+            return None;
+        }
+    };
+
+    // Same forgiving JSON extractor as categorize.rs uses — models
+    // sometimes wrap their JSON answer in prose despite instructions.
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    let json_str = &raw[start..=end];
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        reason: String,
+    }
+    let parsed: Reply = match serde_json::from_str(json_str) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("dispatch heal: gemma4 reply not JSON ({e}): {raw}");
+            return None;
+        }
+    };
+    Some(RecoveryProposal {
+        input: parsed.input,
+        reason: parsed.reason,
+    })
+}
+
+fn publish_dispatch_outcome(
+    state: &AppState,
+    host_id: &str,
+    session_name_str: &str,
+    project_name: &str,
+    task_id: u64,
+    outcome: &str,
+    attempts: u8,
+    reason: &str,
+) {
+    let payload = serde_json::json!({
+        "host": host_id,
+        "session": session_name_str,
+        "project": project_name,
+        "task_id": task_id,
+        "outcome": outcome,
+        "attempts": attempts,
+        "reason": reason,
+    });
+    let _ = state
+        .broker
+        .publish("observations/activity", "dispatch.outcome", payload);
+}
+
+/// Build the launch command — just the role command + Enter. The
+/// prompt is sent separately as a bracketed paste once claude's TUI
+/// is ready, so claude can prompt for permissions like a normal
+/// interactive session.
+fn build_launch_cmd(role_command: &str) -> String {
+    format!("{role_command}\r")
+}
+
+/// Wrap text in bracketed-paste markers + final Enter so claude's
+/// TUI receives multi-line content as a single message instead of
+/// submitting on the first internal newline.
+fn wrap_bracketed_paste(text: &str) -> String {
+    format!("\x1b[200~{text}\x1b[201~\r")
+}
+
+/// Detect claude's "Do you trust the files in this folder?" prompt
+/// in pane scrollback. This shows on the first invocation in a fresh
+/// directory; sipag auto-selects "yes" so dispatch isn't blocked by
+/// a one-time prompt the human can't see from the iPad.
+fn pane_shows_trust_prompt(pane: &str) -> bool {
+    pane.contains("trust the files in this folder")
+        || pane.contains("Do you trust")
+}
+
+#[cfg(test)]
+mod dispatch_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn launch_cmd_appends_cr() {
+        assert_eq!(build_launch_cmd("claude"), "claude\r");
+        assert_eq!(
+            build_launch_cmd("claude --resume"),
+            "claude --resume\r"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_wraps_with_markers_and_enter() {
+        let wrapped = wrap_bracketed_paste("hello");
+        assert_eq!(wrapped, "\x1b[200~hello\x1b[201~\r");
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_multi_line_verbatim() {
+        // Multi-line content survives bracketed-paste-wrap unchanged.
+        // This is the point: claude's TUI groups the bytes between
+        // markers into one message, so embedded \n becomes part of
+        // the message instead of submitting after the first line.
+        let prompt = "## Context\n\nLine A\n\nLine B";
+        let wrapped = wrap_bracketed_paste(prompt);
+        assert!(wrapped.starts_with("\x1b[200~"));
+        assert!(wrapped.ends_with("\x1b[201~\r"));
+        let inner = &wrapped["\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
+        assert_eq!(inner, prompt);
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_special_chars_verbatim() {
+        // The whole reason we abandoned shell-quoting: $, `, ', ",
+        // backslashes, and unicode all need to reach claude as-typed.
+        // Bracketed paste passes raw bytes through — no escaping at all.
+        let prompt = "use $HOME and `whoami` and \"quotes\" and \u{2014} em-dash \u{2018}smart\u{2019}";
+        let wrapped = wrap_bracketed_paste(prompt);
+        let inner = &wrapped["\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
+        assert_eq!(inner, prompt);
+    }
+
+    #[test]
+    fn trust_prompt_detected_from_real_text() {
+        let pane = "Welcome to Claude Code\n\n\
+                    Do you trust the files in this folder?\n\
+                    Claude Code may read files in this folder...\n\
+                    1. Yes, proceed\n2. No, exit";
+        assert!(pane_shows_trust_prompt(pane));
+    }
+
+    #[test]
+    fn trust_prompt_returns_false_for_normal_pane() {
+        assert!(!pane_shows_trust_prompt(""));
+        assert!(!pane_shows_trust_prompt("~ ❯ "));
+        assert!(!pane_shows_trust_prompt("claude is thinking..."));
+    }
+}
+
