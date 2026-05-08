@@ -1439,6 +1439,13 @@ fn build_launch_cmd(role_command: &str) -> String {
 /// Wrap text in bracketed-paste markers + final Enter so claude's
 /// TUI receives multi-line content as a single message instead of
 /// submitting on the first internal newline.
+///
+/// The wrapped string rides through tmux `send-keys -H`, which
+/// chunks at 4096 bytes per command (katulong `lib/session.js`
+/// `SEND_KEYS_MAX_BYTES`, see katulong commit 1901018 — tmux's yacc
+/// parser overflows past ~9997 args). Long prompts whose paste
+/// markers straddle a chunk boundary are untested and may not
+/// behave as one paste.
 fn wrap_bracketed_paste(text: &str) -> String {
     format!("\x1b[200~{text}\x1b[201~\r")
 }
