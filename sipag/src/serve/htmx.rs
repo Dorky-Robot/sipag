@@ -568,7 +568,7 @@ async fn dispatch_task_handler(
     let launch_cmd = build_launch_cmd(&role_command);
     let session = session_name(&project_name, &task.role);
 
-    let session_id = match super::create_or_find_session(
+    let session_id = match super::katulong_proxy::create_or_find_session(
         &state.http,
         host.base_url(),
         &host.api_key,
@@ -812,11 +812,7 @@ async fn observation_transcript_handler(
             });
         }
     };
-    let url = format!(
-        "{}/api/claude-transcript/{}?limit=500",
-        host.base_url(),
-        obs.claude_uuid
-    );
+    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), &obs.claude_uuid, 500);
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -912,7 +908,7 @@ async fn claude_respond_handler(
         Some(h) => h,
         None => return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {host_id}")),
     };
-    let url = format!("{}/api/claude/respond/{}", host.base_url(), uuid);
+    let url = sipag_core::katulong::claude_respond_url(host.base_url(), &uuid);
     let resp = match state
         .http
         .post(&url)
