@@ -601,7 +601,12 @@ async fn dispatch_task_handler(
     };
     if !exec_resp.status().is_success() {
         let st = exec_resp.status();
-        let raw = exec_resp.text().await.unwrap_or_default();
+        let raw = super::katulong_proxy::read_capped_text(
+            exec_resp,
+            super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+        )
+        .await
+        .unwrap_or_default();
         warn!(host = %host.id, status = %st, body = %raw, "POST exec returned non-2xx");
         let txt = super::katulong_proxy::sanitize_upstream_body(&raw);
         return err_response(
@@ -849,7 +854,12 @@ async fn observation_transcript_handler(
         // HTML auto-escaping, an attacker-controlled body could
         // disrupt layout or pad the fragment with garbage. Operator
         // detail goes to the warn log; the user gets a clean status.
-        let raw_body = resp.text().await.unwrap_or_default();
+        let raw_body = super::katulong_proxy::read_capped_text(
+            resp,
+            super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+        )
+        .await
+        .unwrap_or_default();
         warn!(host = %obs.host, status = status.as_u16(), body = %raw_body, "transcript fetch returned non-2xx");
         return html_response(maud::html! {
             div.transcript-empty.subtle {
@@ -857,11 +867,16 @@ async fn observation_transcript_handler(
             }
         });
     }
-    let parsed: serde_json::Value = match resp.json().await {
+    let parsed: serde_json::Value = match super::katulong_proxy::read_capped_json(
+        resp,
+        super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_LARGE,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(_) => {
             return html_response(maud::html! {
-                div.transcript-empty.subtle { "transcript response was malformed" }
+                div.transcript-empty.subtle { "transcript response was malformed or too large" }
             });
         }
     };
@@ -953,7 +968,12 @@ async fn claude_respond_handler(
     };
     if !resp.status().is_success() {
         let st = resp.status();
-        let raw = resp.text().await.unwrap_or_default();
+        let raw = super::katulong_proxy::read_capped_text(
+            resp,
+            super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+        )
+        .await
+        .unwrap_or_default();
         warn!(host = %host.id, status = %st, body = %raw, "POST /api/claude/respond returned non-2xx");
         let txt = super::katulong_proxy::sanitize_upstream_body(&raw);
         return err_response(
@@ -1291,7 +1311,12 @@ async fn check_agent_running(
         Ok(r) if r.status().is_success() => r,
         _ => return false,
     };
-    let body: serde_json::Value = match resp.json().await {
+    let body: serde_json::Value = match super::katulong_proxy::read_capped_json(
+        resp,
+        super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(_) => return false,
     };
@@ -1311,7 +1336,12 @@ async fn fetch_pane_scrollback(
         Ok(r) if r.status().is_success() => r,
         _ => return String::new(),
     };
-    let body: serde_json::Value = match resp.json().await {
+    let body: serde_json::Value = match super::katulong_proxy::read_capped_json(
+        resp,
+        super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+    )
+    .await
+    {
         Ok(v) => v,
         Err(_) => return String::new(),
     };

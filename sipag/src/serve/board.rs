@@ -478,7 +478,12 @@ async fn dispatch_task_handler(
     };
     if !exec_resp.status().is_success() {
         let st = exec_resp.status();
-        let raw = exec_resp.text().await.unwrap_or_default();
+        let raw = super::katulong_proxy::read_capped_text(
+            exec_resp,
+            super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_SMALL,
+        )
+        .await
+        .unwrap_or_default();
         warn!(host = %host.id, status = %st, body = %raw, "POST exec returned non-2xx");
         let body = super::katulong_proxy::sanitize_upstream_body(&raw);
         return (
@@ -569,7 +574,12 @@ async fn proxy_get(state: &AppState, host: &sipag_core::hosts::Host, url: &str) 
             if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE).cloned() {
                 headers.insert(axum::http::header::CONTENT_TYPE, ct);
             }
-            let body = match resp.bytes().await {
+            let body = match super::katulong_proxy::read_capped_bytes(
+                resp,
+                super::katulong_proxy::KATULONG_RESPONSE_MAX_BYTES_LARGE,
+            )
+            .await
+            {
                 Ok(b) => b,
                 Err(e) => {
                     warn!(host = %host.id, error = %e, "read body failed");

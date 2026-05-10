@@ -10,6 +10,67 @@
 use axum::http::StatusCode;
 use tracing::warn;
 
+/// Hard cap on a single katulong response body for "small" endpoints
+/// — sessions list, status, output (pane scrollback), error bodies,
+/// session-create response. Real responses here are <50KB; 1MB is a
+/// generous guardrail against a misbehaving or malicious katulong
+/// streaming an unbounded body and OOM-killing sipag. See
+/// [`KATULONG_RESPONSE_MAX_BYTES_LARGE`] for the bigger-payload cap.
+pub(super) const KATULONG_RESPONSE_MAX_BYTES_SMALL: usize = 1024 * 1024;
+
+/// Hard cap for endpoints that may legitimately return larger bodies
+/// — `/api/claude-transcript/...` (full JSONL transcript) and the
+/// generic `proxy_get` passthrough (callers consume any katulong
+/// route). 10MB lets a long transcript through while still bounding
+/// sipag's memory exposure.
+pub(super) const KATULONG_RESPONSE_MAX_BYTES_LARGE: usize = 10 * 1024 * 1024;
+
+/// Read a `reqwest::Response`'s body chunk-by-chunk, refusing once
+/// it would exceed `max_bytes`. `Response::chunk` yields decoded
+/// bytes (post gzip/deflate if the client decompresses), so the cap
+/// applies to logical body size — not on-wire size — which is what
+/// matters for sipag's memory exposure. Bails before reading further
+/// chunks, so a 10GB pathological body doesn't get fully buffered.
+pub(super) async fn read_capped_bytes(
+    mut resp: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if buf.len() + chunk.len() > max_bytes {
+            anyhow::bail!(
+                "response body exceeds {max_bytes}-byte cap (already read {} bytes)",
+                buf.len()
+            );
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Convenience wrapper around [`read_capped_bytes`] that decodes the
+/// body as UTF-8 (lossy — invalid sequences become U+FFFD). Mirrors
+/// `reqwest::Response::text()` but with a size cap.
+pub(super) async fn read_capped_text(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<String> {
+    let bytes = read_capped_bytes(resp, max_bytes).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Convenience wrapper around [`read_capped_bytes`] that deserializes
+/// the body as JSON. Mirrors `reqwest::Response::json::<T>()` but
+/// with a size cap.
+pub(super) async fn read_capped_json<T: serde::de::DeserializeOwned>(
+    resp: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<T> {
+    let bytes = read_capped_bytes(resp, max_bytes).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| anyhow::anyhow!("invalid JSON in capped response body: {e}"))
+}
+
 /// Cap on how many chars of an upstream katulong error body we
 /// echo back to the caller. Long enough for a useful one-line
 /// JSON error, short enough that pathological responses (large
@@ -52,7 +113,12 @@ async fn extract_session_id(
     resp: reqwest::Response,
     host_id: &str,
 ) -> std::result::Result<String, (StatusCode, String)> {
-    let session = match resp.json::<sipag_core::katulong::Session>().await {
+    let session = match read_capped_json::<sipag_core::katulong::Session>(
+        resp,
+        KATULONG_RESPONSE_MAX_BYTES_SMALL,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(e) => {
             warn!(host = %host_id, error = %e, "parse session create response failed");
@@ -124,7 +190,9 @@ pub(super) async fn create_or_find_session(
             };
             if !list_resp.status().is_success() {
                 let st = list_resp.status();
-                let raw = list_resp.text().await.unwrap_or_default();
+                let raw = read_capped_text(list_resp, KATULONG_RESPONSE_MAX_BYTES_SMALL)
+                    .await
+                    .unwrap_or_default();
                 warn!(host = %host_id, status = %st, body = %raw, "GET /sessions for 409 fallback returned non-2xx");
                 let body = sanitize_upstream_body(&raw);
                 return Err((
@@ -134,16 +202,17 @@ pub(super) async fn create_or_find_session(
                     ),
                 ));
             }
-            let sessions: Vec<sipag_core::katulong::Session> = match list_resp.json().await {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!(host = %host_id, error = %e, "parse /sessions list failed");
-                    return Err((
-                        StatusCode::BAD_GATEWAY,
-                        format!("create session on {host_id}: invalid list response"),
-                    ));
-                }
-            };
+            let sessions: Vec<sipag_core::katulong::Session> =
+                match read_capped_json(list_resp, KATULONG_RESPONSE_MAX_BYTES_SMALL).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(host = %host_id, error = %e, "parse /sessions list failed");
+                        return Err((
+                            StatusCode::BAD_GATEWAY,
+                            format!("create session on {host_id}: invalid list response"),
+                        ));
+                    }
+                };
             let found =
                 sessions
                     .into_iter()
@@ -164,7 +233,9 @@ pub(super) async fn create_or_find_session(
             Ok(found.id)
         }
         code => {
-            let raw = create_resp.text().await.unwrap_or_default();
+            let raw = read_capped_text(create_resp, KATULONG_RESPONSE_MAX_BYTES_SMALL)
+                .await
+                .unwrap_or_default();
             warn!(host = %host_id, status = code, body = %raw, "POST /sessions returned non-2xx");
             let body = sanitize_upstream_body(&raw);
             Err((
