@@ -594,15 +594,9 @@ async fn dispatch_task_handler(
             format!("create session on {}: HTTP {st}: {txt}", host.id),
         );
     }
-    let session_id = match create_resp.json::<sipag_core::katulong::Session>().await {
-        Ok(s) => s.id,
-        Err(e) => {
-            warn!(host = %host.id, error = %e, "parse session create response failed");
-            return err_response(
-                StatusCode::BAD_GATEWAY,
-                format!("create session on {}: invalid response: {e}", host.id),
-            );
-        }
+    let session_id = match super::extract_session_id(create_resp, &host.id).await {
+        Ok(id) => id,
+        Err((st, body)) => return err_response(st, body),
     };
 
     let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());

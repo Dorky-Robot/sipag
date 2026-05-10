@@ -395,6 +395,10 @@ struct DispatchBody {
 struct DispatchResponse {
     task: TaskView,
     host: String,
+    // Always `Some` since the by-id migration: a missing id now causes
+    // the handler to return BAD_GATEWAY before this struct is built.
+    // Kept `Option<String>` for wire compat with any external JSON
+    // consumer; flatten to `String` on the next API revision.
     session_id: Option<String>,
     session_name: String,
 }
@@ -469,16 +473,9 @@ async fn dispatch_task_handler(
             .into_response();
     }
 
-    let session_id = match create_resp.json::<sipag_core::katulong::Session>().await {
-        Ok(s) => s.id,
-        Err(e) => {
-            warn!(host = %host.id, error = %e, "parse session create response failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("create session on {}: invalid response: {e}", host.id),
-            )
-                .into_response();
-        }
+    let session_id = match super::extract_session_id(create_resp, &host.id).await {
+        Ok(id) => id,
+        Err((st, body)) => return (st, body).into_response(),
     };
 
     let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
