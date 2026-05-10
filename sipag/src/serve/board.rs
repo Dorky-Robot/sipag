@@ -478,9 +478,9 @@ async fn dispatch_task_handler(
     };
     if !exec_resp.status().is_success() {
         let st = exec_resp.status();
-        let body = super::katulong_proxy::sanitize_upstream_body(
-            &exec_resp.text().await.unwrap_or_default(),
-        );
+        let raw = exec_resp.text().await.unwrap_or_default();
+        warn!(host = %host.id, status = %st, body = %raw, "POST exec returned non-2xx");
+        let body = super::katulong_proxy::sanitize_upstream_body(&raw);
         return (
             StatusCode::BAD_GATEWAY,
             format!("exec on {}: HTTP {st}: {body}", host.id),
@@ -551,6 +551,15 @@ async fn proxy_session_status(
 /// resolved `host` and built the URL via the `sipag_core::katulong`
 /// helpers, so this function holds no wire-format knowledge — only
 /// the auth + body-streaming + error-handling shape.
+///
+/// **Transparent passthrough — exempt from `sanitize_upstream_body`.**
+/// The success path here streams katulong's bytes verbatim to sipag's
+/// caller. This is the deliberate proxy contract: callers consuming
+/// `/api/hosts/:id/sessions` (etc.) want the raw katulong JSON. The
+/// sanitization rule introduced in #525 governs sipag-composed
+/// response bodies (error strings); transparent passthroughs are a
+/// distinct category. Body-size capping for this path is tracked in
+/// #527.
 async fn proxy_get(state: &AppState, host: &sipag_core::hosts::Host, url: &str) -> Response {
     match state.http.get(url).bearer_auth(&host.api_key).send().await {
         Ok(resp) => {

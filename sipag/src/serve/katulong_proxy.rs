@@ -14,21 +14,33 @@ use tracing::warn;
 /// echo back to the caller. Long enough for a useful one-line
 /// JSON error, short enough that pathological responses (large
 /// stack traces, attacker-supplied content) can't bloat sipag's
-/// own response or disrupt log forwarders.
-const UPSTREAM_BODY_MAX: usize = 256;
+/// own response or disrupt log forwarders. Char-bounded, not
+/// byte-bounded — see [`sanitize_upstream_body`].
+const UPSTREAM_BODY_MAX_CHARS: usize = 256;
 
 /// Sanitize a katulong response body before interpolating it into
-/// sipag's own response. Strips ASCII control characters except
-/// `\n` and `\t` (so multi-line JSON errors stay readable, but `\r`
-/// / NUL / escape sequences can't disrupt downstream rendering or
-/// log lines), and truncates to [`UPSTREAM_BODY_MAX`] chars.
+/// sipag's own **plain-text** response (axum tuple body, htmx error
+/// string). Strips ASCII control characters (Rust's
+/// [`char::is_control`] — covers C0 + DEL + C1) except `\n` and
+/// `\t` so multi-line JSON errors stay readable, and truncates to
+/// [`UPSTREAM_BODY_MAX_CHARS`] chars.
 ///
-/// The full body is still available in the operator-side `warn!`
-/// log; this is only about what reaches the HTTP caller.
+/// Caller responsibilities:
+/// - **HTML contexts**: do NOT pass sanitized output to a `maud`
+///   fragment or other HTML renderer. The filter strips terminal
+///   escapes and bytes that disrupt log lines, but does not encode
+///   `<`, `>`, `&`, or strip Unicode bidi-override chars
+///   (U+202A-202E etc.) that can disrupt visual layout. For HTML
+///   error paths, drop body forwarding entirely and rely on the
+///   `warn!` log instead — see `observation_transcript_handler`.
+/// - **Operator visibility**: the full body should be `warn!`-logged
+///   *before* this sanitizer runs so operators retain the raw
+///   diagnostic text. Sanitization governs only what crosses to the
+///   HTTP caller.
 pub(super) fn sanitize_upstream_body(body: &str) -> String {
     body.chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-        .take(UPSTREAM_BODY_MAX)
+        .take(UPSTREAM_BODY_MAX_CHARS)
         .collect()
 }
 
@@ -103,7 +115,9 @@ pub(super) async fn create_or_find_session(
             };
             if !list_resp.status().is_success() {
                 let st = list_resp.status();
-                let body = sanitize_upstream_body(&list_resp.text().await.unwrap_or_default());
+                let raw = list_resp.text().await.unwrap_or_default();
+                warn!(host = %host_id, status = %st, body = %raw, "GET /sessions for 409 fallback returned non-2xx");
+                let body = sanitize_upstream_body(&raw);
                 return Err((
                     StatusCode::BAD_GATEWAY,
                     format!(
@@ -135,7 +149,9 @@ pub(super) async fn create_or_find_session(
                 })
         }
         code => {
-            let body = sanitize_upstream_body(&create_resp.text().await.unwrap_or_default());
+            let raw = create_resp.text().await.unwrap_or_default();
+            warn!(host = %host_id, status = code, body = %raw, "POST /sessions returned non-2xx");
+            let body = sanitize_upstream_body(&raw);
             Err((
                 StatusCode::BAD_GATEWAY,
                 format!("create session on {host_id}: HTTP {code}: {body}"),
@@ -173,22 +189,40 @@ mod tests {
 
     #[test]
     fn sanitize_truncates_to_cap() {
-        let s: String = "x".repeat(UPSTREAM_BODY_MAX + 100);
+        let s: String = "x".repeat(UPSTREAM_BODY_MAX_CHARS + 100);
         let out = sanitize_upstream_body(&s);
-        assert_eq!(out.len(), UPSTREAM_BODY_MAX);
+        // Assert char-count, not byte-len — the cap is char-bounded.
+        // For ASCII these are equal, but the doc contract is chars.
+        assert_eq!(out.chars().count(), UPSTREAM_BODY_MAX_CHARS);
+        assert_eq!(out.len(), UPSTREAM_BODY_MAX_CHARS); // ASCII: bytes == chars
+    }
+
+    #[test]
+    fn sanitize_truncates_to_cap_for_multibyte_chars() {
+        // 4-byte UTF-8 chars (U+1F600 grinning face) cap at chars,
+        // not bytes — the output should be UPSTREAM_BODY_MAX_CHARS
+        // chars × 4 bytes, not UPSTREAM_BODY_MAX_CHARS bytes.
+        let s: String = "😀".repeat(UPSTREAM_BODY_MAX_CHARS + 50);
+        let out = sanitize_upstream_body(&s);
+        assert_eq!(out.chars().count(), UPSTREAM_BODY_MAX_CHARS);
+        assert_eq!(out.len(), UPSTREAM_BODY_MAX_CHARS * 4);
     }
 
     #[test]
     fn sanitize_truncates_after_filtering() {
         // Control chars are filtered first, so they don't count
-        // against the cap.
+        // against the cap. (Reversed order would leave the output
+        // shorter than UPSTREAM_BODY_MAX_CHARS.)
         let mut s = String::new();
         for _ in 0..50 {
             s.push('\r');
         }
-        for _ in 0..UPSTREAM_BODY_MAX {
+        for _ in 0..UPSTREAM_BODY_MAX_CHARS {
             s.push('x');
         }
-        assert_eq!(sanitize_upstream_body(&s).len(), UPSTREAM_BODY_MAX);
+        assert_eq!(
+            sanitize_upstream_body(&s).chars().count(),
+            UPSTREAM_BODY_MAX_CHARS
+        );
     }
 }
