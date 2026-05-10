@@ -568,41 +568,20 @@ async fn dispatch_task_handler(
     let launch_cmd = build_launch_cmd(&role_command);
     let session = session_name(&project_name, &task.role);
 
-    let create_url = format!("{}/sessions", host.base_url());
-    let create_resp = match state
-        .http
-        .post(&create_url)
-        .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "name": session }))
-        .send()
-        .await
+    let session_id = match super::katulong_proxy::create_or_find_session(
+        &state.http,
+        host.base_url(),
+        &host.api_key,
+        &host.id,
+        &session,
+    )
+    .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(host = %host.id, error = %e, "POST /sessions failed");
-            // Don't echo `{e}` into the response — reqwest's Display
-            // includes the request URL, leaking the tunnel hostname.
-            // Full detail is in the warn log above.
-            return err_response(
-                StatusCode::BAD_GATEWAY,
-                format!("create session on {}: network error", host.id),
-            );
-        }
-    };
-    if !create_resp.status().is_success() {
-        let st = create_resp.status();
-        let txt = create_resp.text().await.unwrap_or_default();
-        return err_response(
-            StatusCode::BAD_GATEWAY,
-            format!("create session on {}: HTTP {st}: {txt}", host.id),
-        );
-    }
-    let session_id = match super::extract_session_id(create_resp, &host.id).await {
         Ok(id) => id,
         Err((st, body)) => return err_response(st, body),
     };
 
-    let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
+    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
     let exec_resp = match state
         .http
         .post(&exec_url)
@@ -833,11 +812,7 @@ async fn observation_transcript_handler(
             });
         }
     };
-    let url = format!(
-        "{}/api/claude-transcript/{}?limit=500",
-        host.base_url(),
-        obs.claude_uuid
-    );
+    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), &obs.claude_uuid, 500);
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) => r,
         Err(e) => {
@@ -933,7 +908,7 @@ async fn claude_respond_handler(
         Some(h) => h,
         None => return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {host_id}")),
     };
-    let url = format!("{}/api/claude/respond/{}", host.base_url(), uuid);
+    let url = sipag_core::katulong::claude_respond_url(host.base_url(), &uuid);
     let resp = match state
         .http
         .post(&url)
@@ -1122,7 +1097,7 @@ async fn verify_and_heal_dispatch(
     const POST_HEAL_WAIT: Duration = Duration::from_secs(5);
     const MAX_HEAL_ATTEMPTS: u8 = 3;
 
-    let exec_url = format!("{}/sessions/by-id/{}/exec", host.base_url(), session_id);
+    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
 
     // Phase 1: wait for the claude TUI to be ready, auto-approving
     // the trust-this-folder prompt if seen. Trust prompt only shows
@@ -1284,7 +1259,7 @@ async fn check_agent_running(
     host: &sipag_core::hosts::Host,
     session_id: &str,
 ) -> bool {
-    let url = format!("{}/sessions/by-id/{}/status", host.base_url(), session_id);
+    let url = sipag_core::katulong::status_url(host.base_url(), session_id);
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return false,
@@ -1304,11 +1279,7 @@ async fn fetch_pane_scrollback(
     host: &sipag_core::hosts::Host,
     session_id: &str,
 ) -> String {
-    let url = format!(
-        "{}/sessions/by-id/{}/output?lines=80",
-        host.base_url(),
-        session_id
-    );
+    let url = sipag_core::katulong::output_lines_url(host.base_url(), session_id, 80);
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) if r.status().is_success() => r,
         _ => return String::new(),

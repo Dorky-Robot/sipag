@@ -444,45 +444,20 @@ async fn dispatch_task_handler(
     let agent_cmd = format!("{} -p {}", role_command, title_quoted);
     let session = session_name(&project_name, &task.role);
 
-    let create_url = format!("{}/sessions", host.base_url());
-    let create_resp = match state
-        .http
-        .post(&create_url)
-        .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "name": session }))
-        .send()
-        .await
+    let session_id = match super::katulong_proxy::create_or_find_session(
+        &state.http,
+        host.base_url(),
+        &host.api_key,
+        &host.id,
+        &session,
+    )
+    .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(host = %host.id, error = %e, "POST /sessions failed");
-            // Don't echo `{e}` into the response: reqwest's Display
-            // includes the request URL, which leaks the (private)
-            // tunnel hostname to the caller. Full detail is in the
-            // warn log above.
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("create session on {}: network error", host.id),
-            )
-                .into_response();
-        }
-    };
-    if !create_resp.status().is_success() {
-        let st = create_resp.status();
-        let body = create_resp.text().await.unwrap_or_default();
-        return (
-            StatusCode::BAD_GATEWAY,
-            format!("create session on {}: HTTP {st}: {body}", host.id),
-        )
-            .into_response();
-    }
-
-    let session_id = match super::extract_session_id(create_resp, &host.id).await {
         Ok(id) => id,
         Err((st, body)) => return (st, body).into_response(),
     };
 
-    let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
+    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
     let exec_resp = match state
         .http
         .post(&exec_url)
@@ -549,7 +524,11 @@ async fn list_hosts(State(state): State<AppState>) -> Json<Vec<HostSummary>> {
 }
 
 async fn proxy_sessions(AxumPath(id): AxumPath<String>, State(state): State<AppState>) -> Response {
-    proxy_get(&state, &id, "/sessions").await
+    let Some(host) = state.hosts.find(&id) else {
+        return (StatusCode::NOT_FOUND, format!("unknown host: {id}")).into_response();
+    };
+    let url = sipag_core::katulong::sessions_url(host.base_url());
+    proxy_get(&state, host, &url).await
 }
 
 async fn proxy_session_status(
@@ -559,17 +538,19 @@ async fn proxy_session_status(
     if sid.chars().any(|c| c == '/' || c.is_control()) {
         return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
     }
-    let path = format!("/sessions/by-id/{}/status", sid);
-    proxy_get(&state, &id, &path).await
+    let Some(host) = state.hosts.find(&id) else {
+        return (StatusCode::NOT_FOUND, format!("unknown host: {id}")).into_response();
+    };
+    let url = sipag_core::katulong::status_url(host.base_url(), &sid);
+    proxy_get(&state, host, &url).await
 }
 
-async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
-    let Some(host) = state.hosts.find(host_id) else {
-        return (StatusCode::NOT_FOUND, format!("unknown host: {host_id}")).into_response();
-    };
-    let url = format!("{}{}", host.base_url(), path);
-
-    match state.http.get(&url).bearer_auth(&host.api_key).send().await {
+/// Forward a GET request to a katulong host. Caller has already
+/// resolved `host` and built the URL via the `sipag_core::katulong`
+/// helpers, so this function holds no wire-format knowledge — only
+/// the auth + body-streaming + error-handling shape.
+async fn proxy_get(state: &AppState, host: &sipag_core::hosts::Host, url: &str) -> Response {
+    match state.http.get(url).bearer_auth(&host.api_key).send().await {
         Ok(resp) => {
             let status = resp.status();
             let mut headers = HeaderMap::new();
@@ -579,10 +560,10 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
             let body = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!(host = host_id, path, error = %e, "read body failed");
+                    warn!(host = %host.id, error = %e, "read body failed");
                     return (
                         StatusCode::BAD_GATEWAY,
-                        format!("failed to read {host_id} response"),
+                        format!("failed to read {} response", host.id),
                     )
                         .into_response();
                 }
@@ -591,13 +572,13 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
         }
         Err(e) => {
             // `error = %e` already includes the request URL via reqwest's
-            // Display impl. Don't add `url` as a separate structured field
-            // — that just gives log-forwarding pipelines a second copy of
-            // the tunnel hostname to spread.
-            warn!(host = host_id, path, error = %e, "proxy request failed");
+            // Display impl. Don't echo it into the response or add it as
+            // a separate structured log field (would give log-forwarders
+            // a second copy of the tunnel hostname).
+            warn!(host = %host.id, error = %e, "proxy request failed");
             (
                 StatusCode::BAD_GATEWAY,
-                format!("failed to reach {host_id}: network error"),
+                format!("failed to reach {}: network error", host.id),
             )
                 .into_response()
         }
