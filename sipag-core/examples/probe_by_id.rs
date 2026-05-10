@@ -36,7 +36,10 @@ fn main() -> Result<()> {
 
     println!("=> create_session again (idempotent — expect same id)");
     let session2 = client.create_session(probe_name)?;
-    assert_eq!(session.id, session2.id, "idempotent create returned a different id");
+    assert_eq!(
+        session.id, session2.id,
+        "idempotent create returned a different id"
+    );
     println!("   ok — id matches");
 
     println!("=> exec_session(id, 'echo from-rust-client')");

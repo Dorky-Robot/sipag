@@ -276,7 +276,11 @@ pub fn worktree_command(project: &str, task_id: u64) -> String {
     format!("cd /work/{project} && git worktree add .worktrees/task-{task_id} -b {branch}")
 }
 
-/// Generate the agent launch command for a task.
+/// Generate the agent launch command for a task. The result is sent
+/// over `exec_session` to the katulong PTY where it is interpreted by
+/// the user's shell, so the title is single-quote-escaped to prevent
+/// task names like `it's broken` (typo) or `'; rm -rf $HOME; '`
+/// (malicious) from breaking out of the prompt argument.
 pub fn agent_command(
     project: &str,
     task_id: u64,
@@ -289,7 +293,15 @@ pub fn agent_command(
     } else {
         format!("/work/{project}")
     };
-    format!("cd {work_dir} && {role_command} -p 'Work on task #{task_id}: {title}'")
+    let safe_title = sh_single_quote_escape(title);
+    format!("cd {work_dir} && {role_command} -p 'Work on task #{task_id}: {safe_title}'")
+}
+
+/// Escape a string so it is safe to embed inside `'...'` in a POSIX
+/// shell command. The standard idiom: close the quote, emit an
+/// escaped `\'`, reopen the quote. Caller must wrap the result in `'`.
+fn sh_single_quote_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
 }
 
 #[cfg(test)]
@@ -334,6 +346,45 @@ mod tests {
         let cmd = agent_command("katulong", 42, "Run tests", "yolo", false);
         assert!(cmd.contains("cd /work/katulong &&"));
         assert!(!cmd.contains("worktrees"));
+    }
+
+    #[test]
+    fn agent_command_escapes_single_quote_in_title() {
+        // A naive title like "it's broken" must not close the prompt's
+        // single-quoted argument. The standard sh idiom is `'\''`.
+        let cmd = agent_command("katulong", 42, "it's broken", "yolo", false);
+        assert!(
+            cmd.contains(r"'Work on task #42: it'\''s broken'"),
+            "expected escaped title in: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_command_neutralizes_injection_attempt() {
+        // A malicious title with shell metacharacters must not be able
+        // to escape the prompt argument and run additional commands.
+        let cmd = agent_command("katulong", 9, "'; rm -rf /tmp; '", "yolo", false);
+        // The closing `'` of the prompt arg must come AFTER the escaped
+        // payload — never inside it.
+        let after_prompt = cmd.split("-p '").nth(1).expect("missing prompt arg");
+        // The first unescaped `'` must be the very last char (the closer).
+        assert!(
+            after_prompt.ends_with('\''),
+            "prompt argument is not properly closed: {cmd}"
+        );
+        // No bare `;` should appear between an unescaped `'` pair —
+        // simplest check: the escape sequence appears at least twice
+        // (once per single-quote in the title).
+        assert!(
+            cmd.matches(r"'\''").count() >= 2,
+            "title not escaped: {cmd}"
+        );
+    }
+
+    #[test]
+    fn sh_single_quote_escape_is_identity_for_safe_strings() {
+        assert_eq!(sh_single_quote_escape("Fix auth bug"), "Fix auth bug");
+        assert_eq!(sh_single_quote_escape(""), "");
     }
 
     #[test]

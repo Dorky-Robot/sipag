@@ -364,8 +364,11 @@ fn run_up(project: Option<&str>) -> Result<()> {
 
     for role in &roles {
         let session_name = katulong::session_name(&project_name, &role.name);
+        // create_session is idempotent (409 → list lookup), so the
+        // session may have already existed — say "ready" rather than
+        // "created" to avoid implying we made a new one each time.
         match client.create_session(&session_name) {
-            Ok(_) => println!("  {session_name} — created"),
+            Ok(_) => println!("  {session_name} — ready"),
             Err(e) => println!("  {session_name} — FAILED: {e}"),
         }
     }

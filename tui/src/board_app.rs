@@ -369,10 +369,15 @@ impl BoardApp {
             }
         };
 
-        // Worktree setup.
+        // Worktree setup. Surface failures the same way the agent
+        // launch below does — silently swallowing here would let the
+        // agent run in the wrong directory without any UI signal.
         if role.worktree {
             let wt_cmd = katulong::worktree_command(&project_name, task_id);
-            let _ = client.exec_session(&session.id, &wt_cmd);
+            if let Err(e) = client.exec_session(&session.id, &wt_cmd) {
+                self.set_status(format!("Worktree setup failed: {e}"));
+                return Ok(());
+            }
         }
 
         // Launch agent.
