@@ -41,13 +41,28 @@ impl Session {
     }
 }
 
-/// Check whether a session id matches katulong's nanoid-shaped
-/// format: ASCII alphanumeric + `_` / `-`, 1-64 chars. Rejects
-/// path-traversal, query-string, and shell-injection metacharacters
-/// before they reach a URL builder. See [`Session::validate_id`].
+/// Maximum byte length for a katulong session id. Observed real
+/// ids are ~21 chars; the cap is generous but bounded enough that
+/// a pathological id can't bloat URL formatting. Char-equivalent
+/// to byte length because the allow-list is ASCII-only (see
+/// [`is_valid_session_id`]).
+const SESSION_ID_MAX_LEN: usize = 64;
+
+/// Check whether a session id is safe to interpolate into a URL
+/// path segment. Accepts katulong's nanoid-shaped format — ASCII
+/// alphanumeric + `_` / `-`, 1 to [`SESSION_ID_MAX_LEN`] bytes —
+/// and rejects path-traversal (`/`, `..`), query-string (`?`),
+/// fragment (`#`), shell-injection (spaces, `;`, `&`), and
+/// non-ASCII chars before they reach a URL builder.
+///
+/// Without this guard a compromised or misbehaving katulong
+/// returning a crafted id (`../admin`, `foo?inject=1`) would steer
+/// sipag's outbound requests at unintended endpoints on the same
+/// host. Use directly when only an `&str` is in scope; when you
+/// already have a [`Session`], prefer [`Session::validate_id`].
 pub fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
-        && id.len() <= 64
+        && id.len() <= SESSION_ID_MAX_LEN
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -164,6 +179,12 @@ impl KatulongClient {
     }
 
     /// `GET /sessions` — list all sessions.
+    ///
+    /// Returned ids are NOT validated by this method. The single
+    /// internal caller ([`Self::create_session`]'s 409 fallback)
+    /// validates the one id it picks via [`Session::validate_id`].
+    /// Any future caller that passes a returned id to a URL builder
+    /// must do the same.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let url = sessions_url(&self.url);
         let resp = curl_get(&url, &self.api_key)?;
@@ -638,8 +659,9 @@ mod tests {
     #[test]
     fn is_valid_session_id_rejects_empty_and_oversized() {
         assert!(!is_valid_session_id(""));
-        assert!(!is_valid_session_id(&"x".repeat(65)));
-        assert!(is_valid_session_id(&"x".repeat(64))); // boundary: ok
+        assert!(!is_valid_session_id(&"x".repeat(SESSION_ID_MAX_LEN + 1)));
+        // Boundary: exactly SESSION_ID_MAX_LEN chars passes.
+        assert!(is_valid_session_id(&"x".repeat(SESSION_ID_MAX_LEN)));
     }
 
     #[test]
@@ -658,7 +680,11 @@ mod tests {
             name: "katulong--dev".to_string(),
         };
         let err = bad.validate_id().unwrap_err().to_string();
-        assert!(err.contains("invalid session id"), "got: {err}");
+        // Pin the exact phrasing AND that the offending id is
+        // preserved in the message — a future refactor that drops
+        // `{:?}` would silently lose ops debugging context.
+        assert!(err.contains("invalid session id format"), "got: {err}");
+        assert!(err.contains("../admin"), "got: {err}");
     }
 
     #[test]

@@ -814,6 +814,19 @@ async fn observation_transcript_handler(
             });
         }
     };
+    // `obs.claude_uuid` flows in from `KatulongSession.meta.claude.uuid`
+    // via the observer poll path — i.e. server-supplied. Validate
+    // before URL interpolation for the same reason as session ids
+    // (#526). The validator's allow-list is a superset of UUID format.
+    if !sipag_core::katulong::is_valid_session_id(&obs.claude_uuid) {
+        warn!(
+            obs = %obs_id, claude_uuid = %obs.claude_uuid,
+            "rejected invalid claude_uuid from upstream observation"
+        );
+        return html_response(maud::html! {
+            div.transcript-empty.subtle { "transcript fetch failed: invalid identifier" }
+        });
+    }
     let url = sipag_core::katulong::claude_transcript_url(host.base_url(), &obs.claude_uuid, 500);
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) => r,
@@ -912,6 +925,14 @@ async fn claude_respond_handler(
         Some(h) => h,
         None => return err_response(StatusCode::BAD_REQUEST, format!("unknown host: {host_id}")),
     };
+    // `uuid` comes from the request URL path, supplied by an
+    // authenticated sipag user. Validate before forwarding to a
+    // katulong URL so a user can't steer the outbound POST at
+    // arbitrary paths via `/`, `?`, `..`, etc.
+    if !sipag_core::katulong::is_valid_session_id(&uuid) {
+        warn!(host = %host_id, uuid = %uuid, "rejected invalid uuid in claude_respond request");
+        return err_response(StatusCode::BAD_REQUEST, "invalid uuid");
+    }
     let url = sipag_core::katulong::claude_respond_url(host.base_url(), &uuid);
     let resp = match state
         .http

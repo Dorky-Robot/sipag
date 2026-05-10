@@ -538,6 +538,7 @@ async fn proxy_session_status(
     State(state): State<AppState>,
 ) -> Response {
     if !sipag_core::katulong::is_valid_session_id(&sid) {
+        warn!(host = %id, sid = %sid, "proxy_session_status: rejected invalid session id from request");
         return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
     }
     let Some(host) = state.hosts.find(&id) else {
