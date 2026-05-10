@@ -44,23 +44,32 @@ pub(super) fn sanitize_upstream_body(body: &str) -> String {
         .collect()
 }
 
-/// Parse `POST /sessions` response as `sipag_core::katulong::Session`
-/// and return the session id. Returns a (status, body) pair on parse
-/// failure so callers can adapt to their preferred response idiom.
+/// Parse `POST /sessions` response as `sipag_core::katulong::Session`,
+/// validate the id format, and return the id. Returns a
+/// (status, body) pair on parse or validation failure so callers
+/// can adapt to their preferred response idiom.
 async fn extract_session_id(
     resp: reqwest::Response,
     host_id: &str,
 ) -> std::result::Result<String, (StatusCode, String)> {
-    match resp.json::<sipag_core::katulong::Session>().await {
-        Ok(s) => Ok(s.id),
+    let session = match resp.json::<sipag_core::katulong::Session>().await {
+        Ok(s) => s,
         Err(e) => {
             warn!(host = %host_id, error = %e, "parse session create response failed");
-            Err((
+            return Err((
                 StatusCode::BAD_GATEWAY,
                 format!("create session on {host_id}: invalid response: {e}"),
-            ))
+            ));
         }
+    };
+    if let Err(e) = session.validate_id() {
+        warn!(host = %host_id, error = %e, id = %session.id, "katulong returned an unsafe session id");
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("create session on {host_id}: invalid session id from upstream"),
+        ));
     }
+    Ok(session.id)
 }
 
 /// Idempotent create-or-find by session name. POSTs `/sessions` and
@@ -135,18 +144,24 @@ pub(super) async fn create_or_find_session(
                     ));
                 }
             };
-            sessions
-                .into_iter()
-                .find(|s| s.name == name)
-                .map(|s| s.id)
-                .ok_or_else(|| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!(
-                            "session '{name}' on {host_id} returned 409 but list lookup missed it"
-                        ),
-                    )
-                })
+            let found =
+                sessions
+                    .into_iter()
+                    .find(|s| s.name == name)
+                    .ok_or_else(|| {
+                        (
+                    StatusCode::BAD_GATEWAY,
+                    format!("session '{name}' on {host_id} returned 409 but list lookup missed it"),
+                )
+                    })?;
+            if let Err(e) = found.validate_id() {
+                warn!(host = %host_id, error = %e, id = %found.id, "katulong returned an unsafe session id (409 fallback)");
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("create session on {host_id}: invalid session id from upstream"),
+                ));
+            }
+            Ok(found.id)
         }
         code => {
             let raw = create_resp.text().await.unwrap_or_default();

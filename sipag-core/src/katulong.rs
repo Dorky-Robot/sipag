@@ -21,6 +21,38 @@ pub struct Session {
     pub name: String,
 }
 
+impl Session {
+    /// Defense-in-depth check that the server-supplied `id` is safe
+    /// to interpolate into a URL path segment. Call after
+    /// deserializing a `Session` from a katulong response, before
+    /// the id flows into [`exec_url`] / [`status_url`] / [`kill_url`]
+    /// / [`output_lines_url`].
+    ///
+    /// Without this, a compromised or misbehaving katulong returning
+    /// a crafted id (`../admin`, `foo?inject=1`, `s_valid/../../other`)
+    /// would steer sipag's subsequent requests at unintended endpoints
+    /// on the same host. Blast radius is bounded to that katulong
+    /// instance, but cheap to defend against.
+    pub fn validate_id(&self) -> Result<()> {
+        if !is_valid_session_id(&self.id) {
+            anyhow::bail!("invalid session id format from katulong: {:?}", self.id);
+        }
+        Ok(())
+    }
+}
+
+/// Check whether a session id matches katulong's nanoid-shaped
+/// format: ASCII alphanumeric + `_` / `-`, 1-64 chars. Rejects
+/// path-traversal, query-string, and shell-injection metacharacters
+/// before they reach a URL builder. See [`Session::validate_id`].
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Status returned by `GET /sessions/by-id/{id}/status`. Only the fields
 /// sipag currently consumes are mapped; katulong returns more (pane,
 /// agent, childCount) and serde silently drops them.
@@ -112,21 +144,23 @@ impl KatulongClient {
         let url = sessions_url(&self.url);
         let resp = curl_post(&url, &self.api_key, &body.to_string())?;
 
-        match resp.status {
+        let session: Session = match resp.status {
             200 | 201 => serde_json::from_str(&resp.body)
-                .with_context(|| format!("invalid create response for '{name}': {}", resp.body)),
+                .with_context(|| format!("invalid create response for '{name}': {}", resp.body))?,
             409 => self
                 .list_sessions()?
                 .into_iter()
                 .find(|s| s.name == name)
                 .with_context(|| {
                     format!("session '{name}' returned 409 but list lookup missed it")
-                }),
+                })?,
             code => anyhow::bail!(
                 "create session '{name}' returned HTTP {code}: {}",
                 resp.body.trim()
             ),
-        }
+        };
+        session.validate_id()?;
+        Ok(session)
     }
 
     /// `GET /sessions` — list all sessions.
@@ -578,6 +612,62 @@ mod tests {
     fn client_strips_trailing_slash() {
         let client = KatulongClient::new("https://example.com/".to_string(), "key".to_string());
         assert_eq!(client.url(), "https://example.com");
+    }
+
+    #[test]
+    fn is_valid_session_id_accepts_observed_nanoid_shapes() {
+        // Real ids seen in the e2e probe + tests.
+        assert!(is_valid_session_id("Tj9HtvbDQ06zsCbu7dM6-"));
+        assert!(is_valid_session_id("ykPzkUAf_vb8_UMnBXpgm"));
+        assert!(is_valid_session_id("s_abc123"));
+        assert!(is_valid_session_id("d5r4RNxP5Tu8HvXQge682"));
+    }
+
+    #[test]
+    fn is_valid_session_id_rejects_path_traversal_and_metacharacters() {
+        // Any URL-significant or shell-significant char is rejected.
+        assert!(!is_valid_session_id("../admin"));
+        assert!(!is_valid_session_id("foo?inject=1"));
+        assert!(!is_valid_session_id("s_valid/../../../other"));
+        assert!(!is_valid_session_id("with space"));
+        assert!(!is_valid_session_id("trailing#fragment"));
+        assert!(!is_valid_session_id("with.dot"));
+        assert!(!is_valid_session_id("with%percent"));
+    }
+
+    #[test]
+    fn is_valid_session_id_rejects_empty_and_oversized() {
+        assert!(!is_valid_session_id(""));
+        assert!(!is_valid_session_id(&"x".repeat(65)));
+        assert!(is_valid_session_id(&"x".repeat(64))); // boundary: ok
+    }
+
+    #[test]
+    fn is_valid_session_id_rejects_non_ascii() {
+        // Unicode letters are valid in Rust's `char::is_alphabetic` but
+        // not for this validator — we want pure ASCII so the URL path
+        // segment is always 1 byte per char.
+        assert!(!is_valid_session_id("café"));
+        assert!(!is_valid_session_id("emoji😀"));
+    }
+
+    #[test]
+    fn session_validate_id_returns_err_on_bad_id() {
+        let bad = Session {
+            id: "../admin".to_string(),
+            name: "katulong--dev".to_string(),
+        };
+        let err = bad.validate_id().unwrap_err().to_string();
+        assert!(err.contains("invalid session id"), "got: {err}");
+    }
+
+    #[test]
+    fn session_validate_id_passes_on_real_id() {
+        let ok = Session {
+            id: "Tj9HtvbDQ06zsCbu7dM6-".to_string(),
+            name: "katulong--dev".to_string(),
+        };
+        assert!(ok.validate_id().is_ok());
     }
 
     #[test]
