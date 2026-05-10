@@ -594,22 +594,18 @@ async fn dispatch_task_handler(
             format!("create session on {}: HTTP {st}: {txt}", host.id),
         );
     }
-    #[derive(Deserialize)]
-    struct SessionCreated {
-        #[serde(default)]
-        id: Option<String>,
-    }
-    let session_id = create_resp
-        .json::<SessionCreated>()
-        .await
-        .ok()
-        .and_then(|s| s.id);
-
-    let exec_url = if let Some(sid) = session_id.as_ref() {
-        format!("{}/sessions/by-id/{}/exec", host.base_url(), sid)
-    } else {
-        format!("{}/sessions/{}/exec", host.base_url(), session)
+    let session_id = match create_resp.json::<sipag_core::katulong::Session>().await {
+        Ok(s) => s.id,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "parse session create response failed");
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("create session on {}: invalid response: {e}", host.id),
+            );
+        }
     };
+
+    let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
     let exec_resp = match state
         .http
         .post(&exec_url)
@@ -647,20 +643,19 @@ async fn dispatch_task_handler(
     // the task prompt as one message, then verifies + heals via
     // gemma4. The HTTP response goes back to the iPad immediately;
     // outcome surfaces via `dispatch.outcome` broker events.
-    if let Some(sid) = session_id.clone() {
-        let state_bg = state.clone();
-        let host_bg = host.clone();
-        let project_bg = project_name.clone();
-        let session_bg = session.clone();
-        let role_bg = role_command.clone();
-        let prompt_bg = prompt.clone();
-        tokio::spawn(async move {
-            verify_and_heal_dispatch(
-                state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
-            )
-            .await;
-        });
-    }
+    let sid = session_id.clone();
+    let state_bg = state.clone();
+    let host_bg = host.clone();
+    let project_bg = project_name.clone();
+    let session_bg = session.clone();
+    let role_bg = role_command.clone();
+    let prompt_bg = prompt.clone();
+    tokio::spawn(async move {
+        verify_and_heal_dispatch(
+            state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
+        )
+        .await;
+    });
 
     let toast_msg = format!("dispatched #{id} on {} · {}", host.id, session);
     let board = render_board(&state).await;

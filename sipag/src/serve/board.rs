@@ -469,22 +469,19 @@ async fn dispatch_task_handler(
             .into_response();
     }
 
-    #[derive(Deserialize)]
-    struct SessionCreated {
-        #[serde(default)]
-        id: Option<String>,
-    }
-    let session_id = create_resp
-        .json::<SessionCreated>()
-        .await
-        .ok()
-        .and_then(|s| s.id);
-
-    let exec_url = if let Some(sid) = session_id.as_ref() {
-        format!("{}/sessions/by-id/{}/exec", host.base_url(), sid)
-    } else {
-        format!("{}/sessions/{}/exec", host.base_url(), session)
+    let session_id = match create_resp.json::<sipag_core::katulong::Session>().await {
+        Ok(s) => s.id,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "parse session create response failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("create session on {}: invalid response: {e}", host.id),
+            )
+                .into_response();
+        }
     };
+
+    let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
     let exec_resp = match state
         .http
         .post(&exec_url)
@@ -525,7 +522,7 @@ async fn dispatch_task_handler(
     Json(DispatchResponse {
         task: TaskView::from(updated),
         host: host.id.clone(),
-        session_id,
+        session_id: Some(session_id),
         session_name: session,
     })
     .into_response()
