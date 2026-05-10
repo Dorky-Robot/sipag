@@ -592,20 +592,9 @@ fn run_project_add(name: &str, repo: &str) -> Result<()> {
 }
 
 fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
-    // Single source of truth for the remote.json schema lives in
-    // sipag-core. Don't re-parse the file here.
     let cfg = katulong::RemoteConfig::load()
         .context("Cannot load ~/.katulong/remote.json — is it set up?")?;
-
-    // URL-encode the topic (slashes become path segments for the SSE endpoint).
-    // katulong expects: GET /sub/:topic where topic uses / separators.
-    let encoded_topic = topic.replace('/', "%2F");
-    let url = format!(
-        "{}/sub/{}?fromSeq={}",
-        cfg.url.trim_end_matches('/'),
-        encoded_topic,
-        from_seq
-    );
+    let url = cfg.sub_url(topic, from_seq);
 
     eprintln!("Subscribing to: {topic}");
     eprintln!("Endpoint: {url}");

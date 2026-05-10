@@ -52,13 +52,33 @@ impl RemoteConfig {
         Self::load_from(&path)
     }
 
-    /// Load from a specific path.
+    /// Load from a specific path. Rejects empty `url` / `apiKey` so a
+    /// misconfigured file fails fast with a clear message instead of
+    /// surfacing as a confusing 401 / DNS error at request time.
     pub fn load_from(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let config: Self = serde_json::from_str(&content)
             .with_context(|| format!("invalid JSON in {}", path.display()))?;
+        if config.url.is_empty() {
+            anyhow::bail!("'url' is empty in {}", path.display());
+        }
+        if config.api_key.is_empty() {
+            anyhow::bail!("'apiKey' is empty in {}", path.display());
+        }
         Ok(config)
+    }
+
+    /// SSE subscribe URL for a katulong pub/sub topic. `/` in the
+    /// topic is `%2F`-encoded so the topic stays one path segment;
+    /// katulong's broker uses slashes inside topic names (e.g.
+    /// `crew/<project>/<role>/...`).
+    pub fn sub_url(&self, topic: &str, from_seq: u64) -> String {
+        let encoded_topic = topic.replace('/', "%2F");
+        format!(
+            "{}/sub/{encoded_topic}?fromSeq={from_seq}",
+            self.url.trim_end_matches('/')
+        )
     }
 }
 
@@ -406,6 +426,48 @@ mod tests {
     fn remote_config_load_from_missing_file() {
         let result = RemoteConfig::load_from(std::path::Path::new("/nonexistent/remote.json"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn remote_config_load_from_rejects_empty_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        std::fs::write(&path, r#"{"url": "", "apiKey": "k"}"#).unwrap();
+        let err = RemoteConfig::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("'url' is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn remote_config_load_from_rejects_empty_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("remote.json");
+        std::fs::write(&path, r#"{"url": "https://x", "apiKey": ""}"#).unwrap();
+        let err = RemoteConfig::load_from(&path).unwrap_err().to_string();
+        assert!(err.contains("'apiKey' is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn sub_url_encodes_topic_slashes_and_appends_seq() {
+        let cfg = RemoteConfig {
+            url: "https://k.example".into(),
+            api_key: "k".into(),
+        };
+        assert_eq!(
+            cfg.sub_url("crew/proj/role", 7),
+            "https://k.example/sub/crew%2Fproj%2Frole?fromSeq=7"
+        );
+    }
+
+    #[test]
+    fn sub_url_strips_trailing_slash_from_base() {
+        let cfg = RemoteConfig {
+            url: "https://k.example/".into(),
+            api_key: "k".into(),
+        };
+        assert_eq!(
+            cfg.sub_url("topic", 0),
+            "https://k.example/sub/topic?fromSeq=0"
+        );
     }
 
     #[test]
