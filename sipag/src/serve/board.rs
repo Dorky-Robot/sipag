@@ -478,7 +478,9 @@ async fn dispatch_task_handler(
     };
     if !exec_resp.status().is_success() {
         let st = exec_resp.status();
-        let body = exec_resp.text().await.unwrap_or_default();
+        let body = super::katulong_proxy::sanitize_upstream_body(
+            &exec_resp.text().await.unwrap_or_default(),
+        );
         return (
             StatusCode::BAD_GATEWAY,
             format!("exec on {}: HTTP {st}: {body}", host.id),

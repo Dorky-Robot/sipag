@@ -10,6 +10,28 @@
 use axum::http::StatusCode;
 use tracing::warn;
 
+/// Cap on how many chars of an upstream katulong error body we
+/// echo back to the caller. Long enough for a useful one-line
+/// JSON error, short enough that pathological responses (large
+/// stack traces, attacker-supplied content) can't bloat sipag's
+/// own response or disrupt log forwarders.
+const UPSTREAM_BODY_MAX: usize = 256;
+
+/// Sanitize a katulong response body before interpolating it into
+/// sipag's own response. Strips ASCII control characters except
+/// `\n` and `\t` (so multi-line JSON errors stay readable, but `\r`
+/// / NUL / escape sequences can't disrupt downstream rendering or
+/// log lines), and truncates to [`UPSTREAM_BODY_MAX`] chars.
+///
+/// The full body is still available in the operator-side `warn!`
+/// log; this is only about what reaches the HTTP caller.
+pub(super) fn sanitize_upstream_body(body: &str) -> String {
+    body.chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .take(UPSTREAM_BODY_MAX)
+        .collect()
+}
+
 /// Parse `POST /sessions` response as `sipag_core::katulong::Session`
 /// and return the session id. Returns a (status, body) pair on parse
 /// failure so callers can adapt to their preferred response idiom.
@@ -81,7 +103,7 @@ pub(super) async fn create_or_find_session(
             };
             if !list_resp.status().is_success() {
                 let st = list_resp.status();
-                let body = list_resp.text().await.unwrap_or_default();
+                let body = sanitize_upstream_body(&list_resp.text().await.unwrap_or_default());
                 return Err((
                     StatusCode::BAD_GATEWAY,
                     format!(
@@ -113,11 +135,60 @@ pub(super) async fn create_or_find_session(
                 })
         }
         code => {
-            let body = create_resp.text().await.unwrap_or_default();
+            let body = sanitize_upstream_body(&create_resp.text().await.unwrap_or_default());
             Err((
                 StatusCode::BAD_GATEWAY,
                 format!("create session on {host_id}: HTTP {code}: {body}"),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_passes_short_well_formed_bodies() {
+        assert_eq!(
+            sanitize_upstream_body(r#"{"error":"Session already exists"}"#),
+            r#"{"error":"Session already exists"}"#
+        );
+    }
+
+    #[test]
+    fn sanitize_keeps_newlines_and_tabs() {
+        // multi-line JSON errors stay readable
+        let s = "line one\nline two\twith tab";
+        assert_eq!(sanitize_upstream_body(s), s);
+    }
+
+    #[test]
+    fn sanitize_strips_other_control_chars() {
+        // \r, NUL, ESC, BEL — anything that could disrupt a log line
+        // or terminal rendering — is dropped.
+        let s = "before\rafter\0nul\x1bescape\x07bell";
+        assert_eq!(sanitize_upstream_body(s), "beforeafternulescapebell");
+    }
+
+    #[test]
+    fn sanitize_truncates_to_cap() {
+        let s: String = "x".repeat(UPSTREAM_BODY_MAX + 100);
+        let out = sanitize_upstream_body(&s);
+        assert_eq!(out.len(), UPSTREAM_BODY_MAX);
+    }
+
+    #[test]
+    fn sanitize_truncates_after_filtering() {
+        // Control chars are filtered first, so they don't count
+        // against the cap.
+        let mut s = String::new();
+        for _ in 0..50 {
+            s.push('\r');
+        }
+        for _ in 0..UPSTREAM_BODY_MAX {
+            s.push('x');
+        }
+        assert_eq!(sanitize_upstream_body(&s).len(), UPSTREAM_BODY_MAX);
     }
 }

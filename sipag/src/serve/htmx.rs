@@ -601,7 +601,9 @@ async fn dispatch_task_handler(
     };
     if !exec_resp.status().is_success() {
         let st = exec_resp.status();
-        let txt = exec_resp.text().await.unwrap_or_default();
+        let txt = super::katulong_proxy::sanitize_upstream_body(
+            &exec_resp.text().await.unwrap_or_default(),
+        );
         return err_response(
             StatusCode::BAD_GATEWAY,
             format!("exec on {}: HTTP {st}: {txt}", host.id),
@@ -830,13 +832,15 @@ async fn observation_transcript_handler(
     };
     if !resp.status().is_success() {
         let status = resp.status();
+        // Don't render the response body inline — even with maud's
+        // HTML auto-escaping, an attacker-controlled body could
+        // disrupt layout or pad the fragment with garbage. Operator
+        // detail goes to the warn log; the user gets a clean status.
         let body = resp.text().await.unwrap_or_default();
+        warn!(host = %obs.host, status = status.as_u16(), body = %body, "transcript fetch returned non-2xx");
         return html_response(maud::html! {
             div.transcript-empty.subtle {
                 "transcript not available (HTTP " (status.as_u16()) ")"
-                @if !body.is_empty() {
-                    " — " (body)
-                }
             }
         });
     }
@@ -928,7 +932,8 @@ async fn claude_respond_handler(
     };
     if !resp.status().is_success() {
         let st = resp.status();
-        let txt = resp.text().await.unwrap_or_default();
+        let txt =
+            super::katulong_proxy::sanitize_upstream_body(&resp.text().await.unwrap_or_default());
         return err_response(
             StatusCode::BAD_GATEWAY,
             format!("respond on {}: HTTP {st}: {txt}", host.id),
