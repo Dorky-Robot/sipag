@@ -26,6 +26,7 @@ mod ws;
 pub use state::AppState;
 
 use anyhow::{Context, Result};
+use axum::http::StatusCode;
 use axum::Router;
 use sipag_core::auth::{auth_state_path, AuthStore, WebAuthnService};
 use sipag_core::config::default_sipag_dir;
@@ -37,6 +38,28 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
+
+/// Parse `POST /sessions` response as `sipag_core::katulong::Session`
+/// and return the session id. Returns a (status, body) pair on parse
+/// failure so callers can adapt to their preferred response idiom
+/// (axum tuple-into-response, htmx err_response, etc.). Shared
+/// between `board.rs` and `htmx.rs` to keep wire-format knowledge in
+/// one place.
+pub(super) async fn extract_session_id(
+    resp: reqwest::Response,
+    host_id: &str,
+) -> std::result::Result<String, (StatusCode, String)> {
+    match resp.json::<sipag_core::katulong::Session>().await {
+        Ok(s) => Ok(s.id),
+        Err(e) => {
+            warn!(host = %host_id, error = %e, "parse session create response failed");
+            Err((
+                StatusCode::BAD_GATEWAY,
+                format!("create session on {host_id}: invalid response: {e}"),
+            ))
+        }
+    }
+}
 
 /// CLI entry — called from the `Serve` branch.
 pub fn run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Result<()> {
