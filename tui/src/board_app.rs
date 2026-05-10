@@ -358,18 +358,21 @@ impl BoardApp {
             }
         };
 
-        let session = katulong::session_name(&project_name, &role_name);
+        let session_name = katulong::session_name(&project_name, &role_name);
 
-        // Create session.
-        if let Err(e) = client.create_session(&session) {
-            self.set_status(format!("Session create failed: {e}"));
-            return Ok(());
-        }
+        // Create session — id is the stable handle for /sessions/by-id/... calls.
+        let session = match client.create_session(&session_name) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status(format!("Session create failed: {e}"));
+                return Ok(());
+            }
+        };
 
         // Worktree setup.
         if role.worktree {
             let wt_cmd = katulong::worktree_command(&project_name, task_id);
-            let _ = client.exec_session(&session, &wt_cmd);
+            let _ = client.exec_session(&session.id, &wt_cmd);
         }
 
         // Launch agent.
@@ -380,7 +383,7 @@ impl BoardApp {
             &role.command,
             role.worktree,
         );
-        if let Err(e) = client.exec_session(&session, &agent_cmd) {
+        if let Err(e) = client.exec_session(&session.id, &agent_cmd) {
             self.set_status(format!("Agent launch failed: {e}"));
             return Ok(());
         }
@@ -390,7 +393,7 @@ impl BoardApp {
         self.selected_task_id = Some(task_id);
         self.load_board()?;
 
-        self.set_status(format!("Dispatched #{task_id} to {session}"));
+        self.set_status(format!("Dispatched #{task_id} to {session_name}"));
         Ok(())
     }
 

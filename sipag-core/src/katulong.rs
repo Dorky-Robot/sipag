@@ -1,28 +1,37 @@
-//! HTTP client for katulong's crew session API.
+//! HTTP client for katulong's session API.
 //!
 //! Uses `curl` via `std::process::Command` for HTTP requests, consistent
 //! with how sipag already calls `docker` and `gh`.
+//!
+//! Session I/O routes are id-keyed (`/sessions/by-id/{id}/...`) — names
+//! can be renamed, ids can't, so an in-flight request never gets
+//! invalidated by a rename. Callers create-or-find a session by name
+//! once via [`KatulongClient::create_session`], capture the returned
+//! [`Session::id`], then pass that id to subsequent operations.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-/// Session status returned by the katulong API.
+/// A katulong session. `id` is the stable, immutable handle used for
+/// all I/O calls; `name` is the friendly identifier (e.g. `katulong--dev`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionStatus {
+pub struct Session {
+    pub id: String,
     pub name: String,
-    #[serde(default)]
-    pub running: bool,
-    #[serde(default)]
-    pub has_child_processes: bool,
 }
 
-/// Session info returned by the list endpoint.
+/// Status returned by `GET /sessions/by-id/{id}/status`. Only the fields
+/// sipag currently consumes are mapped; katulong returns more (pane,
+/// agent, childCount) and serde silently drops them.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionInfo {
+pub struct SessionStatus {
+    pub id: String,
     pub name: String,
     #[serde(default)]
-    pub running: bool,
+    pub alive: bool,
+    #[serde(default, rename = "hasChildProcesses")]
+    pub has_child_processes: bool,
 }
 
 /// Remote connection config from `~/.katulong/remote.json`.
@@ -53,7 +62,7 @@ impl RemoteConfig {
     }
 }
 
-/// HTTP client for the katulong crew API.
+/// HTTP client for the katulong session API.
 pub struct KatulongClient {
     url: String,
     api_key: String,
@@ -73,104 +82,91 @@ impl KatulongClient {
         Self { url, api_key }
     }
 
-    /// POST /sessions — create or find an existing session.
-    ///
-    /// The katulong API is idempotent: if a session with this name already
-    /// exists it returns it rather than erroring.
-    pub fn create_session(&self, name: &str) -> Result<()> {
+    /// `POST /sessions` — create a session, or return the existing one
+    /// with the same name. The katulong server returns 201 with
+    /// `{name, id}` on create and 409 with `{error}` on conflict; on
+    /// conflict this method falls back to `list_sessions` to recover
+    /// the existing id, so the call is idempotent.
+    pub fn create_session(&self, name: &str) -> Result<Session> {
         let body = serde_json::json!({ "name": name });
         let url = format!("{}/sessions", self.url);
+        let resp = curl_post(&url, &self.api_key, &body.to_string())?;
 
-        let output = curl_post(&url, &self.api_key, &body.to_string())?;
-
-        // Accept 200 or 201.
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!(
-                "Failed to create session '{name}': {}\n{}",
-                stderr.trim(),
-                stdout.trim()
-            );
+        match resp.status {
+            200 | 201 => serde_json::from_str(&resp.body)
+                .with_context(|| format!("invalid create response for '{name}': {}", resp.body)),
+            409 => self
+                .list_sessions()?
+                .into_iter()
+                .find(|s| s.name == name)
+                .with_context(|| {
+                    format!("session '{name}' returned 409 but list lookup missed it")
+                }),
+            code => anyhow::bail!(
+                "create session '{name}' returned HTTP {code}: {}",
+                resp.body.trim()
+            ),
         }
-        Ok(())
     }
 
-    /// POST /sessions/:name/exec — send a command to a session.
-    pub fn exec_session(&self, name: &str, input: &str) -> Result<()> {
-        let body = serde_json::json!({ "input": input });
-        let url = format!("{}/sessions/{}/exec", self.url, name);
-
-        let output = curl_post(&url, &self.api_key, &body.to_string())?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            anyhow::bail!(
-                "Failed to exec in session '{name}': {}\n{}",
-                stderr.trim(),
-                stdout.trim()
-            );
-        }
-        Ok(())
-    }
-
-    /// GET /sessions/:name/status — check session status.
-    pub fn session_status(&self, name: &str) -> Result<SessionStatus> {
-        let url = format!("{}/sessions/{}/status", self.url, name);
-
-        let output = curl_get(&url, &self.api_key)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "Failed to get status for session '{name}': {}",
-                stderr.trim()
-            );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let status: SessionStatus = serde_json::from_str(&stdout)
-            .with_context(|| format!("invalid JSON from session status: {stdout}"))?;
-        Ok(status)
-    }
-
-    /// GET /sessions — list all sessions.
-    pub fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+    /// `GET /sessions` — list all sessions.
+    pub fn list_sessions(&self) -> Result<Vec<Session>> {
         let url = format!("{}/sessions", self.url);
-
-        let output = curl_get(&url, &self.api_key)?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to list sessions: {}", stderr.trim());
+        let resp = curl_get(&url, &self.api_key)?;
+        if resp.status != 200 {
+            anyhow::bail!(
+                "list sessions returned HTTP {}: {}",
+                resp.status,
+                resp.body.trim()
+            );
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let sessions: Vec<SessionInfo> = serde_json::from_str(&stdout)
-            .with_context(|| format!("invalid JSON from sessions list: {stdout}"))?;
-        Ok(sessions)
+        serde_json::from_str(&resp.body)
+            .with_context(|| format!("invalid JSON from sessions list: {}", resp.body))
     }
 
-    /// DELETE /sessions/:name — kill a session.
-    pub fn kill_session(&self, name: &str) -> Result<()> {
-        let url = format!("{}/sessions/{}", self.url, name);
+    /// `POST /sessions/by-id/{id}/exec` — send a command. The katulong
+    /// server appends `\r` to the input, so this is for line-oriented
+    /// commands. Caller must pass the session's stable `id`, not its
+    /// friendly name (see [`Session`]).
+    pub fn exec_session(&self, id: &str, input: &str) -> Result<()> {
+        let body = serde_json::json!({ "input": input });
+        let url = format!("{}/sessions/by-id/{id}/exec", self.url);
+        let resp = curl_post(&url, &self.api_key, &body.to_string())?;
+        if !is_success(resp.status) {
+            anyhow::bail!(
+                "exec in session '{id}' returned HTTP {}: {}",
+                resp.status,
+                resp.body.trim()
+            );
+        }
+        Ok(())
+    }
 
-        let output = Command::new("curl")
-            .args([
-                "-s",
-                "-X",
-                "DELETE",
-                "-H",
-                &format!("Authorization: Bearer {}", self.api_key),
-                &url,
-            ])
-            .output()
-            .context("failed to run curl")?;
+    /// `GET /sessions/by-id/{id}/status`.
+    pub fn session_status(&self, id: &str) -> Result<SessionStatus> {
+        let url = format!("{}/sessions/by-id/{id}/status", self.url);
+        let resp = curl_get(&url, &self.api_key)?;
+        if resp.status != 200 {
+            anyhow::bail!(
+                "status for '{id}' returned HTTP {}: {}",
+                resp.status,
+                resp.body.trim()
+            );
+        }
+        serde_json::from_str(&resp.body)
+            .with_context(|| format!("invalid status JSON for '{id}': {}", resp.body))
+    }
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to kill session '{name}': {}", stderr.trim());
+    /// `DELETE /sessions/by-id/{id}` — kill a session.
+    pub fn kill_session(&self, id: &str) -> Result<()> {
+        let url = format!("{}/sessions/by-id/{id}", self.url);
+        let resp = curl_delete(&url, &self.api_key)?;
+        if !is_success(resp.status) {
+            anyhow::bail!(
+                "kill session '{id}' returned HTTP {}: {}",
+                resp.status,
+                resp.body.trim()
+            );
         }
         Ok(())
     }
@@ -181,36 +177,80 @@ impl KatulongClient {
     }
 }
 
-// ── curl helpers ────────────────────────────────────────────────────────────
+// ── HTTP plumbing ───────────────────────────────────────────────────────────
 
-fn curl_post(url: &str, api_key: &str, body: &str) -> Result<std::process::Output> {
-    Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: Bearer {}", api_key),
-            "-d",
-            body,
-            url,
-        ])
-        .output()
-        .context("failed to run curl")
+/// Parsed response from a curl invocation.
+struct HttpResponse {
+    status: u16,
+    body: String,
 }
 
-fn curl_get(url: &str, api_key: &str) -> Result<std::process::Output> {
-    Command::new("curl")
-        .args([
-            "-s",
-            "-H",
-            &format!("Authorization: Bearer {}", api_key),
-            url,
-        ])
+fn is_success(code: u16) -> bool {
+    (200..300).contains(&code)
+}
+
+/// Run curl and parse `<body>\n<status>` (the trailing status code is
+/// emitted via `-w "\n%{http_code}"`). Returns an error only if curl
+/// itself fails to run; HTTP-level errors come back as a non-2xx
+/// `status` field for the caller to interpret.
+fn run_curl(args: &[&str]) -> Result<HttpResponse> {
+    let output = Command::new("curl")
+        .args(args)
         .output()
-        .context("failed to run curl")
+        .context("failed to run curl")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("curl failed: {}", stderr.trim());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let (body, status_str) = stdout
+        .rsplit_once('\n')
+        .context("malformed curl output: missing trailing status code")?;
+    let status: u16 = status_str
+        .trim()
+        .parse()
+        .with_context(|| format!("invalid status code from curl: '{status_str}'"))?;
+    Ok(HttpResponse {
+        status,
+        body: body.to_string(),
+    })
+}
+
+fn curl_post(url: &str, api_key: &str, body: &str) -> Result<HttpResponse> {
+    let auth = format!("Authorization: Bearer {api_key}");
+    run_curl(&[
+        "-s",
+        "-w",
+        "\n%{http_code}",
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        &auth,
+        "-d",
+        body,
+        url,
+    ])
+}
+
+fn curl_get(url: &str, api_key: &str) -> Result<HttpResponse> {
+    let auth = format!("Authorization: Bearer {api_key}");
+    run_curl(&["-s", "-w", "\n%{http_code}", "-H", &auth, url])
+}
+
+fn curl_delete(url: &str, api_key: &str) -> Result<HttpResponse> {
+    let auth = format!("Authorization: Bearer {api_key}");
+    run_curl(&[
+        "-s",
+        "-w",
+        "\n%{http_code}",
+        "-X",
+        "DELETE",
+        "-H",
+        &auth,
+        url,
+    ])
 }
 
 // ── Dispatch logic ──────────────────────────────────────────────────────────
@@ -321,5 +361,53 @@ mod tests {
     fn client_strips_trailing_slash() {
         let client = KatulongClient::new("https://example.com/".to_string(), "key".to_string());
         assert_eq!(client.url(), "https://example.com");
+    }
+
+    #[test]
+    fn session_deserializes_and_ignores_extra_fields() {
+        // katulong's GET /sessions returns the full session.toJSON() payload
+        // with id/name/tmuxSession/tmuxPane/alive/etc. — we only need id+name.
+        let payload = r#"{
+            "id": "s_abc123",
+            "name": "katulong--dev",
+            "tmuxSession": "katulong--dev",
+            "tmuxPane": "%1",
+            "alive": true,
+            "hasChildProcesses": false,
+            "external": false
+        }"#;
+        let s: Session = serde_json::from_str(payload).unwrap();
+        assert_eq!(s.id, "s_abc123");
+        assert_eq!(s.name, "katulong--dev");
+    }
+
+    #[test]
+    fn session_status_deserializes_with_camel_case() {
+        // hasChildProcesses → has_child_processes via #[serde(rename)].
+        let payload = r#"{
+            "id": "s_abc123",
+            "name": "katulong--dev",
+            "alive": true,
+            "hasChildProcesses": true,
+            "childCount": 2,
+            "pane": null,
+            "agent": null
+        }"#;
+        let st: SessionStatus = serde_json::from_str(payload).unwrap();
+        assert_eq!(st.id, "s_abc123");
+        assert!(st.alive);
+        assert!(st.has_child_processes);
+    }
+
+    #[test]
+    fn is_success_classifies_2xx() {
+        assert!(is_success(200));
+        assert!(is_success(201));
+        assert!(is_success(204));
+        assert!(!is_success(199));
+        assert!(!is_success(300));
+        assert!(!is_success(404));
+        assert!(!is_success(409));
+        assert!(!is_success(500));
     }
 }
