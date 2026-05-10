@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_core::{board, config::default_sipag_dir, feature, katulong, refine};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
 use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -592,42 +591,10 @@ fn run_project_add(name: &str, repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Read katulong remote config from ~/.katulong/remote.json.
-/// Returns (url, api_key) tuple.
-fn read_katulong_remote() -> Result<(String, Option<String>)> {
-    let home = std::env::var("HOME").context("HOME not set")?;
-    let config_path = Path::new(&home).join(".katulong/remote.json");
-    let content = std::fs::read_to_string(&config_path)
-        .with_context(|| format!("Cannot read {}", config_path.display()))?;
-    let parsed: serde_json::Value = serde_json::from_str(&content)
-        .with_context(|| format!("Invalid JSON in {}", config_path.display()))?;
-
-    let url = parsed["url"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .context("Missing 'url' in ~/.katulong/remote.json")?
-        .to_string();
-
-    let api_key = parsed["apiKey"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-
-    Ok((url, api_key))
-}
-
 fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
-    let (katulong_url, api_key) = read_katulong_remote()?;
-
-    // URL-encode the topic (slashes become path segments for the SSE endpoint).
-    // katulong expects: GET /sub/:topic where topic uses / separators.
-    let encoded_topic = topic.replace('/', "%2F");
-    let url = format!(
-        "{}/sub/{}?fromSeq={}",
-        katulong_url.trim_end_matches('/'),
-        encoded_topic,
-        from_seq
-    );
+    let cfg = katulong::RemoteConfig::load()
+        .context("Cannot load ~/.katulong/remote.json — is it set up?")?;
+    let url = cfg.sub_url(topic, from_seq);
 
     eprintln!("Subscribing to: {topic}");
     eprintln!("Endpoint: {url}");
@@ -635,11 +602,7 @@ fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
     // Use curl to connect to SSE endpoint and stream events.
     let mut cmd = Command::new("curl");
     cmd.args(["-sfN", "--no-buffer"]);
-
-    if let Some(ref key) = api_key {
-        cmd.args(["-H", &format!("Authorization: Bearer {key}")]);
-    }
-
+    cmd.args(["-H", &format!("Authorization: Bearer {}", cfg.api_key)]);
     cmd.arg(&url);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
