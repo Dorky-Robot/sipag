@@ -297,17 +297,18 @@ fn run_dispatch_task(
     let client = katulong::KatulongClient::from_remote_json()
         .context("Cannot connect to katulong — is ~/.katulong/remote.json configured?")?;
 
-    let session = katulong::session_name(&project_name, role_name);
+    let session_name = katulong::session_name(&project_name, role_name);
 
-    // 1. Create session (idempotent find-or-create).
-    println!("Creating session {session}...");
-    client.create_session(&session)?;
+    // 1. Create session (idempotent find-or-create). The returned id is
+    //    the stable handle for subsequent /sessions/by-id/... calls.
+    println!("Creating session {session_name}...");
+    let session = client.create_session(&session_name)?;
 
     // 2. If role uses worktrees, set one up for this task.
     if role.worktree {
         let wt_cmd = katulong::worktree_command(&project_name, task_id);
         println!("Creating worktree for task #{task_id}...");
-        client.exec_session(&session, &wt_cmd)?;
+        client.exec_session(&session.id, &wt_cmd)?;
     }
 
     // 3. Exec the agent command.
@@ -319,14 +320,14 @@ fn run_dispatch_task(
         role.worktree,
     );
     println!("Launching agent for task #{task_id}: {}", task.title);
-    client.exec_session(&session, &agent_cmd)?;
+    client.exec_session(&session.id, &agent_cmd)?;
 
     // 4. Move task to in-progress.
     board::move_task(&sipag_dir, &project_name, task_id, "in-progress")?;
 
     // 5. Confirmation.
     println!();
-    println!("Dispatched task #{task_id} to session {session}");
+    println!("Dispatched task #{task_id} to session {session_name}");
     println!("  Project:  {project_name}");
     println!("  Role:     {role_name}");
     println!("  Command:  {}", role.command);
@@ -337,7 +338,7 @@ fn run_dispatch_task(
         );
     }
     println!();
-    println!("Monitor at: {} (session: {session})", client.url());
+    println!("Monitor at: {} (session: {session_name})", client.url());
 
     Ok(())
 }
@@ -362,10 +363,13 @@ fn run_up(project: Option<&str>) -> Result<()> {
     println!("Bringing up sessions for {project_name}...\n");
 
     for role in &roles {
-        let session = katulong::session_name(&project_name, &role.name);
-        match client.create_session(&session) {
-            Ok(()) => println!("  {session} — created"),
-            Err(e) => println!("  {session} — FAILED: {e}"),
+        let session_name = katulong::session_name(&project_name, &role.name);
+        // create_session is idempotent (409 → list lookup), so the
+        // session may have already existed — say "ready" rather than
+        // "created" to avoid implying we made a new one each time.
+        match client.create_session(&session_name) {
+            Ok(_) => println!("  {session_name} — ready"),
+            Err(e) => println!("  {session_name} — FAILED: {e}"),
         }
     }
 
