@@ -109,7 +109,7 @@ impl KatulongClient {
     /// the existing id, so the call is idempotent.
     pub fn create_session(&self, name: &str) -> Result<Session> {
         let body = serde_json::json!({ "name": name });
-        let url = format!("{}/sessions", self.url);
+        let url = sessions_url(&self.url);
         let resp = curl_post(&url, &self.api_key, &body.to_string())?;
 
         match resp.status {
@@ -131,7 +131,7 @@ impl KatulongClient {
 
     /// `GET /sessions` — list all sessions.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let url = format!("{}/sessions", self.url);
+        let url = sessions_url(&self.url);
         let resp = curl_get(&url, &self.api_key)?;
         if resp.status != 200 {
             anyhow::bail!(
@@ -150,7 +150,7 @@ impl KatulongClient {
     /// friendly name (see [`Session`]).
     pub fn exec_session(&self, id: &str, input: &str) -> Result<()> {
         let body = serde_json::json!({ "input": input });
-        let url = format!("{}/sessions/by-id/{id}/exec", self.url);
+        let url = exec_url(&self.url, id);
         let resp = curl_post(&url, &self.api_key, &body.to_string())?;
         if !is_success(resp.status) {
             anyhow::bail!(
@@ -164,7 +164,7 @@ impl KatulongClient {
 
     /// `GET /sessions/by-id/{id}/status`.
     pub fn session_status(&self, id: &str) -> Result<SessionStatus> {
-        let url = format!("{}/sessions/by-id/{id}/status", self.url);
+        let url = status_url(&self.url, id);
         let resp = curl_get(&url, &self.api_key)?;
         if resp.status != 200 {
             anyhow::bail!(
@@ -179,7 +179,7 @@ impl KatulongClient {
 
     /// `DELETE /sessions/by-id/{id}` — kill a session.
     pub fn kill_session(&self, id: &str) -> Result<()> {
-        let url = format!("{}/sessions/by-id/{id}", self.url);
+        let url = kill_url(&self.url, id);
         let resp = curl_delete(&url, &self.api_key)?;
         if !is_success(resp.status) {
             anyhow::bail!(
@@ -271,6 +271,42 @@ fn curl_delete(url: &str, api_key: &str) -> Result<HttpResponse> {
         &auth,
         url,
     ])
+}
+
+// ── URL builders ────────────────────────────────────────────────────────────
+//
+// Pure URL construction. Both `KatulongClient` (curl-based, sync) and
+// the async helpers in `sipag/src/serve/` use these so wire-format
+// knowledge stays in one place. Callers pass a base URL with no
+// trailing slash (`KatulongClient::new` and `Host::base_url` both
+// already strip it).
+
+/// `POST /sessions` to create, or `GET /sessions` to list.
+pub fn sessions_url(base: &str) -> String {
+    format!("{base}/sessions")
+}
+
+/// `POST /sessions/by-id/{id}/exec` — line-oriented input (server
+/// appends `\r`).
+pub fn exec_url(base: &str, session_id: &str) -> String {
+    format!("{base}/sessions/by-id/{session_id}/exec")
+}
+
+/// `GET /sessions/by-id/{id}/status`.
+pub fn status_url(base: &str, session_id: &str) -> String {
+    format!("{base}/sessions/by-id/{session_id}/status")
+}
+
+/// `GET /sessions/by-id/{id}/output?lines=N` — pull the last N lines
+/// of the visible pane (capture-pane equivalent). Distinct from the
+/// `?fromSeq=` cursor-based mode and the `?screen=true` snapshot mode.
+pub fn output_lines_url(base: &str, session_id: &str, lines: u32) -> String {
+    format!("{base}/sessions/by-id/{session_id}/output?lines={lines}")
+}
+
+/// `DELETE /sessions/by-id/{id}`.
+pub fn kill_url(base: &str, session_id: &str) -> String {
+    format!("{base}/sessions/by-id/{session_id}")
 }
 
 // ── Dispatch logic ──────────────────────────────────────────────────────────
@@ -455,6 +491,46 @@ mod tests {
         assert_eq!(
             cfg.sub_url("crew/proj/role", 7),
             "https://k.example/sub/crew%2Fproj%2Frole?fromSeq=7"
+        );
+    }
+
+    #[test]
+    fn sessions_url_builds_create_and_list_endpoint() {
+        assert_eq!(
+            sessions_url("https://k.example"),
+            "https://k.example/sessions"
+        );
+    }
+
+    #[test]
+    fn exec_url_uses_by_id_path() {
+        assert_eq!(
+            exec_url("https://k.example", "s_abc"),
+            "https://k.example/sessions/by-id/s_abc/exec"
+        );
+    }
+
+    #[test]
+    fn status_url_uses_by_id_path() {
+        assert_eq!(
+            status_url("https://k.example", "s_abc"),
+            "https://k.example/sessions/by-id/s_abc/status"
+        );
+    }
+
+    #[test]
+    fn kill_url_is_session_root_under_by_id() {
+        assert_eq!(
+            kill_url("https://k.example", "s_abc"),
+            "https://k.example/sessions/by-id/s_abc"
+        );
+    }
+
+    #[test]
+    fn output_lines_url_includes_query_param() {
+        assert_eq!(
+            output_lines_url("https://k.example", "s_abc", 80),
+            "https://k.example/sessions/by-id/s_abc/output?lines=80"
         );
     }
 

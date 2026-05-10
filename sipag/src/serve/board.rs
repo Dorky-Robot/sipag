@@ -444,45 +444,20 @@ async fn dispatch_task_handler(
     let agent_cmd = format!("{} -p {}", role_command, title_quoted);
     let session = session_name(&project_name, &task.role);
 
-    let create_url = format!("{}/sessions", host.base_url());
-    let create_resp = match state
-        .http
-        .post(&create_url)
-        .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "name": session }))
-        .send()
-        .await
+    let session_id = match super::create_or_find_session(
+        &state.http,
+        host.base_url(),
+        &host.api_key,
+        &host.id,
+        &session,
+    )
+    .await
     {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(host = %host.id, error = %e, "POST /sessions failed");
-            // Don't echo `{e}` into the response: reqwest's Display
-            // includes the request URL, which leaks the (private)
-            // tunnel hostname to the caller. Full detail is in the
-            // warn log above.
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("create session on {}: network error", host.id),
-            )
-                .into_response();
-        }
-    };
-    if !create_resp.status().is_success() {
-        let st = create_resp.status();
-        let body = create_resp.text().await.unwrap_or_default();
-        return (
-            StatusCode::BAD_GATEWAY,
-            format!("create session on {}: HTTP {st}: {body}", host.id),
-        )
-            .into_response();
-    }
-
-    let session_id = match super::extract_session_id(create_resp, &host.id).await {
         Ok(id) => id,
         Err((st, body)) => return (st, body).into_response(),
     };
 
-    let exec_url = format!("{}/sessions/by-id/{session_id}/exec", host.base_url());
+    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
     let exec_resp = match state
         .http
         .post(&exec_url)
