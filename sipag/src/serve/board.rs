@@ -456,9 +456,13 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST /sessions failed");
+            // Don't echo `{e}` into the response: reqwest's Display
+            // includes the request URL, which leaks the (private)
+            // tunnel hostname to the caller. Full detail is in the
+            // warn log above.
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("create session on {}: {e}", host.id),
+                format!("create session on {}: network error", host.id),
             )
                 .into_response();
         }
@@ -490,7 +494,11 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST exec failed");
-            return (StatusCode::BAD_GATEWAY, format!("exec on {}: {e}", host.id)).into_response();
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("exec on {}: network error", host.id),
+            )
+                .into_response();
         }
     };
     if !exec_resp.status().is_success() {
@@ -574,7 +582,7 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
                     warn!(host = host_id, path, error = %e, "read body failed");
                     return (
                         StatusCode::BAD_GATEWAY,
-                        format!("failed to read {} response: {e}", host_id),
+                        format!("failed to read {host_id} response"),
                     )
                         .into_response();
                 }
@@ -585,7 +593,7 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
             warn!(host = host_id, path, url, error = %e, "proxy request failed");
             (
                 StatusCode::BAD_GATEWAY,
-                format!("failed to reach {}: {e}", host_id),
+                format!("failed to reach {host_id}: network error"),
             )
                 .into_response()
         }

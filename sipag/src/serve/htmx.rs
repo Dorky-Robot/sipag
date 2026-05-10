@@ -580,9 +580,12 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST /sessions failed");
+            // Don't echo `{e}` into the response — reqwest's Display
+            // includes the request URL, leaking the tunnel hostname.
+            // Full detail is in the warn log above.
             return err_response(
                 StatusCode::BAD_GATEWAY,
-                format!("create session on {}: {e}", host.id),
+                format!("create session on {}: network error", host.id),
             );
         }
     };
@@ -611,7 +614,10 @@ async fn dispatch_task_handler(
         Ok(r) => r,
         Err(e) => {
             warn!(host = %host.id, error = %e, "POST exec failed");
-            return err_response(StatusCode::BAD_GATEWAY, format!("exec on {}: {e}", host.id));
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("exec on {}: network error", host.id),
+            );
         }
     };
     if !exec_resp.status().is_success() {
@@ -936,7 +942,7 @@ async fn claude_respond_handler(
             warn!(host = %host.id, error = %e, "POST /api/claude/respond failed");
             return err_response(
                 StatusCode::BAD_GATEWAY,
-                format!("respond on {}: {e}", host.id),
+                format!("respond on {}: network error", host.id),
             );
         }
     };
