@@ -590,7 +590,11 @@ async fn proxy_get(state: &AppState, host_id: &str, path: &str) -> Response {
             (status, headers, body).into_response()
         }
         Err(e) => {
-            warn!(host = host_id, path, url, error = %e, "proxy request failed");
+            // `error = %e` already includes the request URL via reqwest's
+            // Display impl. Don't add `url` as a separate structured field
+            // — that just gives log-forwarding pipelines a second copy of
+            // the tunnel hostname to spread.
+            warn!(host = host_id, path, error = %e, "proxy request failed");
             (
                 StatusCode::BAD_GATEWAY,
                 format!("failed to reach {host_id}: network error"),

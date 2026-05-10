@@ -841,9 +841,14 @@ async fn observation_transcript_handler(
     let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
         Ok(r) => r,
         Err(e) => {
+            // `e.to_string()` would render reqwest::Error::Display, which
+            // embeds the request URL — leaking the tunnel hostname into
+            // the HTML fragment served to the browser. Keep detail in the
+            // log; show a generic message in the UI.
+            warn!(host = %obs.host, error = %e, "GET /api/claude-transcript failed");
             return html_response(maud::html! {
                 div.transcript-empty.subtle {
-                    "transcript fetch failed: " (e.to_string())
+                    "transcript fetch failed: network error"
                 }
             });
         }
