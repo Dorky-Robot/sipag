@@ -537,7 +537,8 @@ async fn proxy_session_status(
     AxumPath((id, sid)): AxumPath<(String, String)>,
     State(state): State<AppState>,
 ) -> Response {
-    if sid.chars().any(|c| c == '/' || c.is_control()) {
+    if !sipag_core::katulong::is_valid_session_id(&sid) {
+        warn!(host = %id, sid = %sid, "proxy_session_status: rejected invalid session id from request");
         return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
     }
     let Some(host) = state.hosts.find(&id) else {
