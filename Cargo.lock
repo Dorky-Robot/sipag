@@ -2767,6 +2767,7 @@ dependencies = [
  "maud",
  "notify",
  "predicates",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

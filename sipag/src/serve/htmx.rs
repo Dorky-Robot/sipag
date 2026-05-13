@@ -28,6 +28,10 @@ use sipag_core::board::{
     KrStance, Observation, Project, ProjectKind, Task, TaskStatus, MISC_PROJECT,
 };
 use sipag_core::gate::{self, GateInput};
+use sipag_core::katulong::client::{
+    AttachError, KatulongAttachClient, KeyName, WaitFrom, DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS,
+};
+use sipag_core::katulong::RemoteConfig;
 use sipag_core::nudge::{self, NudgeInput};
 use tracing::warn;
 
@@ -690,22 +694,32 @@ async fn dispatch_task_handler(
         }
     }
 
-    // LEGACY background task — gemma4 keystroke-driving nudge loop
-    // that paste/submit/heals the prompt into the Claude TUI. This
-    // is the path being replaced in `docs/dispatch-implementation-plan.md`
-    // §11 step 7 by the long-lived attach client
-    // (`sipag_core::katulong::client`). Until that wires in, the
-    // nudge loop here is the active driver; afterwards it shrinks
-    // to a 30-60s observer per design-doc §7. The HTTP response
-    // returns to the iPad immediately; outcome surfaces via
-    // `dispatch.outcome` broker events.
+    // Two dispatch back-ends, gated by `SIPAG_DISPATCH_V2`:
     //
-    // Known issue (documented, deferred): concurrent dispatches of
-    // the same task ID race here — each call creates its own
-    // katulong session via `create_or_find_session`, persists its
-    // own `dispatch_session_id` last-writer-wins, and spawns its
-    // own background task. Worth a per-task in-flight set, but the
-    // race goes away when this code is replaced.
+    //   v2 (the attach client): opens a long-lived katulong WS
+    //   attach, types `claude\r`, waits on the rolling buffer for
+    //   the TUI ready marker, pastes the prompt body, presses
+    //   Enter, waits for "esc to interrupt" to confirm Claude is
+    //   processing. Every keystroke and submit is a separate
+    //   protocol message, which is the property the bug fix (PR
+    //   #532) was built around.
+    //
+    //   legacy: gemma4 keystroke-driving nudge loop via
+    //   `verify_and_heal_dispatch`. Kept as a fallback while v2
+    //   bakes in production; scheduled for removal in
+    //   `docs/dispatch-implementation-plan.md` §11 step 7 once
+    //   v2 has proven out.
+    //
+    // Enable v2 by setting `SIPAG_DISPATCH_V2=1` in the
+    // LaunchAgent's environment.
+    //
+    // Known issue across both paths (documented, deferred):
+    // concurrent dispatches of the same task ID race — each call
+    // creates its own katulong session, persists its own
+    // `dispatch_session_id` last-writer-wins, and spawns its own
+    // background task. Worth a per-task in-flight set; the race
+    // narrows under v2 because session creation is the only
+    // contention point.
     let sid = session_id.clone();
     let state_bg = state.clone();
     let host_bg = host.clone();
@@ -713,11 +727,19 @@ async fn dispatch_task_handler(
     let session_bg = session.clone();
     let role_bg = role_command.clone();
     let prompt_bg = prompt.clone();
+    let use_v2 = dispatch_v2_enabled();
     tokio::spawn(async move {
-        verify_and_heal_dispatch(
-            state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
-        )
-        .await;
+        if use_v2 {
+            dispatch_via_attach_client(
+                state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
+            )
+            .await;
+        } else {
+            verify_and_heal_dispatch(
+                state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
+            )
+            .await;
+        }
     });
 
     let toast_msg = format!("dispatched #{id} on {} · {}", host.id, session);
@@ -1164,6 +1186,323 @@ fn build_dispatch_prompt(sipag_dir: &std::path::Path, project_name: &str, task: 
     out.push_str("\n## Task\n\n");
     out.push_str(&task.title);
     out
+}
+
+/// Returns true when `SIPAG_DISPATCH_V2` is set to a truthy value
+/// (anything non-empty other than `"0"`). When true, the dispatch
+/// handler routes to the attach-client-driven background task
+/// instead of the legacy nudge loop. See the comment block at the
+/// call site for the trade-off.
+fn dispatch_v2_enabled() -> bool {
+    match std::env::var("SIPAG_DISPATCH_V2") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+/// Attach-client-driven dispatch (v2 path).
+///
+/// Opens a long-lived katulong WS attach to the session that was
+/// just created by `dispatch_task_handler`, then drives the
+/// keystroke handshake mechanically:
+///
+/// 1. `input("<role_command>\r")` — launches Claude (or whichever
+///    agent the role declares).
+/// 2. `wait_for(tui_ready_re)` — resolves when Claude's TUI banner
+///    or its idle indicator first appears in the rolling buffer.
+/// 3. `paste(prompt)` — sends the bracketed-paste body. Critically
+///    without a trailing `\r`, which the original dispatch bug
+///    (PR #532 §5) was about.
+/// 4. `wait_for(echo of paste prefix)` — confirms the paste landed
+///    in Claude's input box. Best-effort: a missed echo is logged
+///    but doesn't fail the dispatch.
+/// 5. `press(Enter)` — separate protocol message, submits the
+///    prompt.
+/// 6. `wait_for(claude_processing_re)` — confirms Claude has
+///    started processing.
+///
+/// Every step is a `KatulongAttach` API call; no `wrap_bracketed_paste`,
+/// no hand-rolled keystroke routing, no gemma in the path. Each
+/// step has an explicit timeout; failures publish a `dispatch.outcome`
+/// event with the failure reason.
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_via_attach_client(
+    state: AppState,
+    host: sipag_core::hosts::Host,
+    session_id: String,
+    role_command: String,
+    prompt: String,
+    project_name: String,
+    task_id: u64,
+    session_name_str: String,
+) {
+    use std::time::Duration;
+
+    let remote = RemoteConfig {
+        url: host.url.clone(),
+        api_key: host.api_key.clone(),
+    };
+    let client = KatulongAttachClient::new(remote);
+
+    let attach = match client
+        .attach(&session_id, DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS)
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "dispatch v2: attach open failed");
+            publish_dispatch_outcome(
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "failed",
+                0,
+                &format!("attach open: {e}"),
+            );
+            return;
+        }
+    };
+
+    let launch = format!("{role_command}\r");
+    if let Err(e) = attach.input(&launch).await {
+        finish_v2(
+            attach,
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "failed",
+            0,
+            &format!("launch input: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    let tui_ready_re = match tui_ready_re() {
+        Ok(re) => re,
+        Err(e) => {
+            finish_v2(
+                attach,
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "failed",
+                0,
+                &format!("tui_ready regex: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+    if let Err(e) = attach
+        .wait_for(
+            tui_ready_re,
+            WaitFrom::FromNow,
+            Some(Duration::from_secs(15)),
+        )
+        .await
+    {
+        finish_v2(
+            attach,
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "failed",
+            1,
+            &v2_step_reason("TUI ready wait", e),
+        )
+        .await;
+        return;
+    }
+
+    if let Err(e) = attach.paste(&prompt).await {
+        finish_v2(
+            attach,
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "failed",
+            2,
+            &format!("paste: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    // Echo-wait is best-effort: if the prompt's leading chars don't
+    // surface in the pane within 3s, log and proceed. Claude's TUI
+    // sometimes re-renders the paste in a way that doesn't include
+    // the literal prefix immediately.
+    if let Ok(re) = paste_echo_regex(&prompt) {
+        if let Err(e) = attach
+            .wait_for(&re, WaitFrom::FromNow, Some(Duration::from_secs(3)))
+            .await
+        {
+            warn!(
+                task = task_id,
+                error = %e,
+                "dispatch v2: paste echo not observed; proceeding to submit"
+            );
+        }
+    }
+
+    if let Err(e) = attach.press(KeyName::Enter).await {
+        finish_v2(
+            attach,
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "failed",
+            3,
+            &format!("submit: {e}"),
+        )
+        .await;
+        return;
+    }
+
+    let processing_re = match claude_processing_re() {
+        Ok(re) => re,
+        Err(e) => {
+            finish_v2(
+                attach,
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "failed",
+                3,
+                &format!("processing regex: {e}"),
+            )
+            .await;
+            return;
+        }
+    };
+    if let Err(e) = attach
+        .wait_for(
+            processing_re,
+            WaitFrom::FromNow,
+            Some(Duration::from_secs(10)),
+        )
+        .await
+    {
+        finish_v2(
+            attach,
+            &state,
+            &host.id,
+            &session_name_str,
+            &project_name,
+            task_id,
+            "failed",
+            4,
+            &v2_step_reason("processing wait", e),
+        )
+        .await;
+        return;
+    }
+
+    // All steps succeeded — Claude is processing the prompt.
+    finish_v2(
+        attach,
+        &state,
+        &host.id,
+        &session_name_str,
+        &project_name,
+        task_id,
+        "success",
+        4,
+        "",
+    )
+    .await;
+}
+
+/// Closes the attach and publishes the dispatch outcome. Pulled out
+/// to keep the v2 driver's many error paths terse and to ensure the
+/// attach is always closed cleanly even on early returns.
+#[allow(clippy::too_many_arguments)]
+async fn finish_v2(
+    attach: sipag_core::katulong::client::KatulongAttach,
+    state: &AppState,
+    host_id: &str,
+    session_name_str: &str,
+    project_name: &str,
+    task_id: u64,
+    outcome: &str,
+    step: u8,
+    reason: &str,
+) {
+    publish_dispatch_outcome(
+        state,
+        host_id,
+        session_name_str,
+        project_name,
+        task_id,
+        outcome,
+        step,
+        reason,
+    );
+    attach.close().await;
+}
+
+/// Build a regex that matches the first ~20 visible chars of the
+/// prompt — used to confirm the paste echoed into Claude's input
+/// box. Escapes regex metacharacters in the prompt, so an `^` or
+/// `*` in the user's task title doesn't blow up the matcher.
+///
+/// Trims to the first non-empty line so we don't try to match
+/// whitespace-only prefixes from the templated `## Context` header.
+fn paste_echo_regex(prompt: &str) -> Result<regex::Regex, regex::Error> {
+    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let prefix: String = first_line.chars().take(20).collect();
+    regex::Regex::new(&regex::escape(prefix.trim()))
+}
+
+/// One short phrase the operator will see in the `dispatch.outcome`
+/// event when a wait step failed. Translates the
+/// `AttachError::Timeout` / other variants into something terse.
+fn v2_step_reason(step: &str, err: AttachError) -> String {
+    match err {
+        AttachError::Timeout(d) => {
+            format!("{step}: timed out after {:.1}s", d.as_secs_f32())
+        }
+        other => format!("{step}: {other}"),
+    }
+}
+
+// Lazy regex compilation — static patterns, compiled once per
+// process. `std::sync::OnceLock` keeps us off any third-party
+// `once_cell`-style dep.
+
+/// Pattern matching Claude Code's "ready for input" signal. Catches
+/// the bottom-of-pane prompt-indicator (`> ` at end of buffer),
+/// the help hint, and the version banner — whichever surfaces
+/// first.
+fn tui_ready_re() -> &'static Result<regex::Regex, regex::Error> {
+    static CELL: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| regex::Regex::new(r"esc to interrupt|/help|Claude Code|>\s*$"))
+}
+
+/// Pattern matching Claude Code's "I'm processing your request"
+/// indicator. `"esc to interrupt"` is the load-bearing string that
+/// only appears while Claude is actively running a tool / streaming
+/// a response.
+fn claude_processing_re() -> &'static Result<regex::Regex, regex::Error> {
+    static CELL: std::sync::OnceLock<Result<regex::Regex, regex::Error>> =
+        std::sync::OnceLock::new();
+    CELL.get_or_init(|| regex::Regex::new(r"esc to interrupt"))
 }
 
 /// Post-launch nudge loop driven by [`sipag_core::nudge::next_step`].

@@ -45,6 +45,9 @@ tower-livereload = "0.9"
 # web/public/ and call the livereload reloader on change — that way
 # CSS/JS edits don't have to round-trip through a server restart.
 notify = "6"
+# Used by the dispatch v2 path to compile static wait_for patterns
+# that the katulong attach client matches against its rolling buffer.
+regex = "1"
 
 # WebAuthn lives in sipag-core::auth — the binary crate just wires
 # handlers around the AuthStore and WebAuthnService.
