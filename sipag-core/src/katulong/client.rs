@@ -601,7 +601,17 @@ impl AttachState {
             terminal: None,
             pending_waits: Vec::new(),
         };
-        s.rolling.extend(initial_buffer.bytes());
+        // Apply the same cap as `replace_buffer` so the initial
+        // handshake snapshot can't sit above `BUFFER_SOFT_CAP`
+        // until the next append. Keeps the tail (most recent
+        // content) when trimming.
+        let bytes = initial_buffer.into_bytes();
+        if bytes.len() > BUFFER_SOFT_CAP {
+            let start = bytes.len() - BUFFER_SOFT_CAP;
+            s.rolling.extend(&bytes[start..]);
+        } else {
+            s.rolling.extend(bytes);
+        }
         s
     }
 
@@ -943,6 +953,16 @@ async fn dispatch_inbound(
             // the resulting Pull and no further server event fires,
             // the stream stalls. Await `send` so backpressure
             // surfaces as the channel filling rather than data loss.
+            //
+            // **Stall mode worth knowing for future debugging**:
+            // if the writer task is alive but stuck (e.g., the WS
+            // peer is slow to acknowledge writes), this `await`
+            // blocks the reader loop. The reader stops draining
+            // incoming WS frames, TCP backpressure propagates
+            // back to katulong, and katulong's per-client
+            // `WS_BACKPRESSURE_BYTES` threshold kicks in. A
+            // "katulong says it backpressured us" report should
+            // point here first.
             let from = state.lock().await.cursor;
             if let Err(e) = writer_tx
                 .send(Outbound::Pull {
@@ -1391,52 +1411,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_now_resists_eviction_with_ansi_in_evicted_region() {
-        // Coordinate-system regression test: previously eviction
-        // shifted `lower_bound` by the RAW byte count, but
-        // `lower_bound` is in the ANSI-stripped view. If the
-        // evicted prefix contained escapes, the over-shift could
-        // let a FromNow wait match against retained pre-existing
-        // content.
+    async fn from_now_does_not_match_pre_existing_after_ansi_only_eviction() {
+        // Coordinate-system regression test for the eviction
+        // shift bug. The bug was: eviction shifted `lower_bound`
+        // by the RAW byte count, but `lower_bound` lives in the
+        // ANSI-stripped view. If the evicted prefix contained
+        // MORE raw bytes than stripped bytes (ANSI escapes weigh
+        // many raw, zero stripped), the over-shift dropped
+        // `lower_bound` below the offset of retained pre-existing
+        // matching content, causing a FromNow wait to falsely
+        // resolve.
         //
-        // Setup: seed the buffer with ANSI-laden "old hello",
-        // register a FromNow wait at the current stripped tail,
-        // then append a ton of fresh data that triggers eviction.
-        // The wait must NOT resolve against the retained tail of
-        // "old hello" — only against new content matching "hello".
-        let initial = b"prefix\x1b[31mold hello\x1b[0m"; // strips to "prefix" + "old hello"
-        let mut st = AttachState::new(String::from_utf8(initial.to_vec()).unwrap(), 0);
-        let pre_existing_stripped = st.stripped_view().len();
+        // Construction:
+        //   raw      = "x"*10 + (20 × "\x1b[31m" = 100 raw, 0 stripped) + "hello"
+        //   stripped = "xxxxxxxxxxhello"  (15 bytes)
+        //
+        // FromNow wait at stripped offset 15. Then we append just
+        // enough pure-ANSI bytes that eviction removes exactly
+        // 110 raw bytes (the "x"*10 + the ANSI block), but
+        // "hello" stays in the rolling buffer.
+        //   drop_n         = 110 raw bytes
+        //   stripped_delta = 10 ("x"*10; the ANSI block strips to
+        //                    nothing)
+        //
+        // Under the OLD buggy code: `lower_bound = 15 - 110`
+        // saturates to 0; "hello" at stripped offset 0 matches;
+        // wait WRONGLY resolves.
+        //
+        // Under the FIXED code: `lower_bound = 15 - 10 = 5`;
+        // "hello" sits at stripped offset 0..5, NOT in
+        // `stripped[5..]`; wait correctly stays pending.
+        let mut st = AttachState::new(String::new(), 0);
+        let mut initial = vec![b'x'; 10];
+        for _ in 0..20 {
+            initial.extend_from_slice(b"\x1b[31m"); // 5 raw, 0 stripped
+        }
+        initial.extend_from_slice(b"hello");
+        st.append_bytes(&initial);
+        assert_eq!(
+            st.stripped_view().len(),
+            15,
+            "test setup: stripped buffer should be 'xxxxxxxxxxhello' (15)"
+        );
 
         let (tx, mut rx) = oneshot::channel();
         st.pending_waits.push(PendingWait {
             pattern: Regex::new(r"hello").unwrap(),
-            lower_bound: pre_existing_stripped, // FromNow
+            lower_bound: 15, // FromNow at current stripped tail
             waker: tx,
         });
-        st.try_resolve_waits();
-        assert_eq!(
-            st.pending_waits.len(),
-            1,
-            "wait should not resolve against pre-existing 'old hello'"
-        );
 
-        // Flood with non-matching bytes large enough to force
-        // eviction of the entire initial buffer.
-        let flood = vec![b'x'; BUFFER_SOFT_CAP + initial.len() + 1024];
+        // Pad with pure-ANSI bytes so rolling grows to exactly
+        // BUFFER_SOFT_CAP + 110. Eviction will then drop the
+        // first 110 raw bytes — the "x"*10 + the ANSI block.
+        let target_overflow = 10 + 100;
+        let need = BUFFER_SOFT_CAP + target_overflow - st.rolling.len();
+        let chunk = b"\x1b[31m";
+        let mut flood = Vec::with_capacity(need);
+        while flood.len() + chunk.len() <= need {
+            flood.extend_from_slice(chunk);
+        }
+        flood.extend(std::iter::repeat_n(b'y', need - flood.len()));
         st.append_bytes(&flood);
 
-        // After eviction the wait should STILL be pending (no
-        // "hello" in the flood), and crucially the rx hasn't
-        // resolved.
+        // Sanity: rolling capped at the soft cap, "hello" still
+        // present in the stripped view.
+        assert_eq!(st.rolling.len(), BUFFER_SOFT_CAP);
+        let stripped_post = st.stripped_view();
+        let stripped_str = std::str::from_utf8(&stripped_post).unwrap();
+        assert!(
+            stripped_str.contains("hello"),
+            "test setup invalid: 'hello' was evicted along with the ANSI block"
+        );
+
+        // The wait must stay pending. Under the old buggy code
+        // this would have resolved against the retained "hello".
         assert!(
             !st.pending_waits.is_empty(),
-            "wait was incorrectly resolved during/after eviction"
+            "wait wrongly resolved against pre-existing 'hello' after \
+             ANSI-only eviction over-shifted the lower_bound"
         );
         assert!(rx.try_recv().is_err());
 
-        // Now append something with "hello" — should resolve.
-        st.append_bytes(b"finally hello again");
+        // Append a NEW "hello" — should resolve cleanly.
+        st.append_bytes(b"\nfresh hello here");
         let res = rx.await.unwrap().unwrap();
         assert_eq!(res.matched_text, "hello");
     }
@@ -1679,5 +1737,197 @@ mod tests {
             st.terminal.is_none(),
             "Inbound::Error is not terminal; katulong sends it for individual bad messages"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_pull_snapshot_replaces_buffer_and_sets_cursor() {
+        // Snapshot path: replace-buffer + cursor reset. Round-2
+        // reviewer flagged this arm was untested.
+        let (state, tx, _rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.append_bytes(b"stale prior content");
+            st.cursor = 99;
+        }
+        dispatch_inbound(
+            Inbound::PullSnapshot {
+                session: "s".into(),
+                data: "fresh".into(),
+                cursor: 4242,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"fresh");
+        assert_eq!(st.cursor, 4242);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_pull_snapshot_ignores_mismatched_session() {
+        let (state, tx, _rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.append_bytes(b"unchanged");
+            st.cursor = 7;
+        }
+        dispatch_inbound(
+            Inbound::PullSnapshot {
+                session: "other".into(),
+                data: "leak".into(),
+                cursor: 999,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"unchanged");
+        assert_eq!(st.cursor, 7);
+    }
+
+    // ── mark_terminal idempotency ───────────────────────────
+
+    #[tokio::test]
+    async fn mark_terminal_is_idempotent_first_writer_wins() {
+        // Both reader and writer can call `mark_terminal`
+        // concurrently when a transport breaks. The early-return
+        // when already-terminal preserves the first reason and
+        // prevents double-wake of resolved waiters.
+        let mut st = AttachState::new(String::new(), 0);
+        let (tx, rx) = oneshot::channel();
+        st.pending_waits.push(PendingWait {
+            pattern: Regex::new(r"never").unwrap(),
+            lower_bound: 0,
+            waker: tx,
+        });
+
+        st.mark_terminal(TerminalReason::Exit(0));
+        // First call drained the pending waits.
+        assert!(st.pending_waits.is_empty());
+
+        // Second call must be a no-op: still terminal with the
+        // original reason; no panic, no second waker send.
+        st.mark_terminal(TerminalReason::Transport("late".into()));
+        assert!(matches!(st.terminal, Some(TerminalReason::Exit(0))));
+
+        // The waker received exactly one Err — confirmed by
+        // awaiting the rx and observing the SessionExited error.
+        let err = rx.await.unwrap().unwrap_err();
+        assert!(matches!(err, AttachError::SessionExited(0)));
+    }
+
+    // ── wait_for timeout branch ─────────────────────────────
+
+    fn make_test_attach() -> KatulongAttach {
+        // Synthesizes a `KatulongAttach` without standing up a
+        // real WS. The reader/writer task handles are `None`;
+        // the only operations exercised in these tests are
+        // `wait_for` (which only touches state + the oneshot
+        // channels) and direct state manipulation through the
+        // lock. NOT safe for tests that actually need keystrokes
+        // to ride through the writer task.
+        let state = Arc::new(Mutex::new(AttachState::new(String::new(), 0)));
+        let (tx, _rx) = mpsc::channel(8);
+        KatulongAttach {
+            session_name: "test".into(),
+            writer_tx: tx,
+            state,
+            _writer_handle: None,
+            _reader_handle: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_returns_timeout_after_max_wait() {
+        // Pin the timeout branch of `wait_for` — round-1 + round-2
+        // reviewers both flagged this was untested. Uses a real
+        // 50ms timeout rather than tokio's `start_paused` (which
+        // would require the `test-util` feature) — fast enough
+        // that the test still runs in well under a second.
+        let attach = make_test_attach();
+        let re = Regex::new(r"never-matches").unwrap();
+        let waited = Duration::from_millis(50);
+        let result = attach
+            .wait_for(&re, WaitFrom::FromAttach, Some(waited))
+            .await;
+        match result {
+            Err(AttachError::Timeout(d)) => assert_eq!(d, waited),
+            other => panic!("expected AttachError::Timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_immediate_match_returns_without_registering() {
+        // If the pattern is already in the buffer, `wait_for` must
+        // return without ever registering a pending wait. Pins the
+        // fast path so a future edit can't silently make every
+        // call go through the oneshot.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.append_bytes(b"hello world");
+        }
+        let re = Regex::new(r"hello").unwrap();
+        let result = attach
+            .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_millis(50)))
+            .await;
+        assert!(result.is_ok());
+        // No pending waits should remain (the immediate match
+        // returned before registration).
+        let st = attach.state.lock().await;
+        assert!(st.pending_waits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_for_returns_terminal_immediately_when_already_terminal() {
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let re = Regex::new(r"nomatch").unwrap();
+        let result = attach
+            .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_secs(1)))
+            .await;
+        assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    // ── writer-task transport propagation ───────────────────
+
+    #[tokio::test]
+    async fn mark_terminal_transport_resolves_pending_waits_with_attach_error_transport() {
+        // The HIGH correctness fix in this PR: when the writer
+        // task can't send (WS write-half error), it must call
+        // `mark_terminal(TerminalReason::Transport(...))` on the
+        // shared state. Doing so resolves all pending `wait_for`
+        // futures with `AttachError::Transport(...)` — they
+        // STOP waiting silently.
+        //
+        // Testing the actual writer_task end-to-end requires a
+        // mockable WS sink. The propagation contract — terminal
+        // reason → waiter error — is what callers depend on, and
+        // is what we exercise here directly.
+        let mut st = AttachState::new(String::new(), 0);
+        let (tx, rx) = oneshot::channel();
+        st.pending_waits.push(PendingWait {
+            pattern: Regex::new(r"nomatch").unwrap(),
+            lower_bound: 0,
+            waker: tx,
+        });
+        st.mark_terminal(TerminalReason::Transport(
+            "writer send failed: connection reset".into(),
+        ));
+        let err = rx.await.unwrap().unwrap_err();
+        match err {
+            AttachError::Transport(m) => {
+                assert!(m.contains("writer send failed"));
+                assert!(m.contains("connection reset"));
+            }
+            other => panic!("expected AttachError::Transport, got {other:?}"),
+        }
     }
 }

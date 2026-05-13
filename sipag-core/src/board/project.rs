@@ -282,6 +282,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_string_statuses_upgrade_to_table_on_save_round_trip() {
+        // The module-level docstring promises legacy `statuses =
+        // ["a", "b"]` projects load unchanged, then "upgrade to
+        // the table form on the next save." This test pins the
+        // load → save → reload round-trip: after a save, the
+        // reloaded project must still parse cleanly, and any
+        // explicit description / dispatchable set in code between
+        // load and save must survive the round-trip.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("projects/legacy/project.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "name = \"legacy\"\nrepo = \"a/b\"\nstatuses = [\"todo\", \"done\"]\n",
+        )
+        .unwrap();
+
+        // Load → mutate one status → save.
+        let mut loaded = Project::load(dir.path(), "legacy").unwrap();
+        assert_eq!(loaded.statuses.len(), 2);
+        loaded.statuses[0].description = "ready".into();
+        loaded.statuses[0].dispatchable = true;
+        loaded.save(dir.path()).unwrap();
+
+        // Reload — the saved form must round-trip cleanly and
+        // preserve the mutations.
+        let reloaded = Project::load(dir.path(), "legacy").unwrap();
+        assert_eq!(reloaded.statuses.len(), 2);
+        assert_eq!(reloaded.statuses[0].name, "todo");
+        assert_eq!(reloaded.statuses[0].description, "ready");
+        assert!(reloaded.statuses[0].dispatchable);
+        assert_eq!(reloaded.statuses[1].name, "done");
+    }
+
+    #[test]
     fn new_table_statuses_load_with_full_metadata() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("projects/new/project.toml");

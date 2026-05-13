@@ -33,6 +33,14 @@ use serde::{Deserialize, Serialize};
 /// browser-tile concerns and are omitted on purpose — sipag uses
 /// one session per attach and doesn't need carousels or P2P
 /// signaling.
+///
+/// `Outbound` is `Serialize` only. The mirror, [`Inbound`], is
+/// `Deserialize` only. The asymmetry is deliberate: messages
+/// flow one-way per direction (sipag never decodes what it sent;
+/// katulong never sends what sipag sends), so each enum only
+/// needs the side that matches its role. Tests that need to
+/// round-trip an inbound message construct a JSON string by hand
+/// rather than re-encoding via serde.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Outbound {
