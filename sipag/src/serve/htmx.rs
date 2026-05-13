@@ -25,9 +25,10 @@ use maud::{html, Markup};
 use serde::Deserialize;
 use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, load_project, move_task, KeyResult,
-    KrStance, Observation, ProjectKind, Task, TaskStatus, MISC_PROJECT,
+    KrStance, Observation, Project, ProjectKind, Task, TaskStatus, MISC_PROJECT,
 };
-use sipag_core::katulong::session_name;
+use sipag_core::gate::{self, GateInput};
+use sipag_core::nudge::{self, NudgeInput};
 use tracing::warn;
 
 pub fn routes() -> Router<AppState> {
@@ -566,7 +567,13 @@ async fn dispatch_task_handler(
     // human typing into the TUI, with normal permission prompts left
     // intact for human approval from the iPad.
     let launch_cmd = build_launch_cmd(&role_command);
-    let session = session_name(&project_name, &task.role);
+    // Each dispatch creates a fresh katulong session with an opaque
+    // sipag-prefixed name. Katulong's auto-summarizer renames it from
+    // session content later; sipag tracks the session by its
+    // immutable id (persisted on the task as `dispatch_session_id`),
+    // not by the name. Avoids the stale-session-reused class of bug
+    // that came from pinning `{project}--{role}` names.
+    let session = sipag_core::katulong::generate_dispatch_session_name();
 
     let session_id = match super::katulong_proxy::create_or_find_session(
         &state.http,
@@ -580,6 +587,59 @@ async fn dispatch_task_handler(
         Ok(id) => id,
         Err((st, body)) => return err_response(st, body),
     };
+
+    // Pin the dispatch to this task so the board's "running on" badge
+    // matches by session id rather than by name. Done as a separate
+    // load+save because the task may have prior gate state we want
+    // to preserve (status, reason, etc. — the nudge loop will clear
+    // those on its first persist if appropriate).
+    if let Ok(mut t) = Task::load(&dir, &project_name, id) {
+        t.dispatch_session_id = Some(session_id.clone());
+        t.dispatch_host_id = Some(host.id.clone());
+        t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        if let Err(e) = t.save(&dir, &project_name) {
+            warn!(
+                project = %project_name,
+                task = id,
+                error = %e,
+                "dispatch: failed to persist dispatch_session_id/host"
+            );
+        }
+    }
+
+    // Dispatch gate — gemma4 classifies the pane's current state
+    // against the project's declared statuses before we type anything.
+    // Replaces the per-quirk detection (login banner, permission
+    // prompt, mid-paste, etc.) with one LLM judgment. Fails closed:
+    // any error from the classifier (gemma down, project missing
+    // `dispatchable = true`, model returned unparsable JSON the
+    // coercion couldn't recover) aborts dispatch with the task
+    // parked at whatever gemma chose (or `needs-human` by fallback).
+    match run_dispatch_gate(&state, host, &session_id, &project_name, &task).await {
+        Ok(GateOutcome::Dispatch) => {
+            // fall through to exec the launch command
+        }
+        Ok(GateOutcome::Parked {
+            status_name,
+            reason,
+        }) => {
+            let toast = format!(
+                "task #{id} not dispatched — {status_name}{}",
+                reason
+                    .as_deref()
+                    .map(|r| format!(": {r}"))
+                    .unwrap_or_default()
+            );
+            let board = render_board(&state).await;
+            let combined = html! {
+                (board)
+                (oob_toast(&toast))
+                (oob_clear_dispatch_picker())
+            };
+            return html_response(combined);
+        }
+        Err((st, body)) => return err_response(st, body),
+    }
 
     let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
     let exec_resp = match state
@@ -617,6 +677,17 @@ async fn dispatch_task_handler(
             error = %e,
             "task move to in-progress failed (worker is already running)"
         );
+    }
+    // Clear any reason/human_action left over from a prior parked
+    // dispatch — once we're firing, those notes no longer apply. Done
+    // as a separate load+save because `move_task` only updates status.
+    if let Ok(mut t) = Task::load(&dir, &project_name, id) {
+        if t.reason.is_some() || t.human_action.is_some() {
+            t.reason = None;
+            t.human_action = None;
+            t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+            let _ = t.save(&dir, &project_name);
+        }
     }
 
     // Spawn a background task that waits for claude's TUI to be
@@ -1084,26 +1155,7 @@ fn build_dispatch_prompt(sipag_dir: &std::path::Path, project_name: &str, task: 
     out
 }
 
-/// Background driver that runs after every dispatch.
-///
-/// 1. Poll the pane for up to ~6s waiting for claude's TUI. If the
-///    one-time "Do you trust the files in this folder?" prompt
-///    appears, auto-select option 1 (yes) — the human can't see this
-///    prompt from the iPad and dispatch would otherwise stall on it.
-/// 2. Send the task prompt as a single bracketed-paste message so
-///    multi-line markdown lands as one chat turn instead of
-///    submitting on the first internal newline.
-/// 3. Poll `/sessions/by-id/<sid>/status` — if `agent.running` is true,
-///    publish `dispatch.success` and exit.
-/// 4. Otherwise, enter a bounded recovery loop:
-///    - Fetch recent pane scrollback via `/sessions/by-id/<sid>/output?lines=80`.
-///    - Hand `(intended_command, scrollback)` to gemma4 and ask for the
-///      next keystrokes to recover.
-///    - POST gemma4's keystrokes to `/sessions/by-id/<sid>/exec`.
-///    - Wait + recheck status. If it took, publish success; otherwise
-///      iterate up to MAX_HEAL_ATTEMPTS times.
-/// 5. Surface the final outcome on the `observations/activity` topic
-///    so the UI's pulse animation fires on the corresponding row.
+/// Post-launch nudge loop driven by [`sipag_core::nudge::next_step`].
 #[allow(clippy::too_many_arguments)]
 async fn verify_and_heal_dispatch(
     state: AppState,
@@ -1118,156 +1170,180 @@ async fn verify_and_heal_dispatch(
     use std::time::Duration;
     use tokio::time::sleep;
 
-    const TUI_WAIT_TICKS: u8 = 12; // ~6s total at 500ms cadence
-    const TUI_WAIT_INTERVAL: Duration = Duration::from_millis(500);
-    const POST_PASTE_WAIT: Duration = Duration::from_secs(3);
-    const POST_HEAL_WAIT: Duration = Duration::from_secs(5);
-    const MAX_HEAL_ATTEMPTS: u8 = 3;
+    // 20 ticks × 3s = 60s hard ceiling per dispatch. Long enough for
+    // a cold gemma + a few back-and-forth nudges, short enough that
+    // a stuck dispatch surfaces as `needs-human` instead of pinning
+    // a worker indefinitely.
+    const MAX_ITERATIONS: u8 = 20;
+    const ITERATION_INTERVAL: Duration = Duration::from_secs(3);
+    const MAX_GEMMA_FAILURES: u8 = 3;
 
     let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
+    let dir = load_dir();
 
-    // Phase 1: wait for the claude TUI to be ready, auto-approving
-    // the trust-this-folder prompt if seen. Trust prompt only shows
-    // on first invocation in a fresh directory; most dispatches will
-    // skip straight to "TUI visible" within a tick or two.
-    let mut trust_approved = false;
-    for _ in 0..TUI_WAIT_TICKS {
-        sleep(TUI_WAIT_INTERVAL).await;
-        let pane = fetch_pane_scrollback(&state, &host, &session_id).await;
-        if !trust_approved && pane_shows_trust_prompt(&pane) {
-            tracing::info!(
-                host = %host.id,
-                session = %session_name_str,
-                "trust prompt detected — sending '1' to approve"
+    // Load project so gemma sees the full status menu (each with its
+    // description) on every tick. Loading once outside the loop is
+    // fine — project.toml doesn't churn during a dispatch.
+    let project_cfg = match Project::load(&dir, &project_name) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                project = %project_name,
+                task = task_id,
+                error = %e,
+                "nudge loop: load project failed — cannot drive dispatch"
             );
-            let _ = state
-                .http
-                .post(&exec_url)
-                .bearer_auth(&host.api_key)
-                .json(&serde_json::json!({ "input": "1\r" }))
-                .send()
-                .await;
-            trust_approved = true;
-            // Loop again to wait for the TUI to settle after approval.
-            continue;
+            publish_dispatch_outcome(
+                &state,
+                &host.id,
+                &session_name_str,
+                &project_name,
+                task_id,
+                "failed",
+                0,
+                "nudge: project load failed",
+            );
+            return;
         }
-        // No trust prompt; assume claude is ready (or near-ready) and
-        // proceed to paste. A small race here is fine — if the paste
-        // arrives before the input box is interactive, the heal loop
-        // will pick up the slack via gemma4.
-        break;
-    }
+    };
 
-    // Phase 2: paste the prompt as one message.
-    let prompt_input = wrap_bracketed_paste(&prompt);
-    let _ = state
-        .http
-        .post(&exec_url)
-        .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "input": prompt_input }))
-        .send()
-        .await;
+    let mut consecutive_gemma_failures: u8 = 0;
+    let mut last_persisted_status: Option<String> = None;
 
-    // Phase 3: verify claude is processing.
-    sleep(POST_PASTE_WAIT).await;
-    if check_agent_running(&state, &host, &session_id).await {
-        publish_dispatch_outcome(
-            &state,
-            &host.id,
-            &session_name_str,
-            &project_name,
-            task_id,
-            "success",
-            0,
-            "",
-        );
-        return;
-    }
+    for iteration in 1..=MAX_ITERATIONS {
+        // Brief settle before the first poll so the launch `claude\r`
+        // has a moment to render; subsequent ticks pace themselves
+        // via the end-of-loop sleep.
+        if iteration == 1 {
+            sleep(Duration::from_secs(1)).await;
+        }
 
-    tracing::warn!(
-        host = %host.id,
-        session = %session_name_str,
-        task = task_id,
-        "dispatch verification failed — entering gemma4 self-heal loop"
-    );
-
-    // Synthetic "intended command" description for gemma4. The model
-    // sees what we tried to accomplish (launch + paste) so it can
-    // reason about scrollback and propose recovery keystrokes.
-    let intended_command = format!(
-        "Launch `{role_command}` interactively in the pane, then paste this prompt as a single \
-         bracketed-paste message:\n---\n{prompt}\n---"
-    );
-
-    for attempt in 1..=MAX_HEAL_ATTEMPTS {
-        let scrollback = fetch_pane_scrollback(&state, &host, &session_id).await;
-        let recovery = match propose_recovery(&state, &intended_command, &scrollback).await {
-            Some(r) => r,
-            None => {
-                tracing::warn!(
-                    attempt,
-                    "gemma4 declined to propose a recovery action — giving up"
+        let pane = fetch_pane_scrollback(&state, &host, &session_id).await;
+        let decision = match nudge::next_step(
+            &state.http,
+            NudgeInput {
+                task_title: &prompt,
+                task_role_cmd: &role_command,
+                intended_prompt: &prompt,
+                statuses: &project_cfg.statuses,
+                session_output: &pane,
+                iteration,
+                max_iterations: MAX_ITERATIONS,
+            },
+        )
+        .await
+        {
+            Ok(d) => {
+                consecutive_gemma_failures = 0;
+                d
+            }
+            Err(e) => {
+                consecutive_gemma_failures += 1;
+                warn!(
+                    iteration,
+                    error = %e,
+                    consecutive_failures = consecutive_gemma_failures,
+                    "nudge loop: gemma4 call failed"
                 );
-                publish_dispatch_outcome(
-                    &state,
-                    &host.id,
-                    &session_name_str,
-                    &project_name,
-                    task_id,
-                    "unrecoverable",
-                    attempt,
-                    "gemma4 declined to propose recovery",
-                );
-                return;
+                if consecutive_gemma_failures >= MAX_GEMMA_FAILURES {
+                    park_task_with_reason(
+                        &dir,
+                        &project_name,
+                        task_id,
+                        "needs-human",
+                        &format!(
+                            "nudge loop: gemma4 unavailable after {consecutive_gemma_failures} attempts"
+                        ),
+                        Some(
+                            "Check that local ollama is reachable (OLLAMA_HOST) and that the \
+                             configured model is loaded."
+                                .into(),
+                        ),
+                    );
+                    publish_dispatch_outcome(
+                        &state,
+                        &host.id,
+                        &session_name_str,
+                        &project_name,
+                        task_id,
+                        "failed",
+                        iteration,
+                        "nudge: gemma unavailable",
+                    );
+                    return;
+                }
+                sleep(ITERATION_INTERVAL).await;
+                continue;
             }
         };
-        if recovery.input.is_empty() {
-            tracing::info!(attempt, reason = %recovery.reason, "gemma4 marked dispatch unrecoverable");
+
+        // Persist status change as soon as gemma reports it — the
+        // board polls every 5s and the operator should see the row
+        // move during the loop, not just at the end.
+        if last_persisted_status.as_deref() != Some(decision.status_name.as_str()) {
+            persist_task_state(&dir, &project_name, task_id, &decision);
+            last_persisted_status = Some(decision.status_name.clone());
+        }
+
+        if let Some(keys) = decision.keystrokes.as_deref() {
+            if !keys.is_empty() {
+                tracing::info!(
+                    iteration,
+                    status = %decision.status_name,
+                    reason = %decision.reason,
+                    bytes = keys.len(),
+                    "nudge loop: sending keystrokes"
+                );
+                let _ = state
+                    .http
+                    .post(&exec_url)
+                    .bearer_auth(&host.api_key)
+                    .json(&serde_json::json!({ "input": keys }))
+                    .send()
+                    .await;
+            }
+        }
+
+        if decision.done {
+            tracing::info!(
+                iteration,
+                status = %decision.status_name,
+                reason = %decision.reason,
+                "nudge loop: terminal — exiting"
+            );
+            let outcome = if decision.status_name == "needs-human" {
+                "needs-human"
+            } else {
+                "success"
+            };
             publish_dispatch_outcome(
                 &state,
                 &host.id,
                 &session_name_str,
                 &project_name,
                 task_id,
-                "unrecoverable",
-                attempt,
-                &recovery.reason,
+                outcome,
+                iteration,
+                &decision.reason,
             );
             return;
         }
-        tracing::info!(
-            attempt,
-            reason = %recovery.reason,
-            "gemma4 proposed recovery keystrokes; sending"
-        );
-        let _ = state
-            .http
-            .post(&exec_url)
-            .bearer_auth(&host.api_key)
-            .json(&serde_json::json!({ "input": recovery.input }))
-            .send()
-            .await;
-        sleep(POST_HEAL_WAIT).await;
-        if check_agent_running(&state, &host, &session_id).await {
-            tracing::info!(attempt, "self-heal succeeded");
-            publish_dispatch_outcome(
-                &state,
-                &host.id,
-                &session_name_str,
-                &project_name,
-                task_id,
-                "self-healed",
-                attempt,
-                &recovery.reason,
-            );
-            return;
-        }
+
+        sleep(ITERATION_INTERVAL).await;
     }
 
-    tracing::warn!(
-        host = %host.id,
-        session = %session_name_str,
-        "self-heal exhausted attempts; giving up"
+    // Iteration budget exhausted without `done=true`. Park with the
+    // last status gemma reported (most likely something that wasn't
+    // converging) and a fixed reason so the operator can act.
+    park_task_with_reason(
+        &dir,
+        &project_name,
+        task_id,
+        "needs-human",
+        &format!("nudge loop: budget of {MAX_ITERATIONS} iterations exhausted without progress"),
+        Some(
+            "Inspect the katulong session manually — gemma4 was nudging without converging.".into(),
+        ),
     );
     publish_dispatch_outcome(
         &state,
@@ -1276,29 +1352,215 @@ async fn verify_and_heal_dispatch(
         &project_name,
         task_id,
         "failed",
-        MAX_HEAL_ATTEMPTS,
-        "exhausted attempts",
+        MAX_ITERATIONS,
+        "nudge: budget exhausted",
     );
 }
 
-async fn check_agent_running(
+/// Persist a nudge decision's status/reason/human_action onto the
+/// task file. Logs and swallows errors — the dispatch outcome event
+/// is the authoritative signal, and a transient task-save failure
+/// shouldn't tear down the loop mid-flight.
+fn persist_task_state(
+    dir: &std::path::Path,
+    project_name: &str,
+    task_id: u64,
+    decision: &sipag_core::nudge::NudgeDecision,
+) {
+    let mut t = match Task::load(dir, project_name, task_id) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                project = %project_name,
+                task = task_id,
+                error = %e,
+                "nudge loop: task reload failed during status persist"
+            );
+            return;
+        }
+    };
+    t.status = TaskStatus::parse(&decision.status_name);
+    t.reason = if decision.reason.trim().is_empty() {
+        None
+    } else {
+        Some(decision.reason.clone())
+    };
+    t.human_action = decision.human_action.clone();
+    t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    if let Err(e) = t.save(dir, project_name) {
+        warn!(
+            project = %project_name,
+            task = task_id,
+            error = %e,
+            "nudge loop: task save failed during status persist"
+        );
+    }
+}
+
+/// Park a task at an arbitrary status with a fixed reason — used by
+/// the nudge loop's terminal failure paths (gemma unavailable, budget
+/// exhausted) where no `NudgeDecision` exists to copy from.
+fn park_task_with_reason(
+    dir: &std::path::Path,
+    project_name: &str,
+    task_id: u64,
+    status_name: &str,
+    reason: &str,
+    human_action: Option<String>,
+) {
+    let mut t = match Task::load(dir, project_name, task_id) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                project = %project_name,
+                task = task_id,
+                error = %e,
+                "nudge loop: task reload failed during park"
+            );
+            return;
+        }
+    };
+    t.status = TaskStatus::parse(status_name);
+    t.reason = Some(reason.to_string());
+    t.human_action = human_action;
+    t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    if let Err(e) = t.save(dir, project_name) {
+        warn!(
+            project = %project_name,
+            task = task_id,
+            error = %e,
+            "nudge loop: task save failed during park"
+        );
+    }
+}
+
+/// What the gate decided about a dispatch attempt.
+enum GateOutcome {
+    /// The session matches the project's dispatchable status — fire
+    /// the launch command.
+    Dispatch,
+    /// Gemma classified the session into some other column. The task
+    /// has already been parked there (status + reason + human_action
+    /// persisted) by the time this is returned; the caller just needs
+    /// to render a toast.
+    Parked {
+        status_name: String,
+        reason: Option<String>,
+    },
+}
+
+/// Run the dispatch gate for the web-UI path. On classify failure
+/// (gemma down, project missing `dispatchable = true`, parse problems
+/// the coercion couldn't recover) returns `Err((StatusCode, body))`
+/// so the caller can fail closed.
+///
+/// Side effect: when the chosen status isn't the dispatchable one,
+/// the task file is updated in place (status + reason + human_action
+/// + updated timestamp) before the function returns.
+async fn run_dispatch_gate(
     state: &AppState,
     host: &sipag_core::hosts::Host,
     session_id: &str,
-) -> bool {
-    let url = sipag_core::katulong::status_url(host.base_url(), session_id);
-    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return false,
+    project_name: &str,
+    task: &Task,
+) -> Result<GateOutcome, (StatusCode, String)> {
+    let dir = load_dir();
+    let project_cfg = match Project::load(&dir, project_name) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("load project: {e}"),
+            ))
+        }
     };
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return false,
+    let dispatchable_name = match project_cfg.dispatchable_status() {
+        Ok(s) => s.name.clone(),
+        Err(e) => return Err((StatusCode::CONFLICT, format!("{e}"))),
     };
-    body.get("agent")
-        .and_then(|a| a.get("running"))
-        .and_then(|r| r.as_bool())
-        .unwrap_or(false)
+
+    let role_command = sipag_core::board::Role::load(&dir, project_name, &task.role)
+        .map(|r| r.command)
+        .unwrap_or_else(|_| "claude".to_string());
+
+    // Same pane source `verify_and_heal_dispatch` uses for self-heal
+    // — last 80 lines via captureVisiblePane plain text. Empty string
+    // when katulong is unreachable; the gate handles that case (gemma
+    // will see no signal and route to needs-human).
+    let session_output = fetch_pane_scrollback(state, host, session_id).await;
+
+    let decision = match gate::classify(
+        &state.http,
+        GateInput {
+            task_title: &task.title,
+            task_role: &role_command,
+            statuses: &project_cfg.statuses,
+            session_output: &session_output,
+        },
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            warn!(
+                project = %project_name,
+                task = task.id,
+                error = %e,
+                "dispatch gate: classify call failed"
+            );
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "dispatch gate: gemma4 classify failed — aborting dispatch. {}",
+                    e
+                ),
+            ));
+        }
+    };
+
+    if decision.status_name == dispatchable_name {
+        return Ok(GateOutcome::Dispatch);
+    }
+
+    // Park the task at gemma's chosen status, persisting the reason +
+    // human_action so the board renders the blocker next to the row.
+    let mut t = match Task::load(&dir, project_name, task.id) {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                project = %project_name,
+                task = task.id,
+                error = %e,
+                "dispatch gate: parked task reload failed"
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reload task: {e}"),
+            ));
+        }
+    };
+    t.status = TaskStatus::parse(&decision.status_name);
+    t.reason = if decision.reason.trim().is_empty() {
+        None
+    } else {
+        Some(decision.reason.clone())
+    };
+    t.human_action = decision.human_action.clone();
+    t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    if let Err(e) = t.save(&dir, project_name) {
+        warn!(
+            project = %project_name,
+            task = task.id,
+            error = %e,
+            "dispatch gate: parked task save failed"
+        );
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("save task: {e}")));
+    }
+
+    Ok(GateOutcome::Parked {
+        status_name: decision.status_name,
+        reason: t.reason,
+    })
 }
 
 async fn fetch_pane_scrollback(
@@ -1319,86 +1581,6 @@ async fn fetch_pane_scrollback(
         .and_then(|d| d.as_str())
         .unwrap_or("")
         .to_string()
-}
-
-struct RecoveryProposal {
-    input: String,
-    reason: String,
-}
-
-/// Ask gemma4 for the next keystrokes to recover a stuck dispatch.
-/// Returns `None` only on transport / parse errors so the caller can
-/// distinguish "model declined" (Some with empty input) from "we
-/// couldn't even ask."
-async fn propose_recovery(
-    state: &AppState,
-    intended_command: &str,
-    scrollback: &str,
-) -> Option<RecoveryProposal> {
-    use sipag_core::llm::{chat, env_auth, env_host, env_model, ChatMessage, ChatOptions};
-
-    let system = "You are a self-healing dispatch agent for a remote interactive shell.\n\
-        Sipag tried to type a command into a tmux pane on a katulong host but the agent \
-        didn't launch. Your job: look at what's currently in the pane and propose the \
-        next keystrokes that will get the intended command running.\n\
-        \n\
-        The shell may be in any of these states: in a stuck multi-line continuation \
-        (PS2 prompt), inside another REPL, mid-output of a long-running command, \
-        showing a recoverable error from a previous attempt. You can send any keys, \
-        including newlines (\\n for Enter) and control characters (\\u0003 for Ctrl-C, \
-        \\u0004 for Ctrl-D, etc.). Be conservative: prefer small steps that observe \
-        before committing.\n\
-        \n\
-        Reply with a single JSON object on one line. No markdown, no commentary.\n\
-        Schema: {\"input\": \"<keys to send next>\", \"reason\": \"<one short phrase>\"}\n\
-        \n\
-        If the situation is unrecoverable (e.g., wrong host, missing dependency that \
-        you can't install from this shell), reply with input set to \"\" and a reason.";
-
-    let user =
-        format!("Intended command:\n{intended_command}\n\nRecent pane scrollback:\n{scrollback}",);
-
-    let opts = ChatOptions {
-        model: env_model(),
-        temperature: 0.2,
-        num_predict: Some(1024),
-        auth_bearer: env_auth(),
-    };
-    let messages = vec![ChatMessage::system(system), ChatMessage::user(user)];
-    let raw = match chat(&state.http, &env_host(), messages, opts).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("dispatch heal: gemma4 call failed: {e}");
-            return None;
-        }
-    };
-
-    // Same forgiving JSON extractor as categorize.rs uses — models
-    // sometimes wrap their JSON answer in prose despite instructions.
-    let start = raw.find('{')?;
-    let end = raw.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    let json_str = &raw[start..=end];
-    #[derive(serde::Deserialize)]
-    struct Reply {
-        #[serde(default)]
-        input: String,
-        #[serde(default)]
-        reason: String,
-    }
-    let parsed: Reply = match serde_json::from_str(json_str) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("dispatch heal: gemma4 reply not JSON ({e}): {raw}");
-            return None;
-        }
-    };
-    Some(RecoveryProposal {
-        input: parsed.input,
-        reason: parsed.reason,
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1434,28 +1616,6 @@ fn build_launch_cmd(role_command: &str) -> String {
     format!("{role_command}\r")
 }
 
-/// Wrap text in bracketed-paste markers + final Enter so claude's
-/// TUI receives multi-line content as a single message instead of
-/// submitting on the first internal newline.
-///
-/// The wrapped string rides through tmux `send-keys -H`, which
-/// chunks at 4096 bytes per command (katulong `lib/session.js`
-/// `SEND_KEYS_MAX_BYTES`, see katulong commit 1901018 — tmux's yacc
-/// parser overflows past ~9997 args). Long prompts whose paste
-/// markers straddle a chunk boundary are untested and may not
-/// behave as one paste.
-fn wrap_bracketed_paste(text: &str) -> String {
-    format!("\x1b[200~{text}\x1b[201~\r")
-}
-
-/// Detect claude's "Do you trust the files in this folder?" prompt
-/// in pane scrollback. This shows on the first invocation in a fresh
-/// directory; sipag auto-selects "yes" so dispatch isn't blocked by
-/// a one-time prompt the human can't see from the iPad.
-fn pane_shows_trust_prompt(pane: &str) -> bool {
-    pane.contains("trust the files in this folder") || pane.contains("Do you trust")
-}
-
 #[cfg(test)]
 mod dispatch_helpers_tests {
     use super::*;
@@ -1464,53 +1624,5 @@ mod dispatch_helpers_tests {
     fn launch_cmd_appends_cr() {
         assert_eq!(build_launch_cmd("claude"), "claude\r");
         assert_eq!(build_launch_cmd("claude --resume"), "claude --resume\r");
-    }
-
-    #[test]
-    fn bracketed_paste_wraps_with_markers_and_enter() {
-        let wrapped = wrap_bracketed_paste("hello");
-        assert_eq!(wrapped, "\x1b[200~hello\x1b[201~\r");
-    }
-
-    #[test]
-    fn bracketed_paste_preserves_multi_line_verbatim() {
-        // Multi-line content survives bracketed-paste-wrap unchanged.
-        // This is the point: claude's TUI groups the bytes between
-        // markers into one message, so embedded \n becomes part of
-        // the message instead of submitting after the first line.
-        let prompt = "## Context\n\nLine A\n\nLine B";
-        let wrapped = wrap_bracketed_paste(prompt);
-        assert!(wrapped.starts_with("\x1b[200~"));
-        assert!(wrapped.ends_with("\x1b[201~\r"));
-        let inner = &wrapped["\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
-        assert_eq!(inner, prompt);
-    }
-
-    #[test]
-    fn bracketed_paste_preserves_special_chars_verbatim() {
-        // The whole reason we abandoned shell-quoting: $, `, ', ",
-        // backslashes, and unicode all need to reach claude as-typed.
-        // Bracketed paste passes raw bytes through — no escaping at all.
-        let prompt =
-            "use $HOME and `whoami` and \"quotes\" and \u{2014} em-dash \u{2018}smart\u{2019}";
-        let wrapped = wrap_bracketed_paste(prompt);
-        let inner = &wrapped["\x1b[200~".len()..wrapped.len() - "\x1b[201~\r".len()];
-        assert_eq!(inner, prompt);
-    }
-
-    #[test]
-    fn trust_prompt_detected_from_real_text() {
-        let pane = "Welcome to Claude Code\n\n\
-                    Do you trust the files in this folder?\n\
-                    Claude Code may read files in this folder...\n\
-                    1. Yes, proceed\n2. No, exit";
-        assert!(pane_shows_trust_prompt(pane));
-    }
-
-    #[test]
-    fn trust_prompt_returns_false_for_normal_pane() {
-        assert!(!pane_shows_trust_prompt(""));
-        assert!(!pane_shows_trust_prompt("~ ❯ "));
-        assert!(!pane_shows_trust_prompt("claude is thinking..."));
     }
 }

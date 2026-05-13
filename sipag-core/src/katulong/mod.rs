@@ -8,6 +8,20 @@
 //! invalidated by a rename. Callers create-or-find a session by name
 //! once via [`KatulongClient::create_session`], capture the returned
 //! [`Session::id`], then pass that id to subsequent operations.
+//!
+//! ## Status (2026-05-13)
+//!
+//! This module is the one-shot HTTP path. It stays here for session
+//! lifecycle calls (`create_session`, `list_sessions`, `kill_session`)
+//! and for diagnostic reads. The dispatch path is migrating to a
+//! long-lived WebSocket attach via the [`protocol`] submodule and
+//! (forthcoming) `client` submodule — see
+//! `docs/dispatch-implementation-plan.md`. Where a docstring on a
+//! function here points at the new path, that's the canonical place
+//! to look once the migration lands.
+
+pub mod client;
+pub mod protocol;
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -149,6 +163,22 @@ impl KatulongClient {
         Self { url, api_key }
     }
 
+    /// Create a fresh session each dispatch with an opaque name, so
+    /// sipag never reuses a stale tile or fights katulong's
+    /// auto-summarizer over the title. The name carries a `sipag-d-`
+    /// prefix + random suffix; katulong's auto-summarizer overwrites
+    /// it with something content-derived once the agent has produced
+    /// enough output to summarize.
+    ///
+    /// Use this in dispatch flows. Use [`Self::create_session`] only
+    /// for the persistent role-tile use case (`sipag up`), where the
+    /// caller deliberately wants `{project}--{role}` to be findable
+    /// across runs.
+    pub fn create_dispatch_session(&self) -> Result<Session> {
+        let name = generate_dispatch_session_name();
+        self.create_session(&name)
+    }
+
     /// `POST /sessions` — create a session, or return the existing one
     /// with the same name. The katulong server returns 201 with
     /// `{name, id}` on create and 409 with `{error}` on conflict; on
@@ -217,7 +247,16 @@ impl KatulongClient {
         Ok(())
     }
 
-    /// `GET /sessions/by-id/{id}/status`.
+    /// `GET /sessions/by-id/{id}/status` — session-level metadata
+    /// (alive, has-child-processes, pane.cwd, agent kind).
+    ///
+    /// **Do NOT use `agent.running` as a "task is in flight"
+    /// signal.** It reports the Claude process *existing*, not
+    /// Claude *doing work* — an idle Claude TUI waiting on input
+    /// still has `agent.running = true`. We've been bitten by this
+    /// (see `docs/dispatch-design.md` §5.3 / "verify_and_heal" history).
+    /// For dispatch progress detection, the attach client's
+    /// rolling-buffer pattern matching is the right primitive.
     pub fn session_status(&self, id: &str) -> Result<SessionStatus> {
         let url = status_url(&self.url, id);
         let resp = curl_get(&url, &self.api_key)?;
@@ -230,6 +269,49 @@ impl KatulongClient {
         }
         serde_json::from_str(&resp.body)
             .with_context(|| format!("invalid status JSON for '{id}': {}", resp.body))
+    }
+
+    /// One-shot, synchronous pane read via
+    /// `GET /sessions/by-id/{id}/output?lines=N`. Returns the last
+    /// `n` lines of the visible pane as plain text (no escapes).
+    ///
+    /// For sustained interaction with a session — driving keystrokes,
+    /// observing output continuously, doing pattern-based waits —
+    /// **prefer the WebSocket attach client** at
+    /// `sipag_core::katulong::client::KatulongAttachClient::attach`
+    /// (forthcoming, see `docs/dispatch-implementation-plan.md` §5).
+    /// The attach maintains a rolling buffer for free; this call
+    /// costs a curl process spawn plus an HTTP round-trip on every
+    /// invocation.
+    ///
+    /// This sync helper remains the right tool for:
+    /// - diagnostic / one-shot reads (CLI inspection, gate
+    ///   pre-flight before there's a live attach);
+    /// - contexts that don't have a tokio runtime handy (the
+    ///   sipag CLI's sync entrypoints).
+    ///
+    /// Returns the `data` field from katulong's JSON response, or
+    /// an empty string when the field is missing (mirrors the
+    /// drop-on-error semantics of the legacy async sibling in
+    /// `sipag/src/serve/htmx.rs::fetch_pane_scrollback`, which the
+    /// attach client will replace).
+    pub fn session_output_lines(&self, id: &str, n: u32) -> Result<String> {
+        let url = output_lines_url(&self.url, id, n);
+        let resp = curl_get(&url, &self.api_key)?;
+        if !is_success(resp.status) {
+            anyhow::bail!(
+                "output for '{id}' returned HTTP {}: {}",
+                resp.status,
+                resp.body.trim()
+            );
+        }
+        let value: serde_json::Value = serde_json::from_str(&resp.body)
+            .with_context(|| format!("invalid output JSON for '{id}': {}", resp.body))?;
+        Ok(value
+            .get("data")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string())
     }
 
     /// `DELETE /sessions/by-id/{id}` — kill a session.
@@ -378,9 +460,43 @@ pub fn claude_respond_url(base: &str, uuid: &str) -> String {
 
 // ── Dispatch logic ──────────────────────────────────────────────────────────
 
-/// Session naming convention: `{project}--{role}`.
+/// Session naming convention for persistent role tiles (`sipag up`):
+/// `{project}--{role}`. Dispatch sessions use
+/// [`generate_dispatch_session_name`] instead so each fire gets a
+/// fresh tile and the auto-summarizer is free to rename it.
 pub fn session_name(project: &str, role: &str) -> String {
     format!("{project}--{role}")
+}
+
+/// Generate a unique session name for a dispatch.
+///
+/// Shape: `sipag-d-<12 lower-hex>`. The prefix marks it as
+/// sipag-originated and matches the ascii-alphanumeric + `_-` shape
+/// katulong's `SessionName.tryCreate` accepts. The suffix is 12 hex
+/// chars of process-time + a counter so concurrent dispatches in the
+/// same process don't collide.
+///
+/// The katulong auto-summarizer renames the session once it has
+/// enough content to title it sensibly, so this name is only ever
+/// visible briefly in the tile list. Sipag tracks the dispatch by
+/// the immutable session id (see `Task.dispatch_session_id`), not
+/// the name, so a rename can't break the back-pointer.
+pub fn generate_dispatch_session_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // Fold 64-bit nanos with the counter into one 48-bit token,
+    // hex-encoded as 12 chars. Collisions across hosts are
+    // astronomically unlikely; within one process the counter
+    // guarantees uniqueness even at sub-nanosecond dispatch rates.
+    let token = (nanos ^ (seq.wrapping_mul(0x9E3779B97F4A7C15))) & 0xFFFF_FFFF_FFFF;
+    format!("sipag-d-{token:012x}")
 }
 
 /// Generate the worktree path for a task within a project container.
@@ -435,6 +551,23 @@ mod tests {
     fn session_name_format() {
         assert_eq!(session_name("katulong", "dev"), "katulong--dev");
         assert_eq!(session_name("kubo", "test"), "kubo--test");
+    }
+
+    #[test]
+    fn generate_dispatch_session_name_is_unique_and_valid() {
+        // Two back-to-back calls must produce different names so a
+        // burst of dispatches doesn't collide on katulong, and each
+        // must match the session-id allow-list so katulong's
+        // SessionName.tryCreate accepts it.
+        let a = generate_dispatch_session_name();
+        let b = generate_dispatch_session_name();
+        assert_ne!(a, b, "consecutive dispatch names should not collide");
+        assert!(a.starts_with("sipag-d-"));
+        assert_eq!(a.len(), "sipag-d-".len() + 12);
+        // The same allow-list katulong uses for path-segment ids
+        // covers names too — confirm the generated shape is safe.
+        assert!(is_valid_session_id(&a));
+        assert!(is_valid_session_id(&b));
     }
 
     #[test]
@@ -730,6 +863,36 @@ mod tests {
         assert_eq!(st.id, "s_abc123");
         assert!(st.alive);
         assert!(st.has_child_processes);
+    }
+
+    #[test]
+    fn session_output_lines_extracts_data_field() {
+        // Mirrors the shape returned by GET /sessions/by-id/:id/output?lines=N.
+        // The gate reads only `data`; other fields (`seq`, `alive`) are ignored.
+        let payload = r#"{"data":"$ ls\nREADME.md\n$ ","seq":42,"alive":true}"#;
+        let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let data = value
+            .get("data")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(data, "$ ls\nREADME.md\n$ ");
+    }
+
+    #[test]
+    fn session_output_lines_missing_data_yields_empty() {
+        // Defensive: katulong sometimes returns `{ screen, seq }` (snapshot
+        // shape) when the ring buffer was evicted. The gate should see an
+        // empty string rather than crash — gemma will treat it as "no signal"
+        // which is the right conservative fallback.
+        let payload = r#"{"screen":"…","seq":99,"evicted":true}"#;
+        let value: serde_json::Value = serde_json::from_str(payload).unwrap();
+        let data = value
+            .get("data")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
+        assert_eq!(data, "");
     }
 
     #[test]

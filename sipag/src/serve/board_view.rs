@@ -187,8 +187,11 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
     let mut live = BTreeMap::new();
     for h in &state.hosts.hosts {
         let rows = fetch_sessions_full(state, h).await.unwrap_or_default();
-        let names: Vec<String> = rows.iter().map(|r| r.name.clone()).collect();
-        sessions.insert(h.id.clone(), names);
+        // Per-host id list, used by `task_running_on` to match the
+        // task's pinned `dispatch_session_id` against live sessions.
+        // Was a name list before opaque dispatch naming landed.
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        sessions.insert(h.id.clone(), ids);
         for r in rows {
             let key = (h.id.clone(), r.name.clone());
             live.insert(key, r.into_live_meta());
@@ -477,6 +480,11 @@ async fn fetch_sessions_full(state: &AppState, host: &Host) -> anyhow::Result<Ve
 /// Subset of katulong's `/sessions` row that the board cares about.
 #[derive(serde::Deserialize)]
 struct RemoteSession {
+    /// Katulong's immutable session id (nanoid-shaped). Required for
+    /// `task_running_on` to match a task's pinned
+    /// `dispatch_session_id` against the live session list.
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -555,14 +563,32 @@ fn is_idea(t: &Task) -> bool {
 
 fn task_running_on<'a>(
     task: &Task,
-    project_name: &str,
+    _project_name: &str,
     sessions: &'a BTreeMap<String, Vec<String>>,
 ) -> Option<&'a str> {
-    let needle = format!("{project_name}--{}", task.role);
-    sessions
-        .iter()
-        .find(|(_, names)| names.iter().any(|n| n == &needle))
-        .map(|(id, _)| id.as_str())
+    // Match by the dispatch session id sipag stamped on the task at
+    // dispatch time. The previous `{project}--{role}` name-match
+    // produced false positives (any session with that name shape, in
+    // any project state, lit up "running on") and couldn't survive
+    // katulong's auto-summarizer renaming the session. With opaque
+    // ids, the back-pointer is stable until the task is re-dispatched.
+    //
+    // `sessions` is a per-host map of session ids (legacy name kept
+    // for code-search parity even though it's now ids, not names).
+    let target_id = task.dispatch_session_id.as_deref()?;
+    let target_host = task.dispatch_host_id.as_deref();
+    sessions.iter().find_map(|(host_id, ids)| {
+        if let Some(want_host) = target_host {
+            if host_id != want_host {
+                return None;
+            }
+        }
+        if ids.iter().any(|i| i == target_id) {
+            Some(host_id.as_str())
+        } else {
+            None
+        }
+    })
 }
 
 fn stance_symbol(s: &str) -> &'static str {

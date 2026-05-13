@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sipag_core::{board, config::default_sipag_dir, feature, katulong, refine};
+use sipag_core::{board, config::default_sipag_dir, feature, gate, katulong, refine};
 use std::io::{BufRead, BufReader};
 use std::process::Command;
 
@@ -292,6 +292,19 @@ fn run_dispatch_task(
             format!("role '{role_name}' not found in project {project_name}. Create it at ~/.sipag/projects/{project_name}/roles/{role_name}.toml")
         })?;
 
+    // Load project — the gate needs its statuses (each with a free-form
+    // description) so gemma4 has a list of columns to pick from, and a
+    // `dispatchable` flag so we know which one means "fire."
+    let project_cfg = board::Project::load(&sipag_dir, &project_name)
+        .with_context(|| format!("failed to load project '{project_name}'"))?;
+    let dispatchable = project_cfg.dispatchable_status().with_context(|| {
+        format!(
+            "cannot dispatch from project '{project_name}' — its project.toml needs one status \
+             marked `dispatchable = true`"
+        )
+    })?;
+    let dispatchable_name = dispatchable.name.clone();
+
     // Connect to katulong.
     let client = katulong::KatulongClient::from_remote_json()
         .context("Cannot connect to katulong — is ~/.katulong/remote.json configured?")?;
@@ -303,14 +316,31 @@ fn run_dispatch_task(
     println!("Creating session {session_name}...");
     let session = client.create_session(&session_name)?;
 
-    // 2. If role uses worktrees, set one up for this task.
+    // 2. Gate — ask gemma4 to classify the session's current state
+    //    against the project's declared statuses. Programmatic
+    //    detection lost to the long tail of pane states (login banner,
+    //    permission prompt, mid-compaction, stuck-paste, etc.), so the
+    //    classifier is the dispatcher now. Fail closed: any error
+    //    from the classifier aborts dispatch.
+    println!("Classifying session via gemma4...");
+    let session_output = client
+        .session_output_lines(&session.id, 80)
+        .context("failed to fetch session output for gate classify")?;
+    let decision = gate_classify(&task, &role, &project_cfg, &session_output)?;
+
+    if decision.status_name != dispatchable_name {
+        park_task_at(&sipag_dir, &project_name, task_id, &decision, &session_name)?;
+        return Ok(());
+    }
+
+    // 3. If role uses worktrees, set one up for this task.
     if role.worktree {
         let wt_cmd = katulong::worktree_command(&project_name, task_id);
         println!("Creating worktree for task #{task_id}...");
         client.exec_session(&session.id, &wt_cmd)?;
     }
 
-    // 3. Exec the agent command.
+    // 4. Exec the agent command.
     let agent_cmd = katulong::agent_command(
         &project_name,
         task_id,
@@ -321,10 +351,12 @@ fn run_dispatch_task(
     println!("Launching agent for task #{task_id}: {}", task.title);
     client.exec_session(&session.id, &agent_cmd)?;
 
-    // 4. Move task to in-progress.
-    board::move_task(&sipag_dir, &project_name, task_id, "in-progress")?;
+    // 5. Move task to in-progress, clearing any prior reason /
+    //    human_action (e.g. from a previous parked dispatch that the
+    //    operator just unblocked).
+    advance_task_to_in_progress(&sipag_dir, &project_name, task_id)?;
 
-    // 5. Confirmation.
+    // 6. Confirmation.
     println!();
     println!("Dispatched task #{task_id} to session {session_name}");
     println!("  Project:  {project_name}");
@@ -339,6 +371,91 @@ fn run_dispatch_task(
     println!();
     println!("Monitor at: {} (session: {session_name})", client.url());
 
+    Ok(())
+}
+
+/// Run `gate::classify` inside a one-shot tokio runtime. The rest of
+/// the CLI is sync; only the LLM call (and therefore the gate) needs
+/// to be async. Building a current-thread runtime per dispatch is
+/// cheap relative to the model call itself and keeps the rest of the
+/// codepath synchronous.
+fn gate_classify(
+    task: &board::Task,
+    role: &board::Role,
+    project_cfg: &board::Project,
+    session_output: &str,
+) -> Result<gate::GateDecision> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for gate classify")?;
+    let http = reqwest::Client::new();
+    rt.block_on(async {
+        gate::classify(
+            &http,
+            gate::GateInput {
+                task_title: &task.title,
+                task_role: &role.command,
+                statuses: &project_cfg.statuses,
+                session_output,
+            },
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("gate classify failed: {e}"))
+    })
+}
+
+/// Park the task at the status gemma4 chose, persisting the reason
+/// and (when present) the human action. The operator sees this in
+/// the TUI / web UI and unblocks it (e.g., by `/login`-ing the
+/// stuck katulong tile) before re-dispatching.
+fn park_task_at(
+    sipag_dir: &std::path::Path,
+    project_name: &str,
+    task_id: u64,
+    decision: &gate::GateDecision,
+    session_name: &str,
+) -> Result<()> {
+    let mut task = board::Task::load(sipag_dir, project_name, task_id)?;
+    task.status = board::TaskStatus::parse(&decision.status_name);
+    task.reason = if decision.reason.trim().is_empty() {
+        None
+    } else {
+        Some(decision.reason.clone())
+    };
+    task.human_action = decision.human_action.clone();
+    task.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    task.save(sipag_dir, project_name)?;
+
+    println!();
+    println!(
+        "Task #{task_id} NOT dispatched — gemma4 classified session {session_name} as '{}'",
+        decision.status_name
+    );
+    if let Some(reason) = &task.reason {
+        println!("  Reason: {reason}");
+    }
+    if let Some(action) = &task.human_action {
+        println!("  Action: {action}");
+    }
+    Ok(())
+}
+
+/// Advance the task to `in-progress`, clearing any reason /
+/// human_action that may have been left over from an earlier parked
+/// dispatch. Using a single load/save keeps the three mutations
+/// atomic and avoids `move_task`'s status-only update path.
+fn advance_task_to_in_progress(
+    sipag_dir: &std::path::Path,
+    project_name: &str,
+    task_id: u64,
+) -> Result<()> {
+    let mut task = board::Task::load(sipag_dir, project_name, task_id)?;
+    task.status = board::TaskStatus::InProgress;
+    task.reason = None;
+    task.human_action = None;
+    task.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    task.save(sipag_dir, project_name)?;
     Ok(())
 }
 

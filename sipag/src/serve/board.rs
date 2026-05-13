@@ -144,6 +144,7 @@ async fn list_projects() -> Response {
         };
         let tasks = list_tasks(&dir, &name, None).unwrap_or_default();
         let krs = KeyResult::list(&dir, &name).unwrap_or_default();
+        let statuses = project.status_names();
         out.push(ProjectView {
             name: project.name,
             repo: project.repo,
@@ -151,7 +152,7 @@ async fn list_projects() -> Response {
                 ProjectKind::Objective => "objective".into(),
                 ProjectKind::Standing => "standing".into(),
             },
-            statuses: project.statuses,
+            statuses,
             key_results: krs.into_iter().map(KrView::from).collect(),
             tasks: tasks.into_iter().map(TaskView::from).collect(),
         });
@@ -181,18 +182,21 @@ async fn create_project_handler(Json(body): Json<CreateProjectBody>) -> Response
         return (StatusCode::BAD_REQUEST, "name is required").into_response();
     }
     match create_project_with_kind(&dir, &body.name, &body.repo, kind, None) {
-        Ok(p) => Json(ProjectView {
-            name: p.name,
-            repo: p.repo,
-            kind: match p.kind {
-                ProjectKind::Objective => "objective".into(),
-                ProjectKind::Standing => "standing".into(),
-            },
-            statuses: p.statuses,
-            key_results: vec![],
-            tasks: vec![],
-        })
-        .into_response(),
+        Ok(p) => {
+            let statuses = p.status_names();
+            Json(ProjectView {
+                name: p.name,
+                repo: p.repo,
+                kind: match p.kind {
+                    ProjectKind::Objective => "objective".into(),
+                    ProjectKind::Standing => "standing".into(),
+                },
+                statuses,
+                key_results: vec![],
+                tasks: vec![],
+            })
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
     }
 }

@@ -66,6 +66,31 @@ pub struct Task {
     /// Empty means "loose" — not laddered to any KR.
     #[serde(default)]
     pub key_results: Vec<u64>,
+    /// Short phrase from the dispatch gate explaining why the task is
+    /// in its current status. Set by `gate::classify` when it parks a
+    /// task at a non-dispatchable column (login required, permission
+    /// prompt, etc.). Cleared when the task moves back to a clean
+    /// dispatchable state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// What a human needs to do to unblock the task. Mirrors
+    /// `gate::GateDecision::human_action`. Rendered next to the task
+    /// in the TUI / web UI when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_action: Option<String>,
+    /// Katulong session id this task was dispatched into, set when
+    /// `dispatch_task_handler` calls `create_dispatch_session`. The
+    /// "running on" badge in the TUI / board view matches against
+    /// this id rather than the legacy `{project}--{role}` name shape
+    /// — sessions are no longer named by sipag, so name-matching
+    /// would always miss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_session_id: Option<String>,
+    /// The host id (from `~/.sipag/hosts.toml`) that owns the
+    /// dispatch session. Paired with `dispatch_session_id`; without
+    /// it the running-on lookup would have to scan every host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_host_id: Option<String>,
     pub created: String,
     pub updated: String,
 }
@@ -186,6 +211,10 @@ mod tests {
             role: "dev".to_string(),
             labels: vec!["bug".to_string()],
             key_results: vec![],
+            reason: None,
+            human_action: None,
+            dispatch_session_id: None,
+            dispatch_host_id: None,
             created: "2026-04-01T12:00:00Z".to_string(),
             updated: "2026-04-01T12:00:00Z".to_string(),
         };
@@ -197,6 +226,65 @@ mod tests {
         assert_eq!(loaded.status, TaskStatus::Todo);
         assert_eq!(loaded.role, "dev");
         assert_eq!(loaded.labels, vec!["bug"]);
+        assert!(loaded.reason.is_none());
+        assert!(loaded.human_action.is_none());
+    }
+
+    #[test]
+    fn task_round_trip_with_reason_and_human_action() {
+        // Gate fields persist through save/load and survive when set.
+        let dir = TempDir::new().unwrap();
+        setup_project(dir.path());
+
+        let task = Task {
+            id: 2,
+            title: "Stuck dispatch".to_string(),
+            status: TaskStatus::Custom("needs-human".to_string()),
+            role: "dev".to_string(),
+            labels: vec![],
+            key_results: vec![],
+            reason: Some("session shows /login banner".to_string()),
+            human_action: Some("Run /login in the katulong tile".to_string()),
+            dispatch_session_id: Some("ses_abc123".to_string()),
+            dispatch_host_id: Some("og".to_string()),
+            created: "2026-05-11T12:00:00Z".to_string(),
+            updated: "2026-05-11T12:00:00Z".to_string(),
+        };
+        task.save(dir.path(), "test").unwrap();
+
+        let loaded = Task::load(dir.path(), "test", 2).unwrap();
+        assert_eq!(
+            loaded.reason.as_deref(),
+            Some("session shows /login banner")
+        );
+        assert_eq!(
+            loaded.human_action.as_deref(),
+            Some("Run /login in the katulong tile")
+        );
+        assert_eq!(loaded.dispatch_session_id.as_deref(), Some("ses_abc123"));
+        assert_eq!(loaded.dispatch_host_id.as_deref(), Some("og"));
+    }
+
+    #[test]
+    fn task_loads_legacy_toml_without_gate_fields() {
+        // Tasks written before the gate landed have no `reason` or
+        // `human_action` keys. Must still load with those fields
+        // defaulting to None.
+        let dir = TempDir::new().unwrap();
+        setup_project(dir.path());
+        let tasks_dir = dir.path().join("projects").join("test").join("tasks");
+        std::fs::write(
+            tasks_dir.join("003.toml"),
+            "id = 3\ntitle = \"legacy\"\nstatus = \"todo\"\nrole = \"dev\"\n\
+             labels = []\nkey_results = []\n\
+             created = \"2026-01-01T00:00:00Z\"\nupdated = \"2026-01-01T00:00:00Z\"\n",
+        )
+        .unwrap();
+
+        let loaded = Task::load(dir.path(), "test", 3).unwrap();
+        assert_eq!(loaded.title, "legacy");
+        assert!(loaded.reason.is_none());
+        assert!(loaded.human_action.is_none());
     }
 
     #[test]
@@ -226,6 +314,10 @@ mod tests {
             role: "dev".to_string(),
             labels: vec![],
             key_results: vec![],
+            reason: None,
+            human_action: None,
+            dispatch_session_id: None,
+            dispatch_host_id: None,
             created: "2026-01-01T00:00:00Z".to_string(),
             updated: "2026-01-01T00:00:00Z".to_string(),
         };
