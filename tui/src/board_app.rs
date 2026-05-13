@@ -104,7 +104,7 @@ impl BoardApp {
 
         // Load project config for statuses.
         match board::load_project(&self.sipag_dir, &project_name) {
-            Ok(proj) => self.statuses = proj.statuses,
+            Ok(proj) => self.statuses = proj.status_names(),
             Err(_) => {
                 self.statuses = vec![
                     "backlog".to_string(),
@@ -516,7 +516,10 @@ mod tests {
         let dir = setup_dir();
         let app = BoardApp::with_dir(dir.path().to_path_buf()).unwrap();
         assert_eq!(app.project_names, vec!["testproj"]);
-        assert_eq!(app.statuses.len(), 5);
+        // Default project columns: backlog, todo, in-progress, needs-human,
+        // review, done (six). `needs-human` was added when the dispatch
+        // gate landed so gemma4 has a column to park blocked tasks in.
+        assert_eq!(app.statuses.len(), 6);
         assert_eq!(app.total_tasks(), 0);
     }
 

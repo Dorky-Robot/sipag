@@ -23,7 +23,7 @@ mod task;
 pub use key_result::{KeyResult, KrStance};
 pub use objective::{KrRef, Objective};
 pub use observation::{Observation, MISC_PROJECT};
-pub use project::{Project, ProjectKind};
+pub use project::{Project, ProjectKind, Status};
 pub use role::Role;
 pub use task::{Task, TaskStatus};
 
@@ -121,7 +121,7 @@ pub fn add_task(
 
     // Default status is "todo" (or first non-backlog status).
     let default_status = if proj.statuses.len() > 1 {
-        TaskStatus::parse(&proj.statuses[1])
+        TaskStatus::parse(&proj.statuses[1].name)
     } else {
         TaskStatus::Todo
     };
@@ -133,6 +133,10 @@ pub fn add_task(
         role: role.unwrap_or("dev").to_string(),
         labels: labels.to_vec(),
         key_results: Vec::new(),
+        reason: None,
+        human_action: None,
+        dispatch_session_id: None,
+        dispatch_host_id: None,
         created: now.clone(),
         updated: now,
     };
@@ -161,6 +165,13 @@ pub fn create_project(
 }
 
 /// Create a new project with an explicit kind (objective vs standing).
+///
+/// When `statuses` is `None`, the project gets the descriptive default
+/// columns (including `needs-human` and a `dispatchable = true` flag on
+/// `todo`) so the dispatch gate works out of the box. When `statuses`
+/// is `Some`, the names load as bare entries with no description and
+/// no dispatchable flag — the operator must edit `project.toml` to
+/// mark one of them dispatchable before `sipag dispatch` will fire.
 pub fn create_project_with_kind(
     sipag_dir: &Path,
     name: &str,
@@ -168,19 +179,15 @@ pub fn create_project_with_kind(
     kind: ProjectKind,
     statuses: Option<Vec<String>>,
 ) -> Result<Project> {
+    let project_statuses = match statuses {
+        Some(names) => names.into_iter().map(Status::name_only).collect(),
+        None => project::default_statuses(),
+    };
     let project = Project {
         name: name.to_string(),
         repo: repo.to_string(),
         kind,
-        statuses: statuses.unwrap_or_else(|| {
-            vec![
-                "backlog".to_string(),
-                "todo".to_string(),
-                "in-progress".to_string(),
-                "review".to_string(),
-                "done".to_string(),
-            ]
-        }),
+        statuses: project_statuses,
         serves: Vec::new(),
     };
     project.save(sipag_dir)?;
@@ -341,6 +348,22 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let custom = vec!["open".to_string(), "closed".to_string()];
         let proj = create_project(dir.path(), "custom", "a/b", Some(custom.clone())).unwrap();
-        assert_eq!(proj.statuses, custom);
+        // Custom names load as bare Status entries — no description,
+        // no dispatchable flag. The operator must mark one dispatchable
+        // in project.toml before the gate will fire.
+        assert_eq!(proj.status_names(), custom);
+        assert!(proj.statuses.iter().all(|s| !s.dispatchable));
+        assert!(proj.dispatchable_status().is_err());
+    }
+
+    #[test]
+    fn create_project_default_statuses_have_dispatchable_todo() {
+        // `None` → use the descriptive defaults, which mark `todo`
+        // dispatchable so a fresh project works with the gate out of
+        // the box.
+        let dir = TempDir::new().unwrap();
+        let proj = create_project(dir.path(), "fresh", "a/b", None).unwrap();
+        assert_eq!(proj.dispatchable_status().unwrap().name, "todo");
+        assert!(proj.statuses.iter().any(|s| s.name == "needs-human"));
     }
 }
