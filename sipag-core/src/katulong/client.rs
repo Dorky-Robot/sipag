@@ -104,7 +104,25 @@ pub enum WaitFrom {
     /// Match only against bytes that arrive after this call. Good
     /// when re-dispatching: an old "esc to interrupt" string from
     /// a previous run shouldn't satisfy a new wait.
+    ///
+    /// Race note: the lower bound is captured at `wait_for`
+    /// registration time, not at the moment the caller last sent
+    /// input. If the caller needs the lower bound to predate a
+    /// specific keystroke send (e.g., "wait for whatever appears
+    /// after `claude\r`"), use `FromOffset` with a pre-send
+    /// snapshot from `stripped_offset()`.
     FromNow,
+    /// Match only against bytes at or after the given offset into
+    /// the ANSI-stripped rolling buffer. Pair with
+    /// `KatulongAttach::stripped_offset()` taken *before* the
+    /// triggering input to close the FromNow snapshot race.
+    ///
+    /// If the buffer is evicted past the supplied offset between
+    /// the snapshot and the `wait_for` registration, the lower
+    /// bound silently clamps to the current length — same effect
+    /// as `FromNow`. Under the default 1 MiB soft cap, evicting
+    /// past a microsecond-old snapshot is not a realistic concern.
+    FromOffset(usize),
 }
 
 /// Named keystrokes for `KatulongAttach::press`.
@@ -251,7 +269,7 @@ impl KatulongAttachClient {
 
         Ok(KatulongAttach {
             session_name: session,
-            writer_tx,
+            writer_tx: Some(writer_tx),
             state,
             _writer_handle: Some(writer_handle),
             _reader_handle: Some(reader_handle),
@@ -340,10 +358,12 @@ async fn run_handshake(
 #[derive(Debug)]
 pub struct KatulongAttach {
     session_name: String,
-    writer_tx: mpsc::Sender<Outbound>,
+    // `Option` so `close()` and `Drop` can both take ownership of
+    // the sender without conflicting. None after either runs.
+    writer_tx: Option<mpsc::Sender<Outbound>>,
     state: Arc<Mutex<AttachState>>,
     // Held so the tasks aren't dropped while the attach is alive.
-    // Aborted on `close()`.
+    // Aborted on `close()` or `Drop`.
     _writer_handle: Option<JoinHandle<()>>,
     _reader_handle: Option<JoinHandle<()>>,
 }
@@ -361,6 +381,8 @@ impl KatulongAttach {
     pub async fn input(&self, bytes: impl Into<String>) -> AttachResult<()> {
         let data = bytes.into();
         self.writer_tx
+            .as_ref()
+            .ok_or(AttachError::Closed)?
             .send(Outbound::Input {
                 data,
                 session: Some(self.session_name.clone()),
@@ -382,11 +404,22 @@ impl KatulongAttach {
         self.input(key.bytes().to_string()).await
     }
 
+    /// Current length of the ANSI-stripped rolling buffer. Snapshot
+    /// this *before* sending an input that you want to wait on, then
+    /// pass it as `WaitFrom::FromOffset(_)` to close the snapshot
+    /// race in `FromNow`.
+    pub async fn stripped_offset(&self) -> usize {
+        let st = self.state.lock().await;
+        st.stripped_view().len()
+    }
+
     /// Inform katulong of new PTY dimensions. Sipag isn't rendering
     /// anything, but TUI apps reflow based on PTY size, so it's
     /// worth setting a reasonable default after attach.
     pub async fn resize(&self, cols: u16, rows: u16) -> AttachResult<()> {
         self.writer_tx
+            .as_ref()
+            .ok_or(AttachError::Closed)?
             .send(Outbound::Resize {
                 cols,
                 rows,
@@ -422,6 +455,10 @@ impl KatulongAttach {
             let lower_bound = match since {
                 WaitFrom::FromAttach => 0,
                 WaitFrom::FromNow => stripped.len(),
+                // Clamp to current length: if `offset` exceeds it,
+                // the buffer was evicted past our snapshot — best we
+                // can do is wait for new content.
+                WaitFrom::FromOffset(offset) => offset.min(stripped.len()),
             };
             if let Some(m) = match_at(&stripped, pattern, lower_bound) {
                 return Ok(m);
@@ -467,10 +504,28 @@ impl KatulongAttach {
     /// Close the attach. Drops the writer channel (writer task
     /// exits cleanly) and aborts the reader task.
     pub async fn close(mut self) {
-        // Dropping writer_tx signals the writer task to exit.
-        drop(self.writer_tx);
+        // Taking the Sender (and letting it drop here) is what
+        // signals the writer task to exit.
+        let _ = self.writer_tx.take();
         if let Some(h) = self._writer_handle.take() {
             let _ = h.await;
+        }
+        if let Some(h) = self._reader_handle.take() {
+            h.abort();
+        }
+    }
+}
+
+impl Drop for KatulongAttach {
+    /// Safety-net for callers that don't reach `close().await` — a
+    /// panic in a dispatch task, a runtime shutdown, an explicit
+    /// abort. Aborts both background tasks rather than letting them
+    /// outlive the attach and leak the WS read half. `close().await`
+    /// is still the preferred path: it lets the writer task drain
+    /// gracefully via the dropped `writer_tx`.
+    fn drop(&mut self) {
+        if let Some(h) = self._writer_handle.take() {
+            h.abort();
         }
         if let Some(h) = self._reader_handle.take() {
             h.abort();
@@ -1858,7 +1913,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel(8);
         KatulongAttach {
             session_name: "test".into(),
-            writer_tx: tx,
+            writer_tx: Some(tx),
             state,
             _writer_handle: None,
             _reader_handle: None,
@@ -1918,6 +1973,94 @@ mod tests {
             .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_secs(1)))
             .await;
         assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn from_offset_skips_pre_snapshot_content_and_matches_post() {
+        // Pins the snapshot-before-input pattern used by the v2
+        // dispatch driver: seed the buffer with `"hello"`, take a
+        // stripped_offset snapshot, then append more bytes that
+        // *also* contain `"hello"`. FromOffset(snapshot) must skip
+        // the pre-snapshot `"hello"` and resolve on the new one.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.append_bytes(b"hello before snapshot\n");
+        }
+        let snapshot = attach.stripped_offset().await;
+        assert!(snapshot > 0, "snapshot should be past the seeded content");
+
+        // Register the wait, then append matching content.
+        let attach_arc = std::sync::Arc::new(attach);
+        let waiter = {
+            let a = std::sync::Arc::clone(&attach_arc);
+            let re = Regex::new(r"hello").unwrap();
+            tokio::spawn(async move {
+                a.wait_for(
+                    &re,
+                    WaitFrom::FromOffset(snapshot),
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            })
+        };
+        // Give the spawned task a moment to acquire the lock and
+        // register its pending wait before we append.
+        tokio::task::yield_now().await;
+        {
+            let mut st = attach_arc.state.lock().await;
+            st.append_bytes(b"hello after snapshot");
+        }
+        let m = waiter.await.unwrap().unwrap();
+        assert_eq!(m.matched_text, "hello");
+        assert!(
+            m.start >= snapshot,
+            "match must be in the post-snapshot region: start={} snapshot={}",
+            m.start,
+            snapshot
+        );
+    }
+
+    #[tokio::test]
+    async fn from_offset_clamps_when_buffer_evicted_past_snapshot() {
+        // If the buffer shrinks below the snapshot (replace_buffer,
+        // or — in production — eviction), FromOffset(N) must clamp
+        // to current length rather than reject. Documented behavior
+        // in `WaitFrom::FromOffset` rustdoc.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.append_bytes(b"longer pre-existing buffer content");
+        }
+        let stale_offset = attach.stripped_offset().await + 10_000;
+
+        // Replace the buffer with shorter content — pending offsets
+        // become "in the future" from FromOffset's perspective.
+        {
+            let mut st = attach.state.lock().await;
+            st.replace_buffer(b"short".to_vec());
+        }
+        let re = Regex::new(r"target").unwrap();
+
+        let attach_arc = std::sync::Arc::new(attach);
+        let waiter = {
+            let a = std::sync::Arc::clone(&attach_arc);
+            tokio::spawn(async move {
+                a.wait_for(
+                    &re,
+                    WaitFrom::FromOffset(stale_offset),
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        {
+            let mut st = attach_arc.state.lock().await;
+            st.append_bytes(b" target appears");
+        }
+        let m = waiter.await.unwrap().unwrap();
+        assert_eq!(m.matched_text, "target");
     }
 
     // ── writer-task transport propagation ───────────────────

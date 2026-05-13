@@ -90,6 +90,18 @@ details live at `~/.katulong/remote.json`:
 `sipag-core/src/katulong.rs` is the only place that knows the wire format —
 keep API calls funneled through it.
 
+## Env vars
+
+- `SIPAG_DIR` — overrides `~/.sipag` for board state.
+- `SIPAG_DEV=1` — enables tower-livereload + filesystem watcher in `sipag
+  serve`.
+- `SIPAG_DISPATCH_V2=1` — routes `sipag serve` dispatches through the new
+  `KatulongAttachClient` (WS attach + explicit `wait_for` handshake) instead
+  of the legacy nudge keystroke loop. Truthy = any value not in `{empty, 0,
+  false, no, off}` (case-insensitive). Flag defaults off; legacy path
+  remains the fallback until v2 bakes in production
+  (`docs/dispatch-implementation-plan.md` §11 step 7).
+
 ## Conventions
 
 ### Rust code
