@@ -690,11 +690,22 @@ async fn dispatch_task_handler(
         }
     }
 
-    // Spawn a background task that waits for claude's TUI to be
-    // ready, auto-approves the one-time trust prompt if seen, pastes
-    // the task prompt as one message, then verifies + heals via
-    // gemma4. The HTTP response goes back to the iPad immediately;
-    // outcome surfaces via `dispatch.outcome` broker events.
+    // LEGACY background task — gemma4 keystroke-driving nudge loop
+    // that paste/submit/heals the prompt into the Claude TUI. This
+    // is the path being replaced in `docs/dispatch-implementation-plan.md`
+    // §11 step 7 by the long-lived attach client
+    // (`sipag_core::katulong::client`). Until that wires in, the
+    // nudge loop here is the active driver; afterwards it shrinks
+    // to a 30-60s observer per design-doc §7. The HTTP response
+    // returns to the iPad immediately; outcome surfaces via
+    // `dispatch.outcome` broker events.
+    //
+    // Known issue (documented, deferred): concurrent dispatches of
+    // the same task ID race here — each call creates its own
+    // katulong session via `create_or_find_session`, persists its
+    // own `dispatch_session_id` last-writer-wins, and spawns its
+    // own background task. Worth a per-task in-flight set, but the
+    // race goes away when this code is replaced.
     let sid = session_id.clone();
     let state_bg = state.clone();
     let host_bg = host.clone();

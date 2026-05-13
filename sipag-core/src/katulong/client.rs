@@ -53,8 +53,9 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
 use super::protocol::{Inbound, Outbound};
 use super::RemoteConfig;
@@ -71,6 +72,14 @@ pub enum AttachError {
     Connect(String),
     #[error("websocket protocol error: {0}")]
     Wire(String),
+    /// Transport-layer failure: the WS stream errored or closed
+    /// unexpectedly. Distinct from `Server`, which is a katulong
+    /// application-level error message delivered over a healthy
+    /// transport.
+    #[error("websocket transport error: {0}")]
+    Transport(String),
+    /// Application-level error reported by katulong via
+    /// `{type:"error", message}`.
     #[error("katulong server error: {0}")]
     Server(String),
     #[error("session ended with exit code {0}")]
@@ -99,7 +108,7 @@ pub enum WaitFrom {
 }
 
 /// Named keystrokes for `KatulongAttach::press`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum KeyName {
     Enter,
     Escape,
@@ -164,7 +173,7 @@ impl KatulongAttachClient {
     /// Open a fresh attach for `session_id` (by name or id; both
     /// flow through the same `{type:"attach", session}` message).
     /// Blocks until the initial `attached` + `seq-init` handshake
-    /// arrives, or fails with `Timeout` after 10s.
+    /// arrives, or fails with `Timeout` after `HANDSHAKE_TIMEOUT`.
     pub async fn attach(
         &self,
         session_id: impl Into<String>,
@@ -186,8 +195,17 @@ impl KatulongAttachClient {
                 .map_err(|e| AttachError::InvalidUrl(format!("invalid auth header: {e}")))?,
         );
 
-        // Open WS.
-        let (ws, _http_resp) = connect_async(req)
+        // Open WS with explicit message-size limits. Bounds the
+        // transient allocation when katulong (or anything posing as
+        // katulong via a compromised tunnel) sends an outsized
+        // frame. Aligned with the rolling buffer's soft cap so we
+        // don't accept frames we couldn't usefully hold anyway.
+        let cfg = WebSocketConfig {
+            max_message_size: Some(MAX_MESSAGE_BYTES),
+            max_frame_size: Some(MAX_MESSAGE_BYTES),
+            ..Default::default()
+        };
+        let (ws, _http_resp) = connect_async_with_config(req, Some(cfg), false)
             .await
             .map_err(|e| AttachError::Connect(e.to_string()))?;
         let (mut writer, mut reader) = ws.split();
@@ -211,22 +229,19 @@ impl KatulongAttachClient {
         // The follow-up `data-available` is fine to consume here or
         // let the reader task handle it later — we exit the
         // handshake as soon as both required messages have arrived.
-        let handshake_result = timeout(
-            Duration::from_secs(10),
-            run_handshake(&mut reader, &session),
-        )
-        .await;
+        let handshake_result =
+            timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut reader, &session)).await;
         let (initial_buffer, initial_seq) = match handshake_result {
             Ok(Ok(pair)) => pair,
             Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(AttachError::Timeout(Duration::from_secs(10))),
+            Err(_) => return Err(AttachError::Timeout(HANDSHAKE_TIMEOUT)),
         };
 
         // Set up the shared state and spawn tasks.
         let state = Arc::new(Mutex::new(AttachState::new(initial_buffer, initial_seq)));
-        let (writer_tx, writer_rx) = mpsc::channel::<Outbound>(64);
+        let (writer_tx, writer_rx) = mpsc::channel::<Outbound>(OUTBOUND_CHANNEL_BOUND);
 
-        let writer_handle = tokio::spawn(writer_task(writer, writer_rx));
+        let writer_handle = tokio::spawn(writer_task(writer, writer_rx, state.clone()));
         let reader_handle = tokio::spawn(reader_task(
             reader,
             state.clone(),
@@ -282,8 +297,9 @@ async fn run_handshake(
             }
             _ => continue,
         };
-        let msg: Inbound = serde_json::from_str(&text)
-            .map_err(|e| AttachError::Wire(format!("handshake parse: {e}: {text}")))?;
+        let msg: Inbound = serde_json::from_str(&text).map_err(|e| {
+            AttachError::Wire(format!("handshake parse: {e}: {}", truncate_for_log(&text)))
+        })?;
         match msg {
             Inbound::Attached { session, data } if session == expected_session => {
                 buffer = Some(data);
@@ -311,9 +327,17 @@ async fn run_handshake(
 
 // ── attach handle ───────────────────────────────────────────────
 
-/// One open attach to a katulong session. All methods are `&self`
-/// — the handle is `Clone` (cheap, just two `Arc`s) so multiple
-/// driver tasks can share it.
+/// One open attach to a katulong session. Owned by exactly one
+/// caller; `close()` consumes it. All other methods take `&self`
+/// and share the underlying `Arc<Mutex<_>>`-backed state with the
+/// reader and writer tasks.
+///
+/// `KatulongAttach` is intentionally not `Clone` because `close()`
+/// needs to consume by value to await the writer task and abort
+/// the reader. Callers that want to share access across multiple
+/// driver tasks should wrap it in their own `Arc` and arrange for
+/// exactly one of those owners to call `close()`.
+#[derive(Debug)]
 pub struct KatulongAttach {
     session_name: String,
     writer_tx: mpsc::Sender<Outbound>,
@@ -350,8 +374,7 @@ impl KatulongAttach {
     /// separate message, which is the whole point of fixing the
     /// original bug.
     pub async fn paste(&self, body: &str) -> AttachResult<()> {
-        let wrapped = format!("\u{001b}[200~{body}\u{001b}[201~");
-        self.input(wrapped).await
+        self.input(wrap_paste(body)).await
     }
 
     /// Send a named keystroke as its byte representation.
@@ -455,12 +478,56 @@ impl KatulongAttach {
     }
 }
 
-// ── internal state ──────────────────────────────────────────────
+// ── tunable constants ───────────────────────────────────────────
 
 /// Soft cap on the rolling buffer. When exceeded, we drop bytes
 /// from the front (oldest). Pending `wait_for` lower-bounds shift
-/// accordingly.
+/// accordingly. Aligned with katulong's per-client
+/// `WS_BACKPRESSURE_BYTES = 1 MiB` so we never carry less history
+/// than katulong was willing to buffer for us.
+///
+/// Not configurable yet — see `docs/dispatch-implementation-plan.md`
+/// §5.3 for the design rationale.
 const BUFFER_SOFT_CAP: usize = 1_048_576; // 1 MiB
+
+/// Hard cap per inbound WebSocket message, enforced by the
+/// transport itself via `WebSocketConfig::max_message_size`. Caps
+/// katulong-supplied data BEFORE the rolling-buffer eviction can
+/// run, so a malicious or compromised peer can't blow up sipag's
+/// memory by sending a 60 MB `pull-snapshot`. Generous enough for
+/// typical pane snapshots (~tens of KiB); small enough to refuse
+/// pathological payloads.
+const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+
+/// How long to wait for the initial `attached` + `seq-init`
+/// handshake to complete. Browser tile handshakes empirically
+/// finish in 50-200ms; 10s is "we should have noticed by now."
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on the outbound message channel. Sized for: paste body +
+/// submit + a couple of pulls + a heartbeat in flight at once. Drop
+/// policy when full varies by call site (`try_send` for gap-fill
+/// pulls where the next nudge will retry; awaiting `send` for
+/// `DataAvailable`-driven pulls where the server won't necessarily
+/// re-nudge).
+const OUTBOUND_CHANNEL_BOUND: usize = 64;
+
+/// Truncate untrusted server payloads to this many bytes before
+/// they appear in error messages or tracing logs. Prevents a
+/// chatty/malicious peer from filling logs or bloating
+/// error-chain `Display` output.
+const MAX_LOG_PAYLOAD_LEN: usize = 256;
+
+/// Recommended terminal width for new attaches. Matches the
+/// browser tile's default so TUIs reflow consistently for both
+/// human and programmatic clients.
+pub const DEFAULT_ATTACH_COLS: u16 = 120;
+
+/// Recommended terminal height for new attaches. See
+/// `DEFAULT_ATTACH_COLS`.
+pub const DEFAULT_ATTACH_ROWS: u16 = 40;
+
+// ── internal state ──────────────────────────────────────────────
 
 #[derive(Debug)]
 struct AttachState {
@@ -479,11 +546,22 @@ struct AttachState {
     pending_waits: Vec<PendingWait>,
 }
 
+/// Why the attach went terminal. Tracked so pending `wait_for`
+/// futures can resolve with the right `AttachError` variant.
+///
+/// Notably absent: a `Server` variant for `Inbound::Error`. The
+/// protocol uses `error` messages for non-fatal per-request
+/// rejections (e.g., a malformed `Pull`); we log and continue
+/// rather than collapsing the attach. If a future need emerges to
+/// promote certain server errors to terminal, add the variant and
+/// the corresponding `AttachError::Server` mapping.
 #[derive(Debug, Clone)]
 enum TerminalReason {
     Exit(i32),
     SessionRemoved,
-    Server(String),
+    /// Transport-layer failure (WS read/write error, dropped
+    /// connection mid-stream).
+    Transport(String),
     Closed,
 }
 
@@ -492,7 +570,7 @@ impl From<TerminalReason> for AttachError {
         match r {
             TerminalReason::Exit(code) => AttachError::SessionExited(code),
             TerminalReason::SessionRemoved => AttachError::SessionRemoved,
-            TerminalReason::Server(m) => AttachError::Server(m),
+            TerminalReason::Transport(m) => AttachError::Transport(m),
             TerminalReason::Closed => AttachError::Closed,
         }
     }
@@ -529,13 +607,24 @@ impl AttachState {
 
     /// Append new bytes; evict from the front if over the soft cap;
     /// try to resolve any pending waits.
+    ///
+    /// On eviction, `pending_waits[*].lower_bound` is in the
+    /// ANSI-stripped coordinate system, NOT raw bytes. Shifting it
+    /// by the raw byte count would over-shift whenever the evicted
+    /// prefix contained ANSI escapes — a `FromNow` wait could then
+    /// match against retained pre-existing content that should have
+    /// been excluded. We compute the stripped-view delta of the
+    /// evicted prefix and subtract that instead.
     fn append_bytes(&mut self, bytes: &[u8]) {
         self.rolling.extend(bytes.iter().copied());
         if self.rolling.len() > BUFFER_SOFT_CAP {
             let drop_n = self.rolling.len() - BUFFER_SOFT_CAP;
+            // Materialize the evicted prefix so we can strip it.
+            let evicted: Vec<u8> = self.rolling.iter().take(drop_n).copied().collect();
+            let stripped_delta = strip_ansi_for_matching(&evicted).len();
             self.rolling.drain(..drop_n);
             for w in self.pending_waits.iter_mut() {
-                w.lower_bound = w.lower_bound.saturating_sub(drop_n);
+                w.lower_bound = w.lower_bound.saturating_sub(stripped_delta);
             }
         }
         self.try_resolve_waits();
@@ -544,9 +633,20 @@ impl AttachState {
     /// Replace the entire buffer (snapshot recovery). After this,
     /// all pending wait_for `lower_bound`s become meaningless — we
     /// reset them to 0 so the next match starts from the snapshot.
+    ///
+    /// Caps `bytes` at `BUFFER_SOFT_CAP` to bound transient
+    /// allocation when katulong delivers an oversized snapshot.
+    /// When trimming is needed, we keep the TAIL (most recent
+    /// content) — the head of a snapshot is typically scrollback
+    /// that's of less interest to dispatch matchers.
     fn replace_buffer(&mut self, bytes: Vec<u8>) {
         self.rolling.clear();
-        self.rolling.extend(bytes);
+        if bytes.len() > BUFFER_SOFT_CAP {
+            let start = bytes.len() - BUFFER_SOFT_CAP;
+            self.rolling.extend(&bytes[start..]);
+        } else {
+            self.rolling.extend(bytes);
+        }
         for w in self.pending_waits.iter_mut() {
             w.lower_bound = 0;
         }
@@ -602,13 +702,22 @@ impl AttachState {
 ///
 /// Handles:
 /// - CSI sequences: `ESC [ <params> <final-byte>` where final is in
-///   `0x40..=0x7e`
-/// - OSC sequences: `ESC ] ... BEL` or `ESC ] ... ESC \`
-/// - Standalone two-byte ESC + intermediate (charset selection etc.)
+///   `0x40..=0x7e` (covers DEC private modes like `ESC [ ?25h`).
+/// - OSC sequences: `ESC ] ... BEL` or `ESC ] ... ESC \`.
+/// - SS3 sequences: `ESC O <final>` (3 bytes — used for function
+///   keys, e.g. `ESC O P` for F1).
+/// - Charset designation: `ESC ( <ch>`, `ESC ) <ch>`, `ESC * <ch>`,
+///   `ESC + <ch>`, `ESC - <ch>`, `ESC . <ch>`, `ESC / <ch>` (3 bytes).
+/// - Cursor save / restore: `ESC 7`, `ESC 8` (2 bytes).
+/// - Two-byte ESC fallback for unrecognized introducers.
 ///
 /// Anything else passes through. Carriage returns (`\r`) and
 /// newlines (`\n`) are preserved so line-based queries work.
 fn strip_ansi_for_matching(buf: &[u8]) -> Vec<u8> {
+    /// Introducers where ESC + intro + 1 more byte form the
+    /// complete sequence (not CSI/OSC parameterized).
+    const THREE_BYTE_INTRODUCERS: &[u8] = b"O()*+-./";
+
     let mut out = Vec::with_capacity(buf.len());
     let mut i = 0;
     while i < buf.len() {
@@ -619,7 +728,8 @@ fn strip_ansi_for_matching(buf: &[u8]) -> Vec<u8> {
                 // Trailing lone ESC — drop.
                 break;
             }
-            match buf[i + 1] {
+            let next = buf[i + 1];
+            match next {
                 b'[' => {
                     // CSI: read until a byte in 0x40..=0x7e is the final.
                     i += 2;
@@ -646,8 +756,17 @@ fn strip_ansi_for_matching(buf: &[u8]) -> Vec<u8> {
                         i += 1;
                     }
                 }
+                _ if THREE_BYTE_INTRODUCERS.contains(&next) && i + 2 < buf.len() => {
+                    // SS3 (ESC O X) or charset designation
+                    // (ESC ( X / ESC * X etc.) — consume all three
+                    // bytes so the trailing X doesn't leak through.
+                    i += 3;
+                }
                 _ => {
-                    // Two-byte escape (charset selection, etc.).
+                    // Two-byte escape fallback: ESC 7 (save cursor),
+                    // ESC 8 (restore cursor), ESC = (application
+                    // keypad), ESC > (normal keypad), and anything
+                    // else with just an introducer byte.
                     i += 2;
                 }
             }
@@ -682,7 +801,11 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsWriter = SplitSink<WsStream, Message>;
 type WsReader = SplitStream<WsStream>;
 
-async fn writer_task(mut writer: WsWriter, mut rx: mpsc::Receiver<Outbound>) {
+async fn writer_task(
+    mut writer: WsWriter,
+    mut rx: mpsc::Receiver<Outbound>,
+    state: Arc<Mutex<AttachState>>,
+) {
     while let Some(msg) = rx.recv().await {
         let json = match serde_json::to_string(&msg) {
             Ok(j) => j,
@@ -692,7 +815,18 @@ async fn writer_task(mut writer: WsWriter, mut rx: mpsc::Receiver<Outbound>) {
             }
         };
         if let Err(e) = writer.send(Message::text(json)).await {
-            tracing::warn!(error = %e, "attach writer: send failed; closing channel");
+            // Writer failed — propagate to state so callers waiting
+            // on the reader stop spinning silently. Without this the
+            // reader keeps draining frames while every send back to
+            // katulong is dropped, and `wait_for` callers wait until
+            // their own timeouts fire.
+            tracing::warn!(error = %e, "attach writer: send failed; marking terminal");
+            state
+                .lock()
+                .await
+                .mark_terminal(TerminalReason::Transport(format!(
+                    "writer send failed: {e}"
+                )));
             break;
         }
     }
@@ -713,7 +847,7 @@ async fn reader_task(
                 state
                     .lock()
                     .await
-                    .mark_terminal(TerminalReason::Server(e.to_string()));
+                    .mark_terminal(TerminalReason::Transport(e.to_string()));
                 return;
             }
         };
@@ -730,7 +864,11 @@ async fn reader_task(
         let msg: Inbound = match serde_json::from_str(&text) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!(error = %e, raw = %text, "attach reader: bad JSON; ignoring");
+                tracing::warn!(
+                    error = %e,
+                    raw = %truncate_for_log(&text),
+                    "attach reader: bad JSON; ignoring"
+                );
                 continue;
             }
         };
@@ -786,9 +924,11 @@ async fn dispatch_inbound(
                 st.append_bytes(data.as_bytes());
                 st.cursor = cursor;
             } else {
-                // Gap — request a pull to fill in. Use try_send so a
-                // full writer channel doesn't deadlock; if it's
-                // full, the next data-available will trigger another.
+                // Gap — request a pull to fill in. `try_send` is
+                // safe here because every subsequent `Output` or
+                // `DataAvailable` re-triggers a pull; a dropped pull
+                // doesn't strand the stream as long as more output
+                // is flowing.
                 let from = st.cursor;
                 drop(st);
                 let _ = writer_tx.try_send(Outbound::Pull {
@@ -798,11 +938,25 @@ async fn dispatch_inbound(
             }
         }
         Inbound::DataAvailable { session } if session == session_name => {
+            // DataAvailable is the server saying "I have something
+            // for you but I'm not pushing it inline." If we drop
+            // the resulting Pull and no further server event fires,
+            // the stream stalls. Await `send` so backpressure
+            // surfaces as the channel filling rather than data loss.
             let from = state.lock().await.cursor;
-            let _ = writer_tx.try_send(Outbound::Pull {
-                from_seq: from,
-                session: Some(session_name.to_string()),
-            });
+            if let Err(e) = writer_tx
+                .send(Outbound::Pull {
+                    from_seq: from,
+                    session: Some(session_name.to_string()),
+                })
+                .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    "attach reader: pull send failed (writer task dead); marking terminal"
+                );
+                state.lock().await.mark_terminal(TerminalReason::Closed);
+            }
         }
         Inbound::Exit { session, code } if session == session_name => {
             state.lock().await.mark_terminal(TerminalReason::Exit(code));
@@ -817,12 +971,41 @@ async fn dispatch_inbound(
             // Drift detection — deferred; see file-level docs.
         }
         Inbound::Error { message } => {
-            tracing::warn!(message = %message, "attach reader: katulong reported error");
+            tracing::warn!(
+                message = %truncate_for_log(&message),
+                "attach reader: katulong reported error"
+            );
             // Not always terminal — katulong sends `error` for
             // individual bad messages. Leave the attach alive.
         }
         Inbound::Pong => { /* heartbeat ack; deferred */ }
         _ => { /* ignored types */ }
+    }
+}
+
+/// Wrap a paste body in bracketed-paste markers (no trailing
+/// submit). Pulled out as a free function so the byte shape — the
+/// load-bearing invariant of this whole PR — can be unit-tested
+/// without standing up an attach handle.
+pub(crate) fn wrap_paste(body: &str) -> String {
+    format!("\u{001b}[200~{body}\u{001b}[201~")
+}
+
+/// Truncate a string for inclusion in error messages or tracing
+/// logs. Bounds the size of untrusted server payloads before they
+/// enter sipag's log pipeline.
+fn truncate_for_log(s: &str) -> String {
+    if s.len() <= MAX_LOG_PAYLOAD_LEN {
+        s.to_string()
+    } else {
+        // Snip on a char boundary so we don't produce invalid UTF-8.
+        let mut end = MAX_LOG_PAYLOAD_LEN;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        let mut out = s[..end].to_string();
+        out.push('…');
+        out
     }
 }
 
@@ -918,6 +1101,97 @@ mod tests {
         // against pane content.
         let input = b"\x1b[200~hello world\x1b[201~";
         assert_eq!(strip_ansi_for_matching(input), b"hello world");
+    }
+
+    #[test]
+    fn strip_ansi_removes_dec_private_mode() {
+        // ESC [ ? 25 h — show cursor (DEC private mode set). The
+        // `?` is a parameter byte; final `h` is in 0x40..=0x7e.
+        let input = b"\x1b[?25hvisible";
+        assert_eq!(strip_ansi_for_matching(input), b"visible");
+    }
+
+    #[test]
+    fn strip_ansi_handles_cursor_save_restore() {
+        // ESC 7 / ESC 8 are 2-byte sequences. Default 2-byte arm
+        // should consume both bytes cleanly.
+        let input = b"a\x1b7middle\x1b8z";
+        assert_eq!(strip_ansi_for_matching(input), b"amiddlez");
+    }
+
+    #[test]
+    fn strip_ansi_removes_ss3_function_key() {
+        // ESC O P — F1 keystroke (SS3). The trailing P is part of
+        // the sequence and must NOT leak into the output.
+        let input = b"before\x1bOPafter";
+        assert_eq!(strip_ansi_for_matching(input), b"beforeafter");
+    }
+
+    #[test]
+    fn strip_ansi_removes_charset_designation() {
+        // ESC ( B — designate G0 as USASCII. The trailing B is
+        // part of the sequence.
+        let input = b"start\x1b(Bend";
+        assert_eq!(strip_ansi_for_matching(input), b"startend");
+    }
+
+    // ── wrap_paste ──────────────────────────────────────────
+
+    #[test]
+    fn wrap_paste_produces_bpm_with_no_trailing_cr() {
+        // Load-bearing invariant — the original dispatch bug was a
+        // trailing \r getting absorbed into the paste. Pin the
+        // exact byte shape so a future edit can't regress it.
+        let wrapped = wrap_paste("hello world");
+        assert_eq!(wrapped, "\u{001b}[200~hello world\u{001b}[201~");
+        assert!(
+            !wrapped.ends_with('\r'),
+            "paste body must NOT end with carriage return; \
+             submit Enter is sent as a separate input() call"
+        );
+    }
+
+    #[test]
+    fn wrap_paste_round_trips_multi_line_body() {
+        let body = "## Context\n\nLine A\nLine B\n";
+        let wrapped = wrap_paste(body);
+        assert!(wrapped.starts_with("\u{001b}[200~"));
+        assert!(wrapped.ends_with("\u{001b}[201~"));
+        let inner = &wrapped["\u{001b}[200~".len()..wrapped.len() - "\u{001b}[201~".len()];
+        assert_eq!(inner, body);
+    }
+
+    // ── truncate_for_log ────────────────────────────────────
+
+    #[test]
+    fn truncate_for_log_passes_short_strings_through() {
+        assert_eq!(truncate_for_log("short"), "short");
+    }
+
+    #[test]
+    fn truncate_for_log_caps_at_max_payload_with_ellipsis() {
+        let long = "x".repeat(MAX_LOG_PAYLOAD_LEN * 2);
+        let out = truncate_for_log(&long);
+        assert!(out.ends_with('…'));
+        // The bytes-up-to-the-ellipsis must not exceed
+        // MAX_LOG_PAYLOAD_LEN; the trailing char itself adds a few.
+        let body_len = out.trim_end_matches('…').len();
+        assert!(body_len <= MAX_LOG_PAYLOAD_LEN);
+    }
+
+    #[test]
+    fn truncate_for_log_respects_utf8_char_boundary() {
+        // Build a string whose MAX_LOG_PAYLOAD_LEN-th byte falls
+        // mid-character. truncate_for_log should snap back to a
+        // valid char boundary, not slice mid-codepoint.
+        let mut s = "a".repeat(MAX_LOG_PAYLOAD_LEN - 1);
+        s.push('é'); // 2-byte char that straddles the boundary
+        let out = truncate_for_log(&s);
+        // Resulting string should be valid UTF-8 by construction
+        // (truncate_for_log returns a String) and end with `…`.
+        assert!(out.ends_with('…'));
+        let _ =
+            std::str::from_utf8(out.as_bytes()).expect("truncate_for_log produced invalid UTF-8");
     }
 
     // ── match_at ────────────────────────────────────────────
@@ -1114,5 +1388,296 @@ mod tests {
         // The buffer was completely flooded; lower_bound should
         // have shifted but stays within reason.
         assert!(st.pending_waits[0].lower_bound < 100);
+    }
+
+    #[tokio::test]
+    async fn from_now_resists_eviction_with_ansi_in_evicted_region() {
+        // Coordinate-system regression test: previously eviction
+        // shifted `lower_bound` by the RAW byte count, but
+        // `lower_bound` is in the ANSI-stripped view. If the
+        // evicted prefix contained escapes, the over-shift could
+        // let a FromNow wait match against retained pre-existing
+        // content.
+        //
+        // Setup: seed the buffer with ANSI-laden "old hello",
+        // register a FromNow wait at the current stripped tail,
+        // then append a ton of fresh data that triggers eviction.
+        // The wait must NOT resolve against the retained tail of
+        // "old hello" — only against new content matching "hello".
+        let initial = b"prefix\x1b[31mold hello\x1b[0m"; // strips to "prefix" + "old hello"
+        let mut st = AttachState::new(String::from_utf8(initial.to_vec()).unwrap(), 0);
+        let pre_existing_stripped = st.stripped_view().len();
+
+        let (tx, mut rx) = oneshot::channel();
+        st.pending_waits.push(PendingWait {
+            pattern: Regex::new(r"hello").unwrap(),
+            lower_bound: pre_existing_stripped, // FromNow
+            waker: tx,
+        });
+        st.try_resolve_waits();
+        assert_eq!(
+            st.pending_waits.len(),
+            1,
+            "wait should not resolve against pre-existing 'old hello'"
+        );
+
+        // Flood with non-matching bytes large enough to force
+        // eviction of the entire initial buffer.
+        let flood = vec![b'x'; BUFFER_SOFT_CAP + initial.len() + 1024];
+        st.append_bytes(&flood);
+
+        // After eviction the wait should STILL be pending (no
+        // "hello" in the flood), and crucially the rx hasn't
+        // resolved.
+        assert!(
+            !st.pending_waits.is_empty(),
+            "wait was incorrectly resolved during/after eviction"
+        );
+        assert!(rx.try_recv().is_err());
+
+        // Now append something with "hello" — should resolve.
+        st.append_bytes(b"finally hello again");
+        let res = rx.await.unwrap().unwrap();
+        assert_eq!(res.matched_text, "hello");
+    }
+
+    #[test]
+    fn replace_buffer_trims_oversized_snapshot_to_soft_cap() {
+        // A katulong-supplied snapshot larger than BUFFER_SOFT_CAP
+        // must NOT blow up the rolling buffer. We trim from the
+        // FRONT (keep the most recent tail) and continue.
+        let mut st = AttachState::new(String::new(), 0);
+        let mut huge = vec![b'a'; BUFFER_SOFT_CAP - 4];
+        huge.extend_from_slice(b"tail");
+        // Total length = BUFFER_SOFT_CAP. Now grow it past the cap.
+        let mut oversized = vec![b'a'; 2048];
+        oversized.extend(huge);
+        st.replace_buffer(oversized);
+        assert_eq!(st.rolling.len(), BUFFER_SOFT_CAP);
+        // The recent tail is still present (we kept the back, not
+        // the front).
+        let raw = st.raw_view();
+        assert!(raw.ends_with(b"tail"));
+    }
+
+    // ── dispatch_inbound ────────────────────────────────────
+
+    fn make_state_and_writer() -> (
+        Arc<Mutex<AttachState>>,
+        mpsc::Sender<Outbound>,
+        mpsc::Receiver<Outbound>,
+    ) {
+        let state = Arc::new(Mutex::new(AttachState::new(String::new(), 0)));
+        let (tx, rx) = mpsc::channel(8);
+        (state, tx, rx)
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_pull_response_appends_and_advances_cursor() {
+        let (state, tx, _rx) = make_state_and_writer();
+        dispatch_inbound(
+            Inbound::PullResponse {
+                session: "s".into(),
+                data: "hello".into(),
+                cursor: 42,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"hello");
+        assert_eq!(st.cursor, 42);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_pull_response_empty_data_advances_cursor_only() {
+        // Backpressure-skip path: server returns empty data with
+        // an advanced cursor. Buffer stays unchanged; cursor jumps.
+        let (state, tx, _rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.append_bytes(b"existing");
+        }
+        dispatch_inbound(
+            Inbound::PullResponse {
+                session: "s".into(),
+                data: String::new(),
+                cursor: 99_999,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"existing");
+        assert_eq!(st.cursor, 99_999);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_output_in_order_appends() {
+        let (state, tx, _rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.cursor = 10;
+        }
+        dispatch_inbound(
+            Inbound::Output {
+                session: "s".into(),
+                data: "abc".into(),
+                from_seq: 10,
+                cursor: 13,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"abc");
+        assert_eq!(st.cursor, 13);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_output_gap_triggers_pull() {
+        let (state, tx, mut rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.cursor = 100;
+        }
+        dispatch_inbound(
+            Inbound::Output {
+                session: "s".into(),
+                data: "lost".into(),
+                from_seq: 200, // gap — doesn't match cursor 100
+                cursor: 204,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        // Buffer unchanged (gap detected).
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"");
+        assert_eq!(st.cursor, 100);
+        drop(st);
+        // A pull from current cursor should have been queued.
+        let queued = rx.try_recv().expect("expected a Pull message");
+        match queued {
+            Outbound::Pull { from_seq, session } => {
+                assert_eq!(from_seq, 100);
+                assert_eq!(session.as_deref(), Some("s"));
+            }
+            other => panic!("expected Pull, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_data_available_pulls_from_current_cursor() {
+        let (state, tx, mut rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.cursor = 12_345;
+        }
+        dispatch_inbound(
+            Inbound::DataAvailable {
+                session: "s".into(),
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let queued = rx.try_recv().expect("expected a Pull message");
+        match queued {
+            Outbound::Pull { from_seq, session } => {
+                assert_eq!(from_seq, 12_345);
+                assert_eq!(session.as_deref(), Some("s"));
+            }
+            other => panic!("expected Pull, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_session_removed_marks_terminal() {
+        let (state, tx, _rx) = make_state_and_writer();
+        dispatch_inbound(
+            Inbound::SessionRemoved {
+                session: "s".into(),
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert!(matches!(st.terminal, Some(TerminalReason::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_exit_marks_terminal_with_code() {
+        let (state, tx, _rx) = make_state_and_writer();
+        dispatch_inbound(
+            Inbound::Exit {
+                session: "s".into(),
+                code: -1,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert!(matches!(st.terminal, Some(TerminalReason::Exit(-1))));
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_ignores_mismatched_session() {
+        // A message tagged with a different session must be a no-op
+        // — sipag attaches to exactly one session per handle, and a
+        // multiplexed katulong sending another session's frames by
+        // mistake shouldn't mutate our state.
+        let (state, tx, _rx) = make_state_and_writer();
+        {
+            let mut st = state.lock().await;
+            st.append_bytes(b"original");
+            st.cursor = 8;
+        }
+        dispatch_inbound(
+            Inbound::PullResponse {
+                session: "other-session".into(),
+                data: "leak".into(),
+                cursor: 12,
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert_eq!(st.raw_view(), b"original");
+        assert_eq!(st.cursor, 8);
+    }
+
+    #[tokio::test]
+    async fn dispatch_inbound_error_logs_but_does_not_terminate() {
+        let (state, tx, _rx) = make_state_and_writer();
+        dispatch_inbound(
+            Inbound::Error {
+                message: "Invalid request".into(),
+            },
+            &state,
+            &tx,
+            "s",
+        )
+        .await;
+        let st = state.lock().await;
+        assert!(
+            st.terminal.is_none(),
+            "Inbound::Error is not terminal; katulong sends it for individual bad messages"
+        );
     }
 }

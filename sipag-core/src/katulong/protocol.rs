@@ -525,4 +525,58 @@ mod tests {
             other => panic!("expected SessionUpdated, got {other:?}"),
         }
     }
+
+    #[test]
+    fn session_removed_decodes() {
+        // Load-bearing: drives `mark_terminal(SessionRemoved)` in
+        // the dispatch handler. A deserialization regression would
+        // silently route the message to `Other` and the attach
+        // would never go terminal.
+        let raw = r#"{"type":"session-removed","session":"s"}"#;
+        let parsed: Inbound = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed,
+            Inbound::SessionRemoved {
+                session: "s".into()
+            }
+        );
+    }
+
+    #[test]
+    fn session_renamed_decodes() {
+        let raw = r#"{"type":"session-renamed","name":"new-name","id":"sid-123"}"#;
+        let parsed: Inbound = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed,
+            Inbound::SessionRenamed {
+                name: "new-name".into(),
+                id: "sid-123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn switched_decodes() {
+        let raw = r#"{"type":"switched","session":"s"}"#;
+        let parsed: Inbound = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed,
+            Inbound::Switched {
+                session: "s".into()
+            }
+        );
+    }
+
+    #[test]
+    fn resize_sync_decodes() {
+        let raw = r#"{"type":"resize-sync","cols":120,"rows":40}"#;
+        let parsed: Inbound = serde_json::from_str(raw).unwrap();
+        assert_eq!(
+            parsed,
+            Inbound::ResizeSync {
+                cols: 120,
+                rows: 40
+            }
+        );
+    }
 }

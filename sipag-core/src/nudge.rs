@@ -1,5 +1,24 @@
-//! Dispatch nudge loop — gemma4 drives the pane forward keystroke by
-//! keystroke.
+//! Dispatch nudge loop — gemma4 observes the pane and reports state.
+//!
+//! ## Status (2026-05-13)
+//!
+//! **This module is being repositioned as a long-loop observer.**
+//! The current wiring in `sipag/src/serve/htmx.rs::verify_and_heal_dispatch`
+//! still uses it to drive keystrokes (paste → submit → recover),
+//! but that is the **legacy path** scheduled for removal in step 7
+//! of `docs/dispatch-implementation-plan.md` when the attach client
+//! ([`crate::katulong::client`]) wires into the dispatch handler.
+//! After that, this module's role narrows to: every 30-60s, read
+//! the rolling buffer of an open attach, ask gemma what state the
+//! session is in (running, stuck, needs-human, done), persist that
+//! status onto the task. `NudgeDecision::keystrokes` becomes
+//! informational only — the mechanical paste/submit handshake is
+//! owned by the attach client, not gemma.
+//!
+//! See `docs/dispatch-design.md` §7 ("The LLM's actual job") for
+//! the split rationale.
+//!
+//! ## Original (transitional) design
 //!
 //! The pre-dispatch [`crate::gate`] decides *whether* to fire. After
 //! it does, the pane still has to get from "claude TUI just launched"
