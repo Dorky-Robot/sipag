@@ -1225,8 +1225,10 @@ fn dispatch_v2_enabled() -> bool {
 ///   echo can't slip into the FromNow snapshot race.
 /// * step 2 — `paste(prompt)` (bracketed-paste body, no trailing
 ///   `\r` — that was the original dispatch bug).
-/// * step 3 — `wait_for(echo of task title)` (best-effort, 3s),
-///   then `press(KeyName::Enter)` to submit.
+/// * step 3 — `press(KeyName::Enter)` to submit. (A best-effort
+///   3s `wait_for(echo of task title)` runs immediately before
+///   the submit; an echo timeout is logged but does NOT fail-fast
+///   or report as step 3 — only the `press` itself does.)
 /// * step 4 — `wait_for(claude_processing_re)` confirms Claude has
 ///   started processing.
 ///
@@ -1474,8 +1476,13 @@ fn paste_echo_regex(s: &str) -> Result<regex::Regex, regex::Error> {
 /// event when an attach step failed. Splits out the variants worth
 /// distinguishing for triage; everything else falls through to the
 /// `Display` impl.
+///
+/// The final string is run through `sanitize_upstream_body` so any
+/// peer-influenced fragments (server messages, WS protocol errors,
+/// tungstenite I/O errors carrying remote text) can't smuggle
+/// control characters or escape sequences into the broker event.
 fn v2_step_reason(step: &str, err: AttachError) -> String {
-    match err {
+    let raw = match err {
         AttachError::Timeout(d) => {
             format!("{step}: timed out after {:.1}s", d.as_secs_f32())
         }
@@ -1484,15 +1491,10 @@ fn v2_step_reason(step: &str, err: AttachError) -> String {
         }
         AttachError::SessionRemoved => format!("{step}: katulong session was removed"),
         AttachError::Closed => format!("{step}: attach closed"),
-        AttachError::Server(msg) => {
-            // Pass server-supplied text through the upstream-body
-            // sanitizer so control chars / oversized payloads can't
-            // pollute the broker event seen by the iPad.
-            let safe = super::katulong_proxy::sanitize_upstream_body(&msg);
-            format!("{step}: katulong: {safe}")
-        }
+        AttachError::Server(msg) => format!("{step}: katulong: {msg}"),
         other => format!("{step}: {other}"),
-    }
+    };
+    super::katulong_proxy::sanitize_upstream_body(&raw)
 }
 
 /// Pattern matching Claude Code's "ready for input" signal. We
@@ -2057,14 +2059,32 @@ mod dispatch_helpers_tests {
     }
 
     #[test]
+    fn v2_step_reason_sanitizes_all_variants_not_just_server() {
+        // Round-2 review: Wire / Transport / Connect carry
+        // peer-influenced strings (tungstenite error text,
+        // truncated WS frames). Sanitization must apply to the
+        // final formatted string, not only the Server arm.
+        for variant in [
+            AttachError::Wire("malformed\x07\x1b[Aframe".to_string()),
+            AttachError::Transport("ws\x07\x1bclosed".to_string()),
+            AttachError::Connect("dns\x07lookup".to_string()),
+            AttachError::InvalidUrl("bad\x1b[31murl".to_string()),
+        ] {
+            let r = v2_step_reason("step", variant);
+            assert!(!r.contains('\x07'), "bell byte leaked: {r:?}");
+            assert!(!r.contains('\x1b'), "ESC byte leaked: {r:?}");
+        }
+    }
+
+    #[test]
     fn dispatch_v2_enabled_off_set() {
-        // Save/restore the env var so other tests aren't affected.
-        // Tests in this module run on a single tokio runtime in
-        // process, so the env var is process-global — keep
-        // toggling minimal.
+        // SAFETY: env vars are process-global. Cargo can parallelize
+        // tests within a binary across threads, but a workspace grep
+        // confirms SIPAG_DISPATCH_V2 is only read here and from the
+        // dispatch HTTP handler — and no other `#[test]` exercises
+        // that handler. As long as that invariant holds, this test
+        // has the env var to itself.
         for off in ["", "0", "false", "FALSE", "no", "off", "Off"] {
-            // SAFETY: single-threaded test in this module; no other
-            // task reads SIPAG_DISPATCH_V2 concurrently.
             unsafe {
                 std::env::set_var("SIPAG_DISPATCH_V2", off);
             }

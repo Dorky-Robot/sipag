@@ -116,6 +116,12 @@ pub enum WaitFrom {
     /// the ANSI-stripped rolling buffer. Pair with
     /// `KatulongAttach::stripped_offset()` taken *before* the
     /// triggering input to close the FromNow snapshot race.
+    ///
+    /// If the buffer is evicted past the supplied offset between
+    /// the snapshot and the `wait_for` registration, the lower
+    /// bound silently clamps to the current length — same effect
+    /// as `FromNow`. Under the default 1 MiB soft cap, evicting
+    /// past a microsecond-old snapshot is not a realistic concern.
     FromOffset(usize),
 }
 
@@ -1967,6 +1973,94 @@ mod tests {
             .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_secs(1)))
             .await;
         assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn from_offset_skips_pre_snapshot_content_and_matches_post() {
+        // Pins the snapshot-before-input pattern used by the v2
+        // dispatch driver: seed the buffer with `"hello"`, take a
+        // stripped_offset snapshot, then append more bytes that
+        // *also* contain `"hello"`. FromOffset(snapshot) must skip
+        // the pre-snapshot `"hello"` and resolve on the new one.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.append_bytes(b"hello before snapshot\n");
+        }
+        let snapshot = attach.stripped_offset().await;
+        assert!(snapshot > 0, "snapshot should be past the seeded content");
+
+        // Register the wait, then append matching content.
+        let attach_arc = std::sync::Arc::new(attach);
+        let waiter = {
+            let a = std::sync::Arc::clone(&attach_arc);
+            let re = Regex::new(r"hello").unwrap();
+            tokio::spawn(async move {
+                a.wait_for(
+                    &re,
+                    WaitFrom::FromOffset(snapshot),
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            })
+        };
+        // Give the spawned task a moment to acquire the lock and
+        // register its pending wait before we append.
+        tokio::task::yield_now().await;
+        {
+            let mut st = attach_arc.state.lock().await;
+            st.append_bytes(b"hello after snapshot");
+        }
+        let m = waiter.await.unwrap().unwrap();
+        assert_eq!(m.matched_text, "hello");
+        assert!(
+            m.start >= snapshot,
+            "match must be in the post-snapshot region: start={} snapshot={}",
+            m.start,
+            snapshot
+        );
+    }
+
+    #[tokio::test]
+    async fn from_offset_clamps_when_buffer_evicted_past_snapshot() {
+        // If the buffer shrinks below the snapshot (replace_buffer,
+        // or — in production — eviction), FromOffset(N) must clamp
+        // to current length rather than reject. Documented behavior
+        // in `WaitFrom::FromOffset` rustdoc.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.append_bytes(b"longer pre-existing buffer content");
+        }
+        let stale_offset = attach.stripped_offset().await + 10_000;
+
+        // Replace the buffer with shorter content — pending offsets
+        // become "in the future" from FromOffset's perspective.
+        {
+            let mut st = attach.state.lock().await;
+            st.replace_buffer(b"short".to_vec());
+        }
+        let re = Regex::new(r"target").unwrap();
+
+        let attach_arc = std::sync::Arc::new(attach);
+        let waiter = {
+            let a = std::sync::Arc::clone(&attach_arc);
+            tokio::spawn(async move {
+                a.wait_for(
+                    &re,
+                    WaitFrom::FromOffset(stale_offset),
+                    Some(Duration::from_secs(1)),
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+        {
+            let mut st = attach_arc.state.lock().await;
+            st.append_bytes(b" target appears");
+        }
+        let m = waiter.await.unwrap().unwrap();
+        assert_eq!(m.matched_text, "target");
     }
 
     // ── writer-task transport propagation ───────────────────
