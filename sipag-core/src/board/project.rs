@@ -314,6 +314,18 @@ mod tests {
         assert_eq!(reloaded.statuses[0].description, "ready");
         assert!(reloaded.statuses[0].dispatchable);
         assert_eq!(reloaded.statuses[1].name, "done");
+
+        // Also assert the on-disk shape: after save, the project
+        // is in table form (`[[statuses]]`), not the legacy
+        // string-array form. Pins the docstring's "upgrade to
+        // the table form on the next save" promise on the
+        // serialization side, not just the round-trip side.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("[[statuses]]"),
+            "saved project should be in table form; got:\n{on_disk}"
+        );
+        assert!(!on_disk.contains("statuses = ["));
     }
 
     #[test]

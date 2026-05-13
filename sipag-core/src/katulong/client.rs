@@ -1412,6 +1412,13 @@ mod tests {
 
     #[tokio::test]
     async fn from_now_does_not_match_pre_existing_after_ansi_only_eviction() {
+        // Replaces an earlier shape (`from_now_resists_eviction_with_ansi_in_evicted_region`)
+        // that didn't actually exercise the bug: it evicted the
+        // ENTIRE initial buffer, so the lower_bound over-shift
+        // produced the same observable outcome under both buggy
+        // and fixed code. This rewrite leaves matching content
+        // in the retained region so the two code paths diverge.
+        //
         // Coordinate-system regression test for the eviction
         // shift bug. The bug was: eviction shifted `lower_bound`
         // by the RAW byte count, but `lower_bound` lives in the
@@ -1497,6 +1504,23 @@ mod tests {
         st.append_bytes(b"\nfresh hello here");
         let res = rx.await.unwrap().unwrap();
         assert_eq!(res.matched_text, "hello");
+    }
+
+    #[test]
+    fn new_trims_oversized_initial_buffer_to_soft_cap() {
+        // Mirror of `replace_buffer_trims_oversized_snapshot_to_soft_cap`
+        // for the constructor path. A katulong handshake that
+        // delivers an outsized `attached.data` (somehow, even
+        // though `MAX_MESSAGE_BYTES` is enforced by tungstenite)
+        // must not produce a rolling buffer above `BUFFER_SOFT_CAP`.
+        let mut huge = vec![b'a'; BUFFER_SOFT_CAP - 4];
+        huge.extend_from_slice(b"tail");
+        let mut oversized = vec![b'a'; 2048];
+        oversized.extend(huge);
+        let st = AttachState::new(String::from_utf8(oversized).unwrap(), 0);
+        assert_eq!(st.rolling.len(), BUFFER_SOFT_CAP);
+        let raw = st.raw_view();
+        assert!(raw.ends_with(b"tail"));
     }
 
     #[test]
