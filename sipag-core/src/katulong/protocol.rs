@@ -189,7 +189,11 @@ pub enum Inbound {
     #[serde(rename = "state-check")]
     StateCheck {
         session: String,
-        fingerprint: String,
+        // Katulong emits a DJB2 hash (signed 32-bit integer); older
+        // ws-manager versions emitted a hex string. Accept either by
+        // taking raw JSON — the value is not read on the sipag side
+        // (drift detection is deferred).
+        fingerprint: serde_json::Value,
         seq: u64,
     },
 
@@ -453,17 +457,27 @@ mod tests {
     }
 
     #[test]
-    fn state_check_decodes_fingerprint_and_seq() {
-        let raw = r#"{"type":"state-check","session":"s","fingerprint":"abc","seq":42}"#;
-        let parsed: Inbound = serde_json::from_str(raw).unwrap();
-        assert_eq!(
-            parsed,
-            Inbound::StateCheck {
-                session: "s".into(),
-                fingerprint: "abc".into(),
-                seq: 42,
-            }
-        );
+    fn state_check_decodes_integer_or_string_fingerprint() {
+        // Katulong's ws-manager broadcasts DJB2 hashes as signed
+        // 32-bit integers; older versions used hex strings. We
+        // model `fingerprint` as `serde_json::Value` so anything
+        // katulong might emit (now or later) parses cleanly; sipag
+        // doesn't read the value. Pin the "accept anything" contract
+        // with a spread of shapes so a regression to a stricter
+        // type fails at test time.
+        for raw in [
+            r#"{"type":"state-check","session":"s","fingerprint":462302280,"seq":42}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":-1397367636,"seq":99}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":"abc","seq":17}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":null,"seq":1}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":3.14,"seq":2}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":true,"seq":3}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":[1,2,3],"seq":4}"#,
+            r#"{"type":"state-check","session":"s","fingerprint":{"a":1},"seq":5}"#,
+        ] {
+            let parsed: Inbound = serde_json::from_str(raw).expect(raw);
+            assert!(matches!(parsed, Inbound::StateCheck { .. }), "raw={raw}");
+        }
     }
 
     #[test]
