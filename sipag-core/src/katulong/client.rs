@@ -214,11 +214,23 @@ impl KatulongAttachClient {
         );
         // Katulong's WS upgrade handler refuses requests whose
         // `Origin` host doesn't match the request `Host`. Browsers
-        // set Origin automatically; tokio-tungstenite does not. Use
-        // the configured base URL (already validated as an http(s)
-        // scheme by the caller) as the Origin — it has the same
-        // host as the WS URL by construction.
-        let origin = self.remote.url.trim_end_matches('/');
+        // set Origin automatically; tokio-tungstenite does not.
+        //
+        // Per RFC 6454 the Origin must be ONLY scheme + host + port
+        // — no userinfo, path, query, or fragment. Parse the base
+        // URL and emit just that, so a misconfigured `remote.url`
+        // (e.g., `https://user:pass@katulong/some/path`) can't leak
+        // credentials into the header or trip stricter intermediaries
+        // (CDN/WAF/proxy) that validate Origin format.
+        let parsed = url::Url::parse(&self.remote.url)
+            .map_err(|e| AttachError::InvalidUrl(format!("invalid base url: {e}")))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| AttachError::InvalidUrl("base url has no host".into()))?;
+        let origin = match parsed.port() {
+            Some(p) => format!("{}://{host}:{p}", parsed.scheme()),
+            None => format!("{}://{host}", parsed.scheme()),
+        };
         req.headers_mut().insert(
             "Origin",
             origin
@@ -514,22 +526,32 @@ impl KatulongAttach {
         self.state.lock().await.raw_view()
     }
 
-    /// Close the attach. Aborts the reader first so its
-    /// `writer_tx.clone()` is dropped, then closes the writer
-    /// channel, then awaits the writer task's graceful exit.
+    /// Close the attach.
+    ///
+    /// **Invariant: the order below is load-bearing — do not
+    /// reorder.** The writer channel cannot close until the reader
+    /// task is aborted and joined, because the reader holds a
+    /// `writer_tx.clone()` (so it can fire Pull on DataAvailable).
+    /// Moving `writer_tx.take()` first to match the conventional
+    /// "drop senders before joining" pattern reintroduces the
+    /// deadlock — the writer task blocks forever on `rx.recv()`
+    /// and `h.await` hangs. See the inline `CRITICAL ORDERING`
+    /// block for the proof.
     pub async fn close(mut self) {
-        // CRITICAL ORDERING: the reader task holds a clone of
-        // `writer_tx` (so it can fire Pull on DataAvailable). If we
-        // drop only our `writer_tx` here, the channel stays open
-        // because of the reader's clone — the writer task then
-        // blocks forever on `rx.recv()` and `h.await` below hangs.
-        // Aborting + joining the reader first releases its sender,
-        // so dropping ours next closes the channel cleanly.
+        // CRITICAL ORDERING: see doc-comment invariant.
+        //
+        // (1) Reader task holds `writer_tx.clone()`. Aborting +
+        //     joining drops the reader future and releases that
+        //     sender clone.
         if let Some(h) = self._reader_handle.take() {
             h.abort();
             let _ = h.await;
         }
+        // (2) With the reader's clone gone, dropping our sender is
+        //     the LAST sender drop — the channel closes.
         let _ = self.writer_tx.take();
+        // (3) Writer task's `rx.recv()` now returns None, it sends
+        //     a WS Close and exits. Awaiting completes promptly.
         if let Some(h) = self._writer_handle.take() {
             let _ = h.await;
         }

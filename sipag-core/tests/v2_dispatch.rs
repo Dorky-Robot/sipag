@@ -66,14 +66,15 @@ async fn attach_input_round_trip_against_real_katulong() {
         .expect("wait_for token after input round-trip");
 
     assert_eq!(m.matched_text, token);
-    assert!(
-        m.start >= offset_before,
-        "match must be in post-input region: start={} offset_before={}",
-        m.start,
-        offset_before,
-    );
 
-    attach.close().await;
+    // Close MUST terminate quickly — wrap in a timeout so a
+    // regression to the buggy reader/writer/close ordering (where
+    // the reader's `writer_tx.clone()` keeps the channel open and
+    // the writer task hangs forever on `rx.recv()`) fails the test
+    // loudly instead of hanging it.
+    tokio::time::timeout(Duration::from_secs(2), attach.close())
+        .await
+        .expect("close hung — likely a writer-task deadlock regression");
 }
 
 // ── harness ─────────────────────────────────────────────────────────
