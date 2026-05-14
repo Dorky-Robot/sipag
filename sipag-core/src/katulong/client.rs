@@ -215,22 +215,7 @@ impl KatulongAttachClient {
         // Katulong's WS upgrade handler refuses requests whose
         // `Origin` host doesn't match the request `Host`. Browsers
         // set Origin automatically; tokio-tungstenite does not.
-        //
-        // Per RFC 6454 the Origin must be ONLY scheme + host + port
-        // — no userinfo, path, query, or fragment. Parse the base
-        // URL and emit just that, so a misconfigured `remote.url`
-        // (e.g., `https://user:pass@katulong/some/path`) can't leak
-        // credentials into the header or trip stricter intermediaries
-        // (CDN/WAF/proxy) that validate Origin format.
-        let parsed = url::Url::parse(&self.remote.url)
-            .map_err(|e| AttachError::InvalidUrl(format!("invalid base url: {e}")))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| AttachError::InvalidUrl("base url has no host".into()))?;
-        let origin = match parsed.port() {
-            Some(p) => format!("{}://{host}:{p}", parsed.scheme()),
-            None => format!("{}://{host}", parsed.scheme()),
-        };
+        let origin = build_origin(&self.remote.url)?;
         req.headers_mut().insert(
             "Origin",
             origin
@@ -315,6 +300,33 @@ fn ws_url(base: &str) -> String {
         format!("wss://{base}")
     };
     format!("{scheme_swapped}/ws")
+}
+
+/// Build the `Origin` header value for the WS upgrade request, per
+/// RFC 6454: scheme + host[+port], NO userinfo / path / query /
+/// fragment. We preserve the authority verbatim (including an
+/// explicit `:443` / `:80`) because tungstenite copies the URL's
+/// literal authority into the `Host` header — going through
+/// `url::Url::port()` would normalize the default port away, and
+/// katulong's check is `new URL(origin).host === host` (string
+/// equality), so a normalized Origin against an explicit-port Host
+/// would silently 403.
+fn build_origin(base: &str) -> AttachResult<String> {
+    let base = base.trim_end_matches('/');
+    let (scheme, rest) = base
+        .strip_prefix("https://")
+        .map(|r| ("https", r))
+        .or_else(|| base.strip_prefix("http://").map(|r| ("http", r)))
+        .ok_or_else(|| AttachError::InvalidUrl(format!("base url must be http(s): {base}")))?;
+    // Drop userinfo (user:pass@host → host).
+    let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    // Drop path, query, fragment.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| AttachError::InvalidUrl("base url has no authority".into()))?;
+    Ok(format!("{scheme}://{authority}"))
 }
 
 async fn run_handshake(
@@ -1147,6 +1159,82 @@ mod tests {
     #[test]
     fn ws_url_swaps_http_for_ws() {
         assert_eq!(ws_url("http://127.0.0.1:8080"), "ws://127.0.0.1:8080/ws");
+    }
+
+    #[test]
+    fn build_origin_preserves_authority_verbatim() {
+        // Default port omitted: Host header has no port, Origin
+        // shouldn't either.
+        assert_eq!(
+            build_origin("https://katulong.example").unwrap(),
+            "https://katulong.example"
+        );
+        // Default port explicit: Host header keeps it (tungstenite
+        // preserves authority verbatim), Origin must too — katulong's
+        // `new URL(origin).host === host` is exact string equality.
+        assert_eq!(
+            build_origin("https://katulong.example:443").unwrap(),
+            "https://katulong.example:443"
+        );
+        assert_eq!(
+            build_origin("http://127.0.0.1:7100").unwrap(),
+            "http://127.0.0.1:7100"
+        );
+        // Non-default port: same.
+        assert_eq!(
+            build_origin("https://katulong.example:8443").unwrap(),
+            "https://katulong.example:8443"
+        );
+    }
+
+    #[test]
+    fn build_origin_strips_path_query_fragment() {
+        assert_eq!(
+            build_origin("https://katulong.example/some/path").unwrap(),
+            "https://katulong.example"
+        );
+        assert_eq!(
+            build_origin("https://katulong.example/?q=x").unwrap(),
+            "https://katulong.example"
+        );
+        assert_eq!(
+            build_origin("https://katulong.example#frag").unwrap(),
+            "https://katulong.example"
+        );
+        assert_eq!(
+            build_origin("https://katulong.example:443/api?x=1#y").unwrap(),
+            "https://katulong.example:443"
+        );
+    }
+
+    #[test]
+    fn build_origin_strips_userinfo() {
+        // Misconfigured URL with embedded credentials must NOT leak
+        // them into the Origin header.
+        let o = build_origin("https://user:pass@katulong.example").unwrap();
+        assert_eq!(o, "https://katulong.example");
+        assert!(!o.contains("user"), "userinfo leaked: {o}");
+        assert!(!o.contains("pass"), "userinfo leaked: {o}");
+        // With port + path.
+        assert_eq!(
+            build_origin("https://u:p@katulong.example:8443/api").unwrap(),
+            "https://katulong.example:8443"
+        );
+    }
+
+    #[test]
+    fn build_origin_trims_trailing_slash() {
+        assert_eq!(
+            build_origin("https://katulong.example/").unwrap(),
+            "https://katulong.example"
+        );
+    }
+
+    #[test]
+    fn build_origin_rejects_non_http_scheme() {
+        assert!(build_origin("ftp://katulong.example").is_err());
+        assert!(build_origin("katulong.example").is_err()); // no scheme
+        assert!(build_origin("https://").is_err()); // no authority
     }
 
     #[test]
