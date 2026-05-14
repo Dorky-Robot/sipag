@@ -33,7 +33,7 @@ use sipag_core::katulong::client::{
 };
 use sipag_core::katulong::RemoteConfig;
 use sipag_core::nudge::{self, NudgeInput};
-use tracing::warn;
+use tracing::{info, warn};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -554,6 +554,12 @@ async fn dispatch_task_handler(
         Ok(t) => t,
         Err(_) => return err_response(StatusCode::NOT_FOUND, "task not found"),
     };
+    info!(
+        task = id,
+        project = %project_name,
+        host = %host.id,
+        "dispatch: handler entry",
+    );
 
     let role_command = sipag_core::board::Role::load(&dir, &project_name, &task.role)
         .map(|r| r.command)
@@ -577,6 +583,7 @@ async fn dispatch_task_handler(
     // skip the sync HTTP exec entirely when v2 is enabled — sending
     // the launch over both paths runs the role command twice.
     let use_v2 = dispatch_v2_enabled();
+    info!(task = id, use_v2, "dispatch: v2 flag resolved");
     // Each dispatch creates a fresh katulong session with an opaque
     // sipag-prefixed name. Katulong's auto-summarizer renames it from
     // session content later; sipag tracks the session by its
@@ -627,7 +634,7 @@ async fn dispatch_task_handler(
     // parked at whatever gemma chose (or `needs-human` by fallback).
     match run_dispatch_gate(&state, host, &session_id, &project_name, &task).await {
         Ok(GateOutcome::Dispatch) => {
-            // fall through to exec the launch command
+            info!(task = id, "dispatch gate: dispatch — proceeding");
         }
         Ok(GateOutcome::Parked {
             status_name,
@@ -689,6 +696,8 @@ async fn dispatch_task_handler(
             error = %e,
             "task move to in-progress failed (worker is already running)"
         );
+    } else {
+        info!(task = id, "dispatch: moved to in-progress");
     }
     // Clear any reason/human_action left over from a prior parked
     // dispatch — once we're firing, those notes no longer apply. Done
@@ -1253,15 +1262,28 @@ async fn dispatch_via_attach_client(
 ) {
     use std::time::Duration;
 
+    info!(
+        task = task_id,
+        host = %host.id,
+        session_id = %session_id,
+        "dispatch v2: driver spawned",
+    );
+
     let remote = RemoteConfig {
         url: host.url.clone(),
         api_key: host.api_key.clone(),
     };
     let client = KatulongAttachClient::new(remote);
 
-    // Step 0a: open the attach.
+    // Step 0a: open the attach. Katulong's WS attach handler keys
+    // sessions by NAME (`sessions.get(name)`), not by the opaque
+    // session_id — passing the id silently spawns a *new* session
+    // named after the id, so the keystrokes go to the wrong PTY.
+    // The id is still kept on the task for stable identity (and
+    // for the http `/sessions/by-id/:id/...` routes which DO key
+    // by id) but the WS attach uses the name.
     let attach = match client
-        .attach(&session_id, DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS)
+        .attach(&session_name_str, DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS)
         .await
     {
         Ok(a) => a,
@@ -1281,12 +1303,18 @@ async fn dispatch_via_attach_client(
         }
     };
 
+    info!(task = task_id, "dispatch v2: WS attach open");
+
     // Snapshot the stripped-buffer length *before* sending the
     // launch keystroke. The TUI-ready wait will start matching from
     // this offset, so we can't miss a fast render that lands in the
     // gap between `input(...)` returning and `wait_for(...)`
     // registering. See `WaitFrom::FromOffset` docs.
     let pre_launch_offset = attach.stripped_offset().await;
+    info!(
+        task = task_id,
+        pre_launch_offset, "dispatch v2: pre-launch offset captured",
+    );
 
     // Step 0b: send the launch keystroke (e.g., `claude\r`).
     let launch = format!("{role_command}\r");
@@ -1305,6 +1333,8 @@ async fn dispatch_via_attach_client(
         .await;
         return;
     }
+
+    info!(task = task_id, "dispatch v2: launch keystroke sent");
 
     // Step 1: wait for Claude's TUI to render. 30s accommodates
     // cold starts where MCP servers / auth checks delay the first
@@ -1331,6 +1361,8 @@ async fn dispatch_via_attach_client(
         .await;
         return;
     }
+
+    info!(task = task_id, "dispatch v2: TUI ready");
 
     // Step 2: paste the prompt body.
     if let Err(e) = attach.paste(&prompt).await {
@@ -1368,6 +1400,8 @@ async fn dispatch_via_attach_client(
         }
     }
 
+    info!(task = task_id, "dispatch v2: paste sent");
+
     // Step 3b: submit.
     if let Err(e) = attach.press(KeyName::Enter).await {
         finish_v2(
@@ -1384,6 +1418,8 @@ async fn dispatch_via_attach_client(
         .await;
         return;
     }
+
+    info!(task = task_id, "dispatch v2: submit sent");
 
     // Step 4: confirm Claude started processing.
     if let Err(e) = attach
@@ -1438,6 +1474,14 @@ async fn finish_v2(
     step: u8,
     reason: &str,
 ) {
+    info!(
+        task = task_id,
+        host = %host_id,
+        outcome,
+        step,
+        reason,
+        "dispatch v2: finish",
+    );
     publish_dispatch_outcome(
         state,
         host_id,

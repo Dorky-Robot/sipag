@@ -212,6 +212,19 @@ impl KatulongAttachClient {
             auth.parse()
                 .map_err(|e| AttachError::InvalidUrl(format!("invalid auth header: {e}")))?,
         );
+        // Katulong's WS upgrade handler refuses requests whose
+        // `Origin` host doesn't match the request `Host`. Browsers
+        // set Origin automatically; tokio-tungstenite does not. Use
+        // the configured base URL (already validated as an http(s)
+        // scheme by the caller) as the Origin — it has the same
+        // host as the WS URL by construction.
+        let origin = self.remote.url.trim_end_matches('/');
+        req.headers_mut().insert(
+            "Origin",
+            origin
+                .parse()
+                .map_err(|e| AttachError::InvalidUrl(format!("invalid origin: {e}")))?,
+        );
 
         // Open WS with explicit message-size limits. Bounds the
         // transient allocation when katulong (or anything posing as
@@ -501,17 +514,24 @@ impl KatulongAttach {
         self.state.lock().await.raw_view()
     }
 
-    /// Close the attach. Drops the writer channel (writer task
-    /// exits cleanly) and aborts the reader task.
+    /// Close the attach. Aborts the reader first so its
+    /// `writer_tx.clone()` is dropped, then closes the writer
+    /// channel, then awaits the writer task's graceful exit.
     pub async fn close(mut self) {
-        // Taking the Sender (and letting it drop here) is what
-        // signals the writer task to exit.
+        // CRITICAL ORDERING: the reader task holds a clone of
+        // `writer_tx` (so it can fire Pull on DataAvailable). If we
+        // drop only our `writer_tx` here, the channel stays open
+        // because of the reader's clone — the writer task then
+        // blocks forever on `rx.recv()` and `h.await` below hangs.
+        // Aborting + joining the reader first releases its sender,
+        // so dropping ours next closes the channel cleanly.
+        if let Some(h) = self._reader_handle.take() {
+            h.abort();
+            let _ = h.await;
+        }
         let _ = self.writer_tx.take();
         if let Some(h) = self._writer_handle.take() {
             let _ = h.await;
-        }
-        if let Some(h) = self._reader_handle.take() {
-            h.abort();
         }
     }
 }
