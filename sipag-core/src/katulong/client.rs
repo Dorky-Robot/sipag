@@ -1185,6 +1185,16 @@ mod tests {
             build_origin("https://katulong.example:8443").unwrap(),
             "https://katulong.example:8443"
         );
+        // IPv6 literal hosts — brackets must survive since `/`, `?`,
+        // `#` don't appear inside `[::1]`. Pins the property so a
+        // future refactor that swaps the split-set for something
+        // smarter (e.g., splits on `:` to find the port) doesn't
+        // silently break IPv6 deployments.
+        assert_eq!(
+            build_origin("https://[::1]:8443").unwrap(),
+            "https://[::1]:8443"
+        );
+        assert_eq!(build_origin("http://[::1]").unwrap(), "http://[::1]");
     }
 
     #[test]
