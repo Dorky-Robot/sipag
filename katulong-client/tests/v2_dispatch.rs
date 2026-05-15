@@ -1,18 +1,16 @@
-//! End-to-end tests for the v2 dispatch attach client against a
-//! real `katulong` server. Designed to catch protocol mismatches at
-//! the layer where they actually matter — wire format, WS upgrade
-//! requirements (Origin), session-name lookup keys, drift signals
-//! parsed as the bytes katulong actually emits.
+//! End-to-end smoke: drive a `KatulongAttachClient` against a real
+//! katulong subprocess. The original "everything works together"
+//! test that surfaced the four prod bugs in PR #534.
 //!
-//! Activated via `KATULONG_REPO=/path/to/katulong-checkout`. Tests
-//! print a skip notice and pass when the env var is missing.
+//! Activated via `KATULONG_REPO=/path/to/katulong-checkout`. Skips
+//! cleanly when unset so CI without a katulong checkout stays
+//! green.
 
+mod common;
+
+use common::{KatulongHarness, SKIP_MSG};
 use katulong_client::{KatulongAttachClient, KatulongClient, RemoteConfig, WaitFrom};
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Bootstrap test: drive `KatulongAttachClient` against a real
 /// katulong subprocess. Validates the full WS-level handshake, the
@@ -26,7 +24,7 @@ use std::time::{Duration, Instant};
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attach_input_round_trip_against_real_katulong() {
     let Some(harness) = KatulongHarness::try_start().expect("spawn katulong") else {
-        eprintln!("KATULONG_REPO not set or invalid; skipping v2 e2e tests");
+        eprintln!("{SKIP_MSG}");
         return;
     };
 
@@ -74,114 +72,4 @@ async fn attach_input_round_trip_against_real_katulong() {
     tokio::time::timeout(Duration::from_secs(2), attach.close())
         .await
         .expect("close hung — likely a writer-task deadlock regression");
-}
-
-// ── harness ─────────────────────────────────────────────────────────
-
-/// One running katulong server. Owns the child process; killed on
-/// drop so a panicking test doesn't strand the subprocess or its
-/// tmux PTYs.
-struct KatulongHarness {
-    child: Option<Child>,
-    port: u16,
-    /// Temp dir used as `KATULONG_DATA_DIR`. Kept alive until the
-    /// harness drops so katulong can finish writing state.
-    _data_dir: tempfile::TempDir,
-}
-
-impl KatulongHarness {
-    /// Spawn katulong on a free port using a fresh state dir. Returns
-    /// `Ok(None)` when `KATULONG_REPO` isn't set — the test should
-    /// skip cleanly.
-    fn try_start() -> std::io::Result<Option<Self>> {
-        let Ok(repo) = std::env::var("KATULONG_REPO") else {
-            return Ok(None);
-        };
-        let repo = PathBuf::from(repo);
-        let server_js = repo.join("server.js");
-        if !server_js.exists() {
-            return Ok(None);
-        }
-
-        let port = free_port()?;
-        let data_dir = tempfile::tempdir()?;
-
-        let child = Command::new("node")
-            .arg(&server_js)
-            .current_dir(&repo)
-            .env("PORT", port.to_string())
-            .env("KATULONG_BIND_HOST", "127.0.0.1")
-            .env("KATULONG_DATA_DIR", data_dir.path())
-            .env("LOG_LEVEL", "warn")
-            .env("NODE_ENV", "production")
-            // PATH/SHELL/HOME inherited — katulong needs tmux + shell.
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-
-        let harness = KatulongHarness {
-            child: Some(child),
-            port,
-            _data_dir: data_dir,
-        };
-
-        // Poll the HTTP listener until ready. Katulong's Node boot
-        // takes ~300ms-2s on this hardware; cap at 15s.
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            if let Ok(status) = http_head_status(&format!("http://127.0.0.1:{port}/sessions")) {
-                // 2xx happy path; 401/403 still means listener is up.
-                if (200..500).contains(&status) {
-                    return Ok(Some(harness));
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        Err(std::io::Error::other(
-            "katulong did not respond on /sessions within 15s",
-        ))
-    }
-
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-}
-
-impl Drop for KatulongHarness {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-fn free_port() -> std::io::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
-}
-
-/// Minimal HTTP GET that reads just the status code from the start
-/// of the response. Used for readiness polling; avoids pulling in a
-/// runtime HTTP dep for a probe loop.
-fn http_head_status(url: &str) -> std::io::Result<u16> {
-    let parsed = url::Url::parse(url).map_err(std::io::Error::other)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| std::io::Error::other("missing host"))?;
-    let port = parsed.port().unwrap_or(80);
-    let path = parsed.path();
-
-    let mut sock = TcpStream::connect((host, port))?;
-    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
-    sock.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n");
-    sock.write_all(req.as_bytes())?;
-    let mut buf = [0u8; 64];
-    let n = sock.read(&mut buf)?;
-    let head = std::str::from_utf8(&buf[..n]).unwrap_or("");
-    head.split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| std::io::Error::other(format!("bad status line: {head:?}")))
 }
