@@ -20,9 +20,6 @@
 //! function here points at the new path, that's the canonical place
 //! to look once the migration lands.
 
-pub mod client;
-pub mod protocol;
-
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;

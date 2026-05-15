@@ -7,8 +7,7 @@
 //! Activated via `KATULONG_REPO=/path/to/katulong-checkout`. Tests
 //! print a skip notice and pass when the env var is missing.
 
-use sipag_core::katulong::client::{KatulongAttachClient, WaitFrom};
-use sipag_core::katulong::{KatulongClient, RemoteConfig};
+use katulong_client::{KatulongAttachClient, KatulongClient, RemoteConfig, WaitFrom};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;

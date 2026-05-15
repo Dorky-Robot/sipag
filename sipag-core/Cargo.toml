@@ -6,6 +6,10 @@ edition = "2021"
 description = "Core library for sipag — sandbox launcher for Claude Code"
 
 [dependencies]
+# Katulong wire client lives in its own workspace crate so it can be
+# developed and tested in isolation. `sipag-core::katulong` re-exports
+# it for backward compatibility with existing call sites.
+katulong-client = { path = "../katulong-client" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 log = "0.4"

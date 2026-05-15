@@ -57,8 +57,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
-use super::protocol::{Inbound, Outbound};
-use super::RemoteConfig;
+use crate::protocol::{Inbound, Outbound};
+use crate::RemoteConfig;
 
 // ── public types ────────────────────────────────────────────────
 

@@ -1,0 +1,43 @@
+[package]
+name = "katulong-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Headless Rust client for katulong — a programmatic 'browser' that speaks katulong's HTTP + WebSocket wire protocol"
+
+[lib]
+name = "katulong_client"
+path = "src/lib.rs"
+
+# Modular by design: the same library is usable from sipag (the task
+# manager) AND as a standalone CLI for poking sessions from the shell.
+# `katulong-client paste <session> '<body>' && katulong-client press
+# <session> enter` lets you validate behaviour from a terminal without
+# round-tripping through sipag.
+[[bin]]
+name = "katulong-client"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP + URL handling for the REST surface (`/sessions`, `/sessions/by-id/:id/output`, ...).
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+url = "2"
+
+# WS attach client.
+futures-util = { version = "0.3", default-features = false }
+regex = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
+tracing = "0.1"
+
+# CLI surface for the binary.
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
