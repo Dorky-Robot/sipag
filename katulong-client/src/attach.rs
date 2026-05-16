@@ -421,7 +421,16 @@ impl KatulongAttach {
     ///
     /// To send a body and submit, call `input(body)` then
     /// `press(KeyName::Enter)` as separate calls.
+    ///
+    /// Returns an error if the attach has gone terminal (session
+    /// removed, transport error, exit). Without this check, the
+    /// channel send would still succeed (the writer task is alive
+    /// and ready) and the WS frame would still be transmitted —
+    /// but katulong silently drops Input messages for unknown
+    /// sessions, so the bytes would vanish and the caller would
+    /// never know.
     pub async fn input(&self, bytes: impl Into<String>) -> AttachResult<()> {
+        self.check_not_terminal().await?;
         let data = bytes.into();
         self.writer_tx
             .as_ref()
@@ -432,6 +441,17 @@ impl KatulongAttach {
             })
             .await
             .map_err(|_| AttachError::Closed)
+    }
+
+    /// Check whether the attach has gone terminal (the reader task
+    /// observed `session-removed` / `exit` / a transport error).
+    /// Called at the start of every outbound op so callers see the
+    /// underlying reason instead of a misleading `Ok(())`.
+    async fn check_not_terminal(&self) -> AttachResult<()> {
+        if let Some(reason) = self.state.lock().await.terminal.as_ref() {
+            return Err(reason.clone().into());
+        }
+        Ok(())
     }
 
     /// Send a named keystroke as its byte representation.
@@ -452,6 +472,7 @@ impl KatulongAttach {
     /// anything, but TUI apps reflow based on PTY size, so it's
     /// worth setting a reasonable default after attach.
     pub async fn resize(&self, cols: u16, rows: u16) -> AttachResult<()> {
+        self.check_not_terminal().await?;
         self.writer_tx
             .as_ref()
             .ok_or(AttachError::Closed)?
@@ -2076,6 +2097,63 @@ mod tests {
         let result = attach
             .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_secs(1)))
             .await;
+        assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn input_returns_terminal_reason_when_session_removed() {
+        // Without this check, input() succeeds silently after the
+        // session is gone — the writer task is alive and the WS
+        // frame ships, but katulong's `writeInput` looks up the
+        // session by name, doesn't find it, and silently drops the
+        // bytes. The notebook UI returns ok:true and nothing
+        // happens. This test pins that input() now surfaces the
+        // terminal reason instead.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.input("would-vanish").await;
+        assert!(
+            matches!(result, Err(AttachError::SessionRemoved)),
+            "input() must propagate the terminal reason, not silently succeed; got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn input_returns_transport_error_when_terminal_via_transport() {
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::Transport("network dead".into()));
+        }
+        let result = attach.input("would-vanish").await;
+        assert!(matches!(result, Err(AttachError::Transport(_))));
+    }
+
+    #[tokio::test]
+    async fn press_returns_terminal_reason_when_session_removed() {
+        // press() routes through input(), so it inherits the
+        // terminal check. Pin it explicitly so a future split of
+        // the two methods keeps the behaviour.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.press(KeyName::Enter).await;
+        assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn resize_returns_terminal_reason_when_session_removed() {
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.resize(80, 24).await;
         assert!(matches!(result, Err(AttachError::SessionRemoved)));
     }
 
