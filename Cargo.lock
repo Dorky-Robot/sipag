@@ -1454,6 +1454,7 @@ dependencies = [
  "clap",
  "futures-util",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
