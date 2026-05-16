@@ -183,6 +183,14 @@ pub struct KatulongAttachClient {
 
 impl KatulongAttachClient {
     pub fn new(remote: RemoteConfig) -> Self {
+        // rustls 0.23 has no default crypto provider; the first TLS
+        // handshake panics unless one is installed. Library users
+        // (sipag) shouldn't have to know about this — we install
+        // best-effort here. If something else in the process already
+        // installed a provider, `install_default` returns Err and we
+        // silently keep the existing one. The `OnceLock` is just to
+        // avoid the work on every `new()`.
+        ensure_crypto_provider();
         Self {
             remote: Arc::new(remote),
         }
@@ -1149,6 +1157,22 @@ async fn dispatch_inbound(
     }
 }
 
+/// Best-effort install of rustls's ring crypto provider. Idempotent
+/// across calls and threads; safe if another part of the process
+/// already installed a (possibly different) provider — we just keep
+/// theirs. rustls 0.23+ requires this before any TLS handshake or
+/// the connect path panics with "Could not automatically determine
+/// the process-level CryptoProvider".
+pub(crate) fn ensure_crypto_provider() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // Returns Err if a provider is already installed — which is
+        // fine, that just means someone got here first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Compact one-line summary of an Inbound for the diagnostic
 /// reader trace. We deliberately omit the data payload (potentially
 /// huge ANSI bytes) and keep only the shape + key fields a human
@@ -1229,6 +1253,17 @@ fn truncate_for_log(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_crypto_provider_is_idempotent() {
+        // Two back-to-back calls must not panic. The first installs;
+        // the second hits the OnceLock no-op path. Library users get
+        // this guarantee — every `KatulongAttachClient::new` calls
+        // through, and a sipag process that constructs several
+        // clients shouldn't crash.
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+    }
 
     #[test]
     fn ws_url_swaps_https_for_wss() {

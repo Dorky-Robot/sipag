@@ -32,6 +32,13 @@ regex = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "io-util", "time", "signal"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
+# rustls 0.23 dropped its built-in default provider; calling code MUST
+# install one before any TLS handshake or rustls panics at runtime.
+# `ring` is the lighter of the two options and what tokio-tungstenite's
+# CI builds against. Installed once at binary startup (see `main.rs`)
+# and best-effort from `KatulongAttachClient::new` so library users
+# (sipag) don't have to know about it.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 tracing = "0.1"
 
 # CLI surface for the binary.
