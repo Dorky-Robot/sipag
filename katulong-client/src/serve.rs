@@ -58,8 +58,22 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
 
     let katulong_port = free_port()?;
     let data_dir = tempfile::tempdir()?;
+    // Per-sandbox tmux socket. Without this, the sandbox katulong
+    // shares the default tmux socket with any other katulong instance
+    // the operator happens to have running (e.g. their daily-driver
+    // katulong on a different port). The other instance discovers
+    // our newly-spawned `kat_<id>` session, adopts it as external,
+    // and runs its OWN `tmux -C attach-session -d -t …` — the `-d`
+    // detaches OUR control client, our control proc closes with
+    // code 0, katulong relays exit:0 to the Rust attach, and the
+    // next /api/input fails with "session ended with exit code 0".
+    // KATULONG_TMUX_SOCKET must match /^[A-Za-z0-9_-]+$/ on the
+    // katulong side, so we only use the process id (which already
+    // does).
+    let tmux_socket = format!("sipag-sandbox-{}", std::process::id());
     println!(
-        "[serve] spawning katulong on 127.0.0.1:{katulong_port} (state in {:?})",
+        "[serve] spawning katulong on 127.0.0.1:{katulong_port} \
+         (state in {:?}, tmux socket {tmux_socket})",
         data_dir.path()
     );
 
@@ -69,6 +83,7 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .env("PORT", katulong_port.to_string())
         .env("KATULONG_BIND_HOST", "127.0.0.1")
         .env("KATULONG_DATA_DIR", data_dir.path())
+        .env("KATULONG_TMUX_SOCKET", &tmux_socket)
         .env("LOG_LEVEL", "warn")
         .env("NODE_ENV", "production")
         // Suppress katulong's own logs so the notebook UI is the
@@ -81,6 +96,7 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
     let _guard = TeardownGuard {
         child: Some(child),
         data_dir: Some(data_dir),
+        tmux_socket: tmux_socket.clone(),
     };
 
     wait_until_ready(katulong_port, Duration::from_secs(15))?;
@@ -498,6 +514,7 @@ impl IntoResponse for ApiError {
 struct TeardownGuard {
     child: Option<Child>,
     data_dir: Option<tempfile::TempDir>,
+    tmux_socket: String,
 }
 
 impl Drop for TeardownGuard {
@@ -506,6 +523,14 @@ impl Drop for TeardownGuard {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Kill the per-sandbox tmux server. tmux servers outlive their
+        // spawning process by design, so without this every sandbox
+        // run leaks an orphan tmux server on its private socket.
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.tmux_socket, "kill-server"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         if let Some(dir) = self.data_dir.take() {
             let path = dir.path().to_path_buf();
             drop(dir);

@@ -51,12 +51,20 @@ async fn main() -> anyhow::Result<()> {
         data_dir.path()
     );
 
+    // Per-sandbox tmux socket — see the comment in serve.rs for the
+    // full rationale. Short version: without this the sandbox shares
+    // the default tmux socket with the operator's other katulong
+    // instance, which adopts our session and detaches our control
+    // client, killing the attach with exit code 0.
+    let tmux_socket = format!("sipag-sandbox-{}", std::process::id());
+
     let mut child = Command::new("node")
         .arg(&server_js)
         .current_dir(&repo)
         .env("PORT", port.to_string())
         .env("KATULONG_BIND_HOST", "127.0.0.1")
         .env("KATULONG_DATA_DIR", data_dir.path())
+        .env("KATULONG_TMUX_SOCKET", &tmux_socket)
         .env("LOG_LEVEL", "info")
         .env("NODE_ENV", "production")
         // Show katulong's stdout/stderr so operator sees what's
@@ -70,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
     let _guard = TeardownGuard {
         child: &mut child,
         data_dir,
+        tmux_socket: tmux_socket.clone(),
     };
 
     wait_until_ready(port, Duration::from_secs(15))?;
@@ -119,12 +128,20 @@ struct TeardownGuard<'a> {
     child: &'a mut Child,
     // Hold the tempdir alive until drop runs, then it's deleted.
     data_dir: tempfile::TempDir,
+    tmux_socket: String,
 }
 
 impl Drop for TeardownGuard<'_> {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Kill the per-sandbox tmux server (otherwise it outlives the
+        // node child and leaks on the operator's box).
+        let _ = std::process::Command::new("tmux")
+            .args(["-L", &self.tmux_socket, "kill-server"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
         let path = self.data_dir.path().to_path_buf();
         // tempdir's drop deletes the directory; we just announce.
         println!("[sandbox] katulong killed, state dir cleaned: {path:?}");

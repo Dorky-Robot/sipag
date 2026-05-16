@@ -30,6 +30,9 @@ pub struct KatulongHarness {
     /// Temp dir used as `KATULONG_DATA_DIR`. Kept alive until the
     /// harness drops so katulong can finish writing state.
     _data_dir: tempfile::TempDir,
+    /// Per-harness tmux socket name. The harness kills its tmux
+    /// server on drop so the socket and any orphaned PTYs go with it.
+    tmux_socket: String,
 }
 
 impl KatulongHarness {
@@ -48,6 +51,15 @@ impl KatulongHarness {
 
         let port = free_port()?;
         let data_dir = tempfile::tempdir()?;
+        // Per-harness tmux socket — see serve.rs for the full
+        // rationale. Without this the harness shares the default
+        // tmux socket with any other katulong on the operator's
+        // box, which adopts the session and detaches our control
+        // client mid-test. The free port doubles as a guaranteed-
+        // unique suffix so parallel `cargo test` workers (or two
+        // harnesses inside one test) never collide on the socket
+        // name.
+        let tmux_socket = format!("sipag-test-{}-{port}", std::process::id());
 
         let child = Command::new("node")
             .arg(&server_js)
@@ -55,6 +67,7 @@ impl KatulongHarness {
             .env("PORT", port.to_string())
             .env("KATULONG_BIND_HOST", "127.0.0.1")
             .env("KATULONG_DATA_DIR", data_dir.path())
+            .env("KATULONG_TMUX_SOCKET", &tmux_socket)
             .env("LOG_LEVEL", "warn")
             .env("NODE_ENV", "production")
             // PATH/SHELL/HOME inherited — katulong needs tmux + shell.
@@ -66,6 +79,7 @@ impl KatulongHarness {
             child: Some(child),
             port,
             _data_dir: data_dir,
+            tmux_socket,
         };
 
         // Poll the HTTP listener until ready. Katulong's Node boot
@@ -95,6 +109,13 @@ impl Drop for KatulongHarness {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Kill the per-harness tmux server (otherwise it outlives the
+        // node child and orphan PTYs accumulate over CI runs).
+        let _ = Command::new("tmux")
+            .args(["-L", &self.tmux_socket, "kill-server"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
