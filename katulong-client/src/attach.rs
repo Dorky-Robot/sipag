@@ -1021,6 +1021,13 @@ async fn dispatch_inbound(
     writer_tx: &mpsc::Sender<Outbound>,
     session_name: &str,
 ) {
+    // One-line trace of every inbound message we receive — set
+    // `RUST_LOG=katulong_client=info` to capture. Used to diagnose
+    // the "session ends with exit code 0 when the operator opens the
+    // session in a second katulong tab" repro: when Exit shows up
+    // here, the most recent N inbound lines tell us what katulong
+    // did just before it killed us.
+    tracing::info!(target: "katulong_client::attach::inbound", "{}", inbound_one_liner(&msg));
     match msg {
         Inbound::Attached { session, data } if session == session_name => {
             // Treated as a snapshot (reconnect or re-attach).
@@ -1107,9 +1114,20 @@ async fn dispatch_inbound(
             }
         }
         Inbound::Exit { session, code } if session == session_name => {
+            tracing::warn!(
+                target: "katulong_client::attach::inbound",
+                session = %session,
+                code,
+                "EXIT received from katulong — marking attach terminal"
+            );
             state.lock().await.mark_terminal(TerminalReason::Exit(code));
         }
         Inbound::SessionRemoved { session } if session == session_name => {
+            tracing::warn!(
+                target: "katulong_client::attach::inbound",
+                session = %session,
+                "SESSION_REMOVED received from katulong — marking attach terminal"
+            );
             state
                 .lock()
                 .await
@@ -1128,6 +1146,63 @@ async fn dispatch_inbound(
         }
         Inbound::Pong => { /* heartbeat ack; deferred */ }
         _ => { /* ignored types */ }
+    }
+}
+
+/// Compact one-line summary of an Inbound for the diagnostic
+/// reader trace. We deliberately omit the data payload (potentially
+/// huge ANSI bytes) and keep only the shape + key fields a human
+/// needs to recognise which event was which.
+fn inbound_one_liner(msg: &Inbound) -> String {
+    match msg {
+        Inbound::Attached { session, data } => {
+            format!("Attached session={session} buf={}B", data.len())
+        }
+        Inbound::SeqInit { session, seq } => {
+            format!("SeqInit session={session} seq={seq}")
+        }
+        Inbound::PullResponse {
+            session,
+            data,
+            cursor,
+        } => format!(
+            "PullResponse session={session} bytes={} cursor={cursor}",
+            data.len()
+        ),
+        Inbound::PullSnapshot {
+            session,
+            data,
+            cursor,
+        } => format!(
+            "PullSnapshot session={session} bytes={} cursor={cursor}",
+            data.len()
+        ),
+        Inbound::Output {
+            session,
+            data,
+            from_seq,
+            cursor,
+        } => format!(
+            "Output session={session} bytes={} from={from_seq} to={cursor}",
+            data.len()
+        ),
+        Inbound::DataAvailable { session } => format!("DataAvailable session={session}"),
+        Inbound::StateCheck {
+            session,
+            fingerprint,
+            seq,
+        } => format!("StateCheck session={session} seq={seq} fp={fingerprint}"),
+        Inbound::Exit { session, code } => format!("Exit session={session} code={code}"),
+        Inbound::SessionRemoved { session } => format!("SessionRemoved session={session}"),
+        Inbound::ResizeSync { cols, rows } => format!("ResizeSync cols={cols} rows={rows}"),
+        Inbound::Switched { session } => format!("Switched session={session}"),
+        Inbound::SessionRenamed { name, id } => format!("SessionRenamed name={name} id={id}"),
+        Inbound::SessionUpdated { .. } => "SessionUpdated".to_string(),
+        Inbound::Error { message } => {
+            format!("Error message={}", truncate_for_log(message))
+        }
+        Inbound::Pong => "Pong".to_string(),
+        Inbound::Other => "Other".to_string(),
     }
 }
 

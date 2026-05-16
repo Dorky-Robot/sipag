@@ -525,6 +525,68 @@ test.describe("notebook page", () => {
     });
   });
 
+  test("paste-then-open-katulong-then-press-enter (exact user repro)", async ({
+    page,
+    context,
+  }) => {
+    // The bug the user is hitting in the wild:
+    //   1. Create cell  → session
+    //   2. Paste cell   → bytes in buffer, NO newline
+    //   3. Open katulong tab via ?s=<name>  → auto-attach
+    //   4. Press cell (enter)  → 500 "session ended with exit code 0"
+    //
+    // Earlier diagnostic tests (focus-only, ctrl-d-only) opened
+    // katulong AFTER an empty session and pasted directly. Neither
+    // reproduced. The missing variable is the buffered-but-unsent
+    // line: when our /api/paste landed `echo hello from notebook`
+    // (no \r) and THEN katulong attached with a different size,
+    // something about the resize+pending-line+second-attach combo
+    // is the trigger. If this test fails the way the user describes,
+    // we have a deterministic anchor.
+    await page.goto("/");
+    await clickPlay(page, "create");
+    await expect(page.locator("#meta-session")).toContainText("sipag-d-");
+
+    // Step 2 — paste (no newline), exactly like the user.
+    await page
+      .locator("#cell-paste input[data-name='body']")
+      .fill("echo hello from notebook");
+    await clickPlay(page, "paste");
+    await expect(page.locator("#out-paste")).toContainText('"ok": true', {
+      timeout: 5_000,
+    });
+
+    // Step 3 — open katulong in a second tab via auto-attach link.
+    const stateResp = await page.request.get("/api/state");
+    const stateBody = (await stateResp.json()) as {
+      katulong_url: string;
+      current_session: string | null;
+    };
+    const katPage = await context.newPage();
+    await katPage.goto(
+      `${stateBody.katulong_url}/?s=${encodeURIComponent(stateBody.current_session!)}`
+    );
+    // Give katulong's xterm time to send Attach + receive snapshot.
+    await katPage.waitForTimeout(3_000);
+
+    // Step 4 — press enter. With the bug, this returns 500
+    // "session ended with exit code 0".
+    await page.bringToFront();
+    await page
+      .locator("#cell-press select[data-name='key']")
+      .selectOption("enter");
+    await clickPlay(page, "press");
+
+    const pressOut = await outputOf(page, "press");
+    if (pressOut.includes("session ended")) {
+      console.log(`[repro confirmed] press output: ${pressOut}`);
+    }
+    expect(
+      pressOut,
+      "user's bug reproduced — paste-then-open-katulong-then-press-enter kills the session"
+    ).toContain('"ok": true');
+  });
+
   test("live view renders xterm.js (not a flat <pre>)", async ({ page }) => {
     // Pins the architectural fix: the visual is an xterm.js
     // terminal, NOT a plain <pre>. xterm.js applies cursor
