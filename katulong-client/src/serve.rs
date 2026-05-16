@@ -108,6 +108,7 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .route("/api/wait-for", post(api_wait_for))
         .route("/api/lines", get(api_lines))
         .route("/api/close", post(api_close))
+        .route("/api/reset", post(api_reset))
         .with_state(state.clone());
 
     let bind = format!("127.0.0.1:{}", opts.port);
@@ -357,6 +358,30 @@ async fn api_close(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
     if let Some((_, attach)) = s.current.lock().await.take() {
         let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
     }
+    Ok(Json(OkResp { ok: true }))
+}
+
+// ── /api/reset ──────────────────────────────────────────────────
+
+/// Test-isolation aid: close the persistent attach AND kill every
+/// session on the underlying katulong. Lets a playwright `beforeEach`
+/// start from a known-empty state and avoid the
+/// `MAX_SESSIONS=20` accumulation that surfaces when tests share
+/// one long-lived `serve` instance.
+async fn api_reset(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
+    if let Some((_, attach)) = s.current.lock().await.take() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
+    }
+    let http = s.http.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(sessions) = http.list_sessions() {
+            for sess in sessions {
+                let _ = http.kill_session(&sess.id);
+            }
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("reset join: {e}")))?;
     Ok(Json(OkResp { ok: true }))
 }
 

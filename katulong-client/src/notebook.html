@@ -27,10 +27,17 @@
   header .pill { display: inline-block; padding: 2px 8px; border: 1px solid var(--border);
     border-radius: 10px; color: var(--fg); }
   .cells { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
-  .iframe-wrap { display: flex; flex-direction: column; }
-  .iframe-wrap .label { color: var(--dim); padding-bottom: 6px; }
-  iframe { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 4px;
-    background: #000; }
+  .live-wrap { display: flex; flex-direction: column; }
+  .live-wrap .label { color: var(--dim); padding-bottom: 6px; display: flex;
+    align-items: center; gap: 8px; }
+  .live-wrap .label .ext-link { color: var(--accent); text-decoration: none; }
+  .live-wrap .label .ext-link:hover { text-decoration: underline; }
+  .live-wrap .label .toggle { margin-left: auto; color: var(--dim); cursor: pointer; }
+  #live-view { flex: 1; width: 100%; padding: 10px 12px; background: #000;
+    border: 1px solid var(--border); border-radius: 4px; color: var(--fg);
+    white-space: pre-wrap; word-break: break-word; overflow-y: auto;
+    font: inherit; line-height: 1.4; }
+  #live-view:empty::before { content: "(click ▶ Create to start a session)"; color: var(--dim); }
   .cell { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
     padding: 10px 12px; }
   .cell-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -66,9 +73,13 @@
 
 <section class="cells" id="cells"></section>
 
-<section class="iframe-wrap">
-  <div class="label">live katulong session ↓</div>
-  <iframe id="kat-frame" src="about:blank"></iframe>
+<section class="live-wrap">
+  <div class="label">
+    live view (polled from <code>/api/lines</code>) ↓
+    <a class="ext-link" id="kat-link" href="#" target="_blank">↗ open katulong in new tab</a>
+    <label class="toggle"><input type="checkbox" id="live-toggle" checked> auto-refresh</label>
+  </div>
+  <pre id="live-view"></pre>
 </section>
 
 <footer>
@@ -215,6 +226,12 @@ function renderCells() {
       values[inp.name] = node ? node.value : '';
     });
     btn.disabled = true;
+    // Mark the output as pending so a re-clicking caller (or a
+    // Playwright test) can wait on the transition rather than
+    // observing stale content from a prior click.
+    const pendingOut = document.getElementById('out-' + cellId);
+    pendingOut.className = 'output';
+    pendingOut.textContent = '⏳ running…';
     try {
       const result = await cell.run(values);
       renderOutput(cellId, result);
@@ -243,17 +260,59 @@ function escapeHtml(s) {
   }[c]));
 }
 
+async function refreshLiveView() {
+  if (!state.session) {
+    document.getElementById('live-view').textContent = '';
+    return;
+  }
+  try {
+    const r = await api('GET', '/api/lines?n=40');
+    if (r.ok && r.data && Array.isArray(r.data.lines)) {
+      document.getElementById('live-view').textContent = r.data.lines.join('\n');
+    }
+  } catch (_) {
+    // Best-effort polling; ignore transient errors.
+  }
+}
+
+function startLivePoll() {
+  if (state.pollHandle) return;
+  state.pollHandle = setInterval(refreshLiveView, 500);
+}
+
+function stopLivePoll() {
+  if (state.pollHandle) {
+    clearInterval(state.pollHandle);
+    state.pollHandle = null;
+  }
+}
+
 async function bootstrap() {
   renderCells();
   const r = await api('GET', '/api/state');
   if (r.ok) {
     state.katulongUrl = r.data.katulong_url;
-    state.session = r.data.current_session;
+    // Guard against a race: if the user (or a test) clicked a Play
+    // button before this /api/state response landed, state.session
+    // is already set to whatever the cell created. Don't clobber.
+    if (state.session === null) {
+      state.session = r.data.current_session;
+    }
     renderMeta();
-    document.getElementById('kat-frame').src = state.katulongUrl + '/';
+    document.getElementById('kat-link').href = state.katulongUrl + '/';
   } else {
     renderMeta();
   }
+
+  // Auto-refresh toggle controls the polling loop. Default on.
+  const toggle = document.getElementById('live-toggle');
+  toggle.addEventListener('change', () => {
+    if (toggle.checked) startLivePoll();
+    else stopLivePoll();
+  });
+  startLivePoll();
+  // Marker for tests to wait on.
+  window.__notebookReady = true;
 }
 
 bootstrap();
