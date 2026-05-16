@@ -3,6 +3,16 @@
 <head>
 <meta charset="utf-8">
 <title>katulong-client — notebook</title>
+<!--
+  xterm.js renders the live view. Same emulator katulong's own
+  browser UI uses, so cursor escapes get applied in 2D space and
+  shell-quirk autosuggestions / syntax highlighting don't leak
+  adjacent text into the buffer the way our previous flat-text
+  view did. CDN-loaded — fine for a localhost sandbox; an air-
+  gapped deployment would vendor the script.
+-->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <style>
   :root {
     color-scheme: dark;
@@ -33,11 +43,11 @@
   .live-wrap .label .ext-link { color: var(--accent); text-decoration: none; }
   .live-wrap .label .ext-link:hover { text-decoration: underline; }
   .live-wrap .label .toggle { margin-left: auto; color: var(--dim); cursor: pointer; }
-  #live-view { flex: 1; width: 100%; padding: 10px 12px; background: #000;
-    border: 1px solid var(--border); border-radius: 4px; color: var(--fg);
-    white-space: pre-wrap; word-break: break-word; overflow-y: auto;
-    font: inherit; line-height: 1.4; }
-  #live-view:empty::before { content: "(click ▶ Create to start a session)"; color: var(--dim); }
+  #live-view { flex: 1; width: 100%; padding: 6px; background: #000;
+    border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
+  #live-view .xterm { padding: 4px; }
+  #live-view.empty::before { content: "(click ▶ Create to start a session)";
+    color: var(--dim); padding: 10px 12px; display: block; }
   .cell { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
     padding: 10px 12px; }
   .cell-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
@@ -75,11 +85,11 @@
 
 <section class="live-wrap">
   <div class="label">
-    live view (polled from <code>/api/lines</code>) ↓
+    live view (xterm.js, fed from <code>/api/snapshot</code>) ↓
     <a class="ext-link" id="kat-link" href="#" target="_blank">↗ open katulong in new tab</a>
     <label class="toggle"><input type="checkbox" id="live-toggle" checked> auto-refresh</label>
   </div>
-  <pre id="live-view"></pre>
+  <div id="live-view" class="empty"></div>
 </section>
 
 <footer>
@@ -260,16 +270,52 @@ function escapeHtml(s) {
   }[c]));
 }
 
+// xterm.js terminal instance; created lazily on first session.
+state.term = null;
+
+function ensureTerminal() {
+  if (state.term) return state.term;
+  const container = document.getElementById('live-view');
+  container.classList.remove('empty');
+  // Conservative dims; xterm.js handles overflow scrolling
+  // regardless of container size.
+  state.term = new window.Terminal({
+    cols: 120,
+    rows: 36,
+    convertEol: true,
+    fontSize: 12,
+    fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, monospace',
+    theme: {
+      background: '#000',
+      foreground: '#d4d4d4',
+      cursor: '#7aa2f7',
+    },
+    disableStdin: true, // read-only view; cells drive the session
+  });
+  state.term.open(container);
+  return state.term;
+}
+
 async function refreshLiveView() {
   if (!state.session) {
-    document.getElementById('live-view').textContent = '';
+    if (state.term) {
+      state.term.reset();
+    }
     return;
   }
   try {
-    const r = await api('GET', '/api/lines?n=40');
-    if (r.ok && r.data && Array.isArray(r.data.lines)) {
-      document.getElementById('live-view').textContent = r.data.lines.join('\n');
-    }
+    const resp = await fetch('/api/snapshot');
+    if (!resp.ok) return;
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    // Re-write the full snapshot each tick. xterm.js applies
+    // the cursor positioning and rendering in 2D, so even a
+    // wholesale rewrite produces a correct visual — and we don't
+    // have to track cursor / scrollback state in JS. For very
+    // large buffers this would be inefficient; for a notebook
+    // sandbox it's fine.
+    const term = ensureTerminal();
+    term.reset();
+    term.write(buf);
   } catch (_) {
     // Best-effort polling; ignore transient errors.
   }

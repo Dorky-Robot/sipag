@@ -29,6 +29,32 @@ async function expectOk(page: Page, cellId: string) {
   });
 }
 
+/// Poll /api/lines via the page's HTTP context until `predicate`
+/// returns true (or timeout). The live view renders through
+/// xterm.js (canvas + spans), which isn't grep-friendly text — so
+/// tests assert against the underlying byte content the lib
+/// returns, decoupled from the visual.
+async function pollLines(
+  page: Page,
+  predicate: (text: string) => boolean,
+  opts: { timeoutMs?: number; n?: number } = {}
+): Promise<string> {
+  const timeout = opts.timeoutMs ?? 10_000;
+  const n = opts.n ?? 80;
+  const deadline = Date.now() + timeout;
+  let latest = "";
+  while (Date.now() < deadline) {
+    const resp = await page.request.get(`/api/lines?n=${n}`);
+    if (resp.ok()) {
+      const body = (await resp.json()) as { lines?: string[] };
+      latest = (body.lines ?? []).join("\n");
+      if (predicate(latest)) return latest;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return latest;
+}
+
 // Tests ──────────────────────────────────────────────────────────────
 
 test.describe("notebook page", () => {
@@ -177,13 +203,13 @@ test.describe("notebook page", () => {
     });
   });
 
-  test("live-view pane reflects the session's rolling buffer", async ({
+  test("session buffer reflects what we sent (byte-level via /api/lines)", async ({
     page,
   }) => {
-    // The notebook page replaces the cross-origin iframe (blocked
-    // by katulong's X-Frame-Options: SAMEORIGIN) with a live-view
-    // pane that polls /api/lines. Asserts: after pasting + pressing
-    // Enter, the live-view contains the typed content.
+    // The live view renders through xterm.js (canvas + spans, not
+    // grep-friendly). For assertions about WHAT the library
+    // delivered to the session, query /api/lines directly — that's
+    // the rolling buffer the lib captured from katulong.
     await page.goto("/");
     await clickPlay(page, "create");
     await expect(page.locator("#meta-session")).toContainText("sipag-d-");
@@ -197,10 +223,8 @@ test.describe("notebook page", () => {
     await clickPlay(page, "press");
     await expectOk(page, "press");
 
-    // Live-view polls every ~500ms; give it a bit and assert.
-    await expect(page.locator("#live-view")).toContainText(token, {
-      timeout: 10_000,
-    });
+    const lines = await pollLines(page, (t) => t.includes(token));
+    expect(lines).toContain(token);
   });
 
   test("paste does NOT wrap the body in bracketed-paste markers", async ({
@@ -225,14 +249,28 @@ test.describe("notebook page", () => {
     await clickPlay(page, "press");
     await expectOk(page, "press");
 
-    // The sentinel should appear; BP-marker glyphs must not.
-    await expect(page.locator("#live-view")).toContainText(token, {
+    const lines = await pollLines(page, (t) => t.includes(token));
+    expect(lines).toContain(token);
+    expect(lines).not.toContain("[200~");
+    expect(lines).not.toContain("[201~");
+    expect(lines).not.toContain("^[[200~");
+    expect(lines).not.toContain("^[[201~");
+  });
+
+  test("live view renders xterm.js (not a flat <pre>)", async ({ page }) => {
+    // Pins the architectural fix: the visual is an xterm.js
+    // terminal, NOT a plain <pre>. xterm.js applies cursor
+    // escapes in 2D space, so shells with autosuggestions /
+    // syntax highlighting (fish, zsh-autosuggestions) don't leak
+    // adjacent text into the visible buffer the way our previous
+    // 1D linearisation did. If a future edit reverts to a <pre>,
+    // this test fails immediately.
+    await page.goto("/");
+    await clickPlay(page, "create");
+    await expect(page.locator("#meta-session")).toContainText("sipag-d-");
+    // xterm.js injects a `.xterm` element into its container.
+    await expect(page.locator("#live-view .xterm")).toBeAttached({
       timeout: 10_000,
     });
-    const liveText = (await page.locator("#live-view").textContent()) ?? "";
-    expect(liveText).not.toContain("[200~");
-    expect(liveText).not.toContain("[201~");
-    expect(liveText).not.toContain("^[[200~");
-    expect(liveText).not.toContain("^[[201~");
   });
 });

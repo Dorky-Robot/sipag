@@ -109,6 +109,7 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .route("/api/lines", get(api_lines))
         .route("/api/close", post(api_close))
         .route("/api/reset", post(api_reset))
+        .route("/api/snapshot", get(api_snapshot))
         .with_state(state.clone());
 
     let bind = format!("127.0.0.1:{}", opts.port);
@@ -363,6 +364,25 @@ async fn api_close(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
         let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
     }
     Ok(Json(OkResp { ok: true }))
+}
+
+// ── /api/snapshot ───────────────────────────────────────────────
+
+/// Return the raw rolling-buffer bytes (ANSI escapes intact).
+/// The notebook UI feeds these into xterm.js so the visual matches
+/// what a browser would see — cursor escapes get applied in 2D
+/// space instead of leaving autosuggestion text adjacent in a
+/// linearised view. Content-Type is octet-stream so transport
+/// doesn't try to decode as UTF-8 at the framing layer.
+async fn api_snapshot(State(s): State<SharedState>) -> ApiResult<Response> {
+    let guard = s.current.lock().await;
+    let (_, attach) = guard.as_ref().ok_or_else(no_session)?;
+    let bytes = attach.buffer_snapshot().await;
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+        bytes,
+    )
+        .into_response())
 }
 
 // ── /api/reset ──────────────────────────────────────────────────
