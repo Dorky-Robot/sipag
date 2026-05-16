@@ -1055,7 +1055,14 @@ async fn dispatch_inbound(
             if !data.is_empty() {
                 st.append_bytes(data.as_bytes());
             }
-            st.cursor = cursor;
+            // Monotonic cursor guard: two in-flight Pulls could
+            // arrive out of order under packet reordering; never
+            // rewind, because rewinding would re-trigger gap
+            // detection on subsequent Output and force a
+            // PullSnapshot that's already redundant.
+            if cursor > st.cursor {
+                st.cursor = cursor;
+            }
         }
         Inbound::PullSnapshot {
             session,
@@ -1064,7 +1071,13 @@ async fn dispatch_inbound(
         } if session == session_name => {
             let mut st = state.lock().await;
             st.replace_buffer(data.into_bytes());
-            st.cursor = cursor;
+            // PullSnapshot is a hard reset (server-supplied truth),
+            // so it's allowed to move the cursor anywhere — but a
+            // stale snapshot arriving after a fresher one shouldn't
+            // win. Same monotonic rule as PullResponse.
+            if cursor > st.cursor {
+                st.cursor = cursor;
+            }
         }
         Inbound::Output {
             session,

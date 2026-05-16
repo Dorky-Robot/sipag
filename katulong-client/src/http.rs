@@ -93,11 +93,25 @@ pub struct SessionStatus {
 }
 
 /// Remote connection config from `~/.katulong/remote.json`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// `Debug` is hand-implemented (not derived) so the bearer token
+/// stays out of logs. A future `tracing::debug!(?remote)` would
+/// otherwise drop the api key into any logging pipeline that ingests
+/// our diagnostics.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub url: String,
     #[serde(rename = "apiKey")]
     pub api_key: String,
+}
+
+impl std::fmt::Debug for RemoteConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteConfig")
+            .field("url", &self.url)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RemoteConfig {

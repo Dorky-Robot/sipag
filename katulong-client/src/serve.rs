@@ -28,8 +28,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Query, Request, State};
+use axum::http::{Method, StatusCode};
+use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -53,11 +54,20 @@ pub struct ServeOpts {
 /// Run the serve subcommand: start the axum server, wait for Ctrl-C.
 /// No subprocess management — the operator's katulong is the truth.
 pub async fn run(opts: ServeOpts) -> Result<()> {
+    let bind = format!("127.0.0.1:{}", opts.port);
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("bind {bind}"))?;
+    let local_addr = listener.local_addr()?;
+    let serve_url = format!("http://{local_addr}");
+    let expected_host = local_addr.to_string();
+
     let state = Arc::new(ServeState {
         remote: opts.remote.clone(),
         attach_client: KatulongAttachClient::new(opts.remote.clone()),
         http: KatulongClient::new(opts.remote.url.clone(), opts.remote.api_key.clone()),
         current: Mutex::new(None),
+        expected_host,
     });
 
     let app = Router::new()
@@ -65,7 +75,6 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .route("/api/state", get(api_state))
         .route("/api/sessions", get(api_sessions))
         .route("/api/create", post(api_create))
-        .route("/api/input", post(api_input))
         .route("/api/paste", post(api_paste))
         .route("/api/press", post(api_press))
         .route("/api/wait-for", post(api_wait_for))
@@ -73,13 +82,11 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .route("/api/close", post(api_close))
         .route("/api/reset", post(api_reset))
         .route("/api/snapshot", get(api_snapshot))
+        // `/api/input` was a registered route but never wired into the
+        // notebook UI; `/api/paste` covers the same bytes-to-attach
+        // call. Dropped post-extraction review as dead code.
+        .layer(from_fn_with_state(state.clone(), local_request_guard))
         .with_state(state.clone());
-
-    let bind = format!("127.0.0.1:{}", opts.port);
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .with_context(|| format!("bind {bind}"))?;
-    let serve_url = format!("http://{}", listener.local_addr()?);
 
     println!();
     println!("─────────────────────────────────────────────────────────────────────────");
@@ -124,6 +131,13 @@ struct ServeState {
     /// teardown without re-listing. Replaced on subsequent
     /// `/api/create`s; cleared on `/api/close` and `/api/reset`.
     current: Mutex<Option<(Session, KatulongAttach)>>,
+    /// Authority the local listener will answer to — e.g.,
+    /// `127.0.0.1:8765`. Built from the bound `local_addr` so it
+    /// matches whatever the operator passed via `--port` and any
+    /// OS-assigned port when 0 is requested. Used by the
+    /// CSRF/DNS-rebinding middleware to reject requests whose
+    /// `Host:` or `Origin:` doesn't match.
+    expected_host: String,
 }
 
 type SharedState = Arc<ServeState>;
@@ -207,26 +221,6 @@ async fn api_create(State(s): State<SharedState>) -> ApiResult<Json<CreateResp>>
     };
     *s.current.lock().await = Some((session, attach));
     Ok(Json(resp))
-}
-
-// ── /api/input ──────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct InputReq {
-    bytes: String,
-}
-
-async fn api_input(
-    State(s): State<SharedState>,
-    Json(req): Json<InputReq>,
-) -> ApiResult<Json<OkResp>> {
-    let guard = s.current.lock().await;
-    let (_, attach) = guard.as_ref().ok_or_else(no_session)?;
-    attach
-        .input(req.bytes)
-        .await
-        .map_err(ApiError::from_attach)?;
-    Ok(Json(OkResp { ok: true }))
 }
 
 // ── /api/paste ──────────────────────────────────────────────────
@@ -366,17 +360,97 @@ async fn api_snapshot(State(s): State<SharedState>) -> ApiResult<Response> {
 // ── /api/reset ──────────────────────────────────────────────────
 
 /// Test-isolation aid: close the notebook's current attach and
-/// delete the one session we created. Used by the Playwright
-/// `beforeEach` to start each test from a known empty state.
+/// delete every `sipag-d-*` session on the katulong (the namespace
+/// the notebook creates into). Used by the Playwright `beforeEach`
+/// to start each test from a known empty state — also catches
+/// leftovers from a prior test that crashed before its own
+/// `/api/close`.
 ///
-/// Critically, this DOES NOT touch any other session on the
-/// operator's katulong. Earlier iterations nuked everything on the
-/// underlying katulong; that was safe when serve owned a hermetic
-/// subprocess but would obliterate the operator's daily-driver
-/// sessions now that we target a real katulong.
+/// Critically, this DOES NOT touch any session outside the
+/// `sipag-d-*` namespace. The operator's daily-driver sessions
+/// (typically named `kat_<id>`, `session-…`, etc.) survive
+/// untouched even when the notebook drives a shared katulong.
+/// Earlier iterations nuked everything on the underlying katulong;
+/// that was safe when serve owned a hermetic subprocess but would
+/// obliterate the operator's real sessions now that we target a
+/// real katulong.
 async fn api_reset(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
     teardown_current(&s).await;
+    let http = s.http.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(sessions) = http.list_sessions() {
+            for sess in sessions {
+                if sess.name.starts_with("sipag-d-") {
+                    let _ = http.kill_session(&sess.id);
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("reset sweep join: {e}")))?;
     Ok(Json(OkResp { ok: true }))
+}
+
+// ── request guard ───────────────────────────────────────────────
+
+/// Defends the local notebook server against:
+///
+/// 1. **DNS rebinding.** A browser tab on `attacker.example` whose DNS
+///    resolves first to a public IP then rebinds to `127.0.0.1` can
+///    issue requests that reach a localhost server. The `Host:` header
+///    is the only attacker-controlled value that has to match the
+///    legitimate authority — we reject anything else.
+///
+/// 2. **CSRF.** A page on another origin can issue a no-body POST as a
+///    "simple request" with no preflight (e.g.,
+///    `fetch('http://127.0.0.1:8765/api/create', {method:'POST'})`).
+///    We reject POSTs whose `Origin:` doesn't match our local
+///    authority. Browsers ALWAYS attach `Origin:` to POSTs (even
+///    no-cors), so a malicious page can't fake its absence to slip
+///    through. POSTs with NO `Origin:` are allowed: those come from
+///    non-browser clients (curl, Playwright's API request context,
+///    sipag's CLI) which aren't a CSRF vector.
+///
+/// GETs aren't state-changing but the Host check still applies, so a
+/// rebound origin can't read state or session lists either.
+async fn local_request_guard(
+    State(state): State<SharedState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let host = req.headers().get("host").and_then(|v| v.to_str().ok());
+    let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
+    check_local_request(&state.expected_host, req.method(), host, origin)?;
+    Ok(next.run(req).await)
+}
+
+/// Pure policy decision behind `local_request_guard`. Returns `Ok` if
+/// the request should be allowed through, `Err(FORBIDDEN)` otherwise.
+/// Extracted so the negative paths are testable without an axum
+/// `Router` + `tower::Service` rig.
+fn check_local_request(
+    expected_host: &str,
+    method: &Method,
+    host: Option<&str>,
+    origin: Option<&str>,
+) -> Result<(), StatusCode> {
+    // DNS-rebinding defense: Host MUST be present and MUST match.
+    if host != Some(expected_host) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // CSRF defense for state-changing POSTs: if Origin is present, it
+    // MUST match our local authority. Origin-less POSTs are non-
+    // browser callers (curl, Playwright's API context, sipag's CLI)
+    // and aren't a CSRF vector.
+    if method == Method::POST {
+        if let Some(origin) = origin {
+            let expected_origin = format!("http://{expected_host}");
+            if origin != expected_origin {
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── helpers ─────────────────────────────────────────────────────
@@ -460,5 +534,135 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
+    }
+}
+
+// ── tests ───────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_key_maps_canonical_names() {
+        assert!(matches!(parse_key("enter"), Ok(KeyName::Enter)));
+        assert!(matches!(parse_key("ENTER"), Ok(KeyName::Enter)));
+        assert!(matches!(parse_key("Return"), Ok(KeyName::Enter)));
+        assert!(matches!(parse_key("escape"), Ok(KeyName::Escape)));
+        assert!(matches!(parse_key("esc"), Ok(KeyName::Escape)));
+        assert!(matches!(parse_key("tab"), Ok(KeyName::Tab)));
+        assert!(matches!(parse_key("backspace"), Ok(KeyName::Backspace)));
+        assert!(matches!(parse_key("bs"), Ok(KeyName::Backspace)));
+        assert!(matches!(parse_key("ctrl-c"), Ok(KeyName::CtrlC)));
+        assert!(matches!(parse_key("ctrlc"), Ok(KeyName::CtrlC)));
+        assert!(matches!(parse_key("^c"), Ok(KeyName::CtrlC)));
+        assert!(matches!(parse_key("ctrl-d"), Ok(KeyName::CtrlD)));
+        assert!(matches!(parse_key("up"), Ok(KeyName::Up)));
+        assert!(matches!(parse_key("down"), Ok(KeyName::Down)));
+        assert!(matches!(parse_key("left"), Ok(KeyName::Left)));
+        assert!(matches!(parse_key("right"), Ok(KeyName::Right)));
+    }
+
+    #[test]
+    fn parse_key_rejects_unknown() {
+        let err = parse_key("f12").unwrap_err();
+        assert!(
+            err.contains("unknown key 'f12'"),
+            "error message should name the rejected key: {err}"
+        );
+        assert!(
+            err.contains("enter"),
+            "error message should hint at the legal set: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_wait_from_maps_canonical_names() {
+        assert!(matches!(parse_wait_from("now"), Ok(WaitFrom::FromNow)));
+        assert!(matches!(
+            parse_wait_from("attach"),
+            Ok(WaitFrom::FromAttach)
+        ));
+        assert!(matches!(
+            parse_wait_from("from-attach"),
+            Ok(WaitFrom::FromAttach)
+        ));
+    }
+
+    #[test]
+    fn parse_wait_from_parses_numeric_offsets() {
+        let v = parse_wait_from("0").unwrap();
+        assert!(matches!(v, WaitFrom::FromOffset(0)));
+        let v = parse_wait_from("4096").unwrap();
+        assert!(matches!(v, WaitFrom::FromOffset(4096)));
+    }
+
+    #[test]
+    fn parse_wait_from_rejects_garbage() {
+        let err = parse_wait_from("yesterday").unwrap_err();
+        assert!(
+            err.contains("yesterday"),
+            "error message should name the rejected value: {err}"
+        );
+        assert!(
+            err.contains("'now'"),
+            "error message should hint at the legal set: {err}"
+        );
+    }
+
+    // The middleware is exercised end-to-end by every Playwright
+    // test (the notebook UI hits /api/* through browser fetch with
+    // a matching Origin, the diagnostic tests hit /api/* through
+    // Playwright's API context with no Origin), but the negative
+    // paths deserve a unit-level guard so a regression loosening the
+    // check fails fast in `cargo test`.
+    const HOST: &str = "127.0.0.1:8765";
+
+    #[test]
+    fn guard_rejects_post_with_foreign_origin() {
+        assert_eq!(
+            check_local_request(
+                HOST,
+                &Method::POST,
+                Some(HOST),
+                Some("http://attacker.example")
+            ),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn guard_accepts_post_with_matching_origin() {
+        assert!(check_local_request(
+            HOST,
+            &Method::POST,
+            Some(HOST),
+            Some("http://127.0.0.1:8765")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn guard_accepts_post_with_no_origin() {
+        // Non-browser callers (curl, Playwright's API context, sipag's
+        // CLI when it calls /api/* directly) don't set Origin, and they
+        // aren't a CSRF vector — allow them through.
+        assert!(check_local_request(HOST, &Method::POST, Some(HOST), None).is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_request_with_wrong_host() {
+        assert_eq!(
+            check_local_request(HOST, &Method::GET, Some("attacker.example:8765"), None),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn guard_rejects_request_with_no_host() {
+        assert_eq!(
+            check_local_request(HOST, &Method::GET, None, None),
+            Err(StatusCode::FORBIDDEN)
+        );
     }
 }

@@ -8,11 +8,19 @@
   browser UI uses, so cursor escapes get applied in 2D space and
   shell-quirk autosuggestions / syntax highlighting don't leak
   adjacent text into the buffer the way our previous flat-text
-  view did. CDN-loaded — fine for a localhost sandbox; an air-
-  gapped deployment would vendor the script.
+  view did. CDN-loaded with SRI integrity attributes pinned to
+  the v5.5.0 file bytes — a jsdelivr or DNS compromise can't ship
+  attacker JS into the notebook (which has same-origin access to
+  /api/* and thus to the configured katulong). Bump both hashes
+  together when bumping the version.
 -->
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
-<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<link rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
+      integrity="sha384-tStR1zLfWgsiXCF3IgfB3lBa8KmBe/lG287CL9WCeKgQYcp1bjb4/+mwN6oti4Co"
+      crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"
+        integrity="sha384-J4qzUjBl1FxyLsl/kQPQIOeINsmp17OHYXDOMpMxlKX53ZfYsL+aWHpgArvOuof9"
+        crossorigin="anonymous"></script>
 <style>
   :root {
     color-scheme: dark;

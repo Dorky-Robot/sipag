@@ -59,9 +59,16 @@ async function pollLines(
 
 test.describe("notebook page", () => {
   // The serve subprocess is reused across tests for speed. Each
-  // test starts by RESETTING server state — closes the persistent
-  // attach AND kills every session on the underlying katulong — so
-  // we don't accumulate towards katulong's MAX_SESSIONS=20 limit.
+  // test starts by RESETTING server state via `/api/reset`, which
+  // closes the notebook's persistent attach AND deletes just the
+  // session that notebook created. It does NOT touch any other
+  // session on the underlying katulong (intentional — the sandbox
+  // now drives a real katulong, not a hermetic subprocess we own).
+  //
+  // The hermetic test katulong that playwright.config.ts spawns
+  // only ever has at most one `sipag-d-…` session at a time (the
+  // one created by the test in flight), so `MAX_SESSIONS=20` is
+  // never an issue here in practice.
   test.beforeEach(async ({ request }) => {
     await request.post("/api/reset").catch(() => {
       // Server might be settling; non-fatal.

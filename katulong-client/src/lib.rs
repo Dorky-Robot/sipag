@@ -30,6 +30,13 @@
 pub mod attach;
 pub mod http;
 pub mod protocol;
+
+/// Notebook-style web UI for stepping through library calls. Pulls
+/// in axum and a small JSON surface; gated behind the `serve` Cargo
+/// feature so headless library consumers can skip axum's compile
+/// cost via `default-features = false`. Enabled by default for the
+/// `katulong-client` binary.
+#[cfg(feature = "serve")]
 pub mod serve;
 
 // Re-export the HTTP REST surface at the crate root.
