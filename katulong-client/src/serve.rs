@@ -2,27 +2,32 @@
 //! through library calls and watching the katulong session reflect
 //! them in real time.
 //!
-//! Spawns a fresh katulong subprocess on a free local port, holds a
-//! single persistent attach to a session, and exposes the same
-//! library calls the CLI wraps as POST/GET endpoints. The notebook
-//! page (`notebook.html`, embedded via `include_str!`) renders
-//! hardcoded cells — create, paste, press, wait-for, lines,
-//! snapshot — each with a Play button and an output area. An
-//! iframe pinned to the katulong URL shows the live session next
-//! to the cells, so every click is visible side-by-side.
+//! Targets a REAL katulong instance (resolved by the CLI's standard
+//! `resolve_remote` path — `--url`/`--api-key`, env, or
+//! `~/.katulong/remote.json`). That's the same katulong production
+//! sipag dispatches against, which is the point: clicking ▶ on a
+//! notebook cell exercises the exact `katulong-client` code path the
+//! dispatcher will use in anger. Sessions you create here appear in
+//! the same katulong's session list and can be opened in any
+//! katulong browser tab.
 //!
-//! Designed for the validation loop the headless client was built
-//! to enable: click → library call → katulong PTY update →
-//! browser reflects the change. No multi-terminal copy-paste.
+//! Earlier iterations spawned a hermetic katulong subprocess for
+//! isolation. That made the notebook a toy — it couldn't reproduce
+//! the multi-client / shared-tmux / "real katulong" failure modes
+//! the library has to survive. Use the integration-test harness
+//! (`tests/common`) when you need a hermetic katulong for assertions;
+//! use `serve` when you need to drive your real one.
+//!
+//! Each notebook owns one current session at a time. `/api/create`
+//! makes a fresh `sipag-d-<hex>` session on the configured katulong
+//! and opens a WS attach to it. Subsequent cells operate on that
+//! attach. `/api/close` and `/api/reset` clean up just that session
+//! — neither touches sessions you didn't create here.
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
@@ -33,83 +38,25 @@ use tokio::sync::Mutex;
 
 use crate::{
     AttachError, KatulongAttach, KatulongAttachClient, KatulongClient, KeyName, RegexMatch,
-    RemoteConfig, WaitFrom,
+    RemoteConfig, Session, WaitFrom,
 };
 
 pub struct ServeOpts {
     /// Port the notebook UI listens on. The user opens
     /// `http://127.0.0.1:<port>` in a browser.
     pub port: u16,
-    /// Path to a local katulong checkout (the directory with
-    /// `server.js`). Required.
-    pub katulong_repo: PathBuf,
+    /// The katulong this notebook drives. Resolved by the CLI from
+    /// flags / env / `~/.katulong/remote.json` and passed in.
+    pub remote: RemoteConfig,
 }
 
-/// Run the serve subcommand: spawn katulong, start the axum server,
-/// wait for Ctrl-C, tear down.
+/// Run the serve subcommand: start the axum server, wait for Ctrl-C.
+/// No subprocess management — the operator's katulong is the truth.
 pub async fn run(opts: ServeOpts) -> Result<()> {
-    let server_js = opts.katulong_repo.join("server.js");
-    if !server_js.exists() {
-        bail!(
-            "katulong_repo does not contain a server.js: {:?}",
-            opts.katulong_repo
-        );
-    }
-
-    let katulong_port = free_port()?;
-    let data_dir = tempfile::tempdir()?;
-    // Per-sandbox tmux socket. Without this, the sandbox katulong
-    // shares the default tmux socket with any other katulong instance
-    // the operator happens to have running (e.g. their daily-driver
-    // katulong on a different port). The other instance discovers
-    // our newly-spawned `kat_<id>` session, adopts it as external,
-    // and runs its OWN `tmux -C attach-session -d -t …` — the `-d`
-    // detaches OUR control client, our control proc closes with
-    // code 0, katulong relays exit:0 to the Rust attach, and the
-    // next /api/input fails with "session ended with exit code 0".
-    // KATULONG_TMUX_SOCKET must match /^[A-Za-z0-9_-]+$/ on the
-    // katulong side, so we only use the process id (which already
-    // does).
-    let tmux_socket = format!("sipag-sandbox-{}", std::process::id());
-    println!(
-        "[serve] spawning katulong on 127.0.0.1:{katulong_port} \
-         (state in {:?}, tmux socket {tmux_socket})",
-        data_dir.path()
-    );
-
-    let child = Command::new("node")
-        .arg(&server_js)
-        .current_dir(&opts.katulong_repo)
-        .env("PORT", katulong_port.to_string())
-        .env("KATULONG_BIND_HOST", "127.0.0.1")
-        .env("KATULONG_DATA_DIR", data_dir.path())
-        .env("KATULONG_TMUX_SOCKET", &tmux_socket)
-        .env("LOG_LEVEL", "warn")
-        .env("NODE_ENV", "production")
-        // Suppress katulong's own logs so the notebook UI is the
-        // primary surface. Operators who want them can tail
-        // KATULONG_DATA_DIR or run the sandbox example instead.
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    let _guard = TeardownGuard {
-        child: Some(child),
-        data_dir: Some(data_dir),
-        tmux_socket: tmux_socket.clone(),
-    };
-
-    wait_until_ready(katulong_port, Duration::from_secs(15))?;
-    println!("[serve] katulong is up on 127.0.0.1:{katulong_port}");
-
-    let remote = RemoteConfig {
-        url: format!("http://127.0.0.1:{katulong_port}"),
-        api_key: "unused-because-localhost".to_string(),
-    };
     let state = Arc::new(ServeState {
-        remote: remote.clone(),
-        attach_client: KatulongAttachClient::new(remote.clone()),
-        http: KatulongClient::new(remote.url.clone(), remote.api_key.clone()),
+        remote: opts.remote.clone(),
+        attach_client: KatulongAttachClient::new(opts.remote.clone()),
+        http: KatulongClient::new(opts.remote.url.clone(), opts.remote.api_key.clone()),
         current: Mutex::new(None),
     });
 
@@ -139,11 +86,13 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
     println!(" Open the notebook UI in your browser:");
     println!("   {serve_url}/");
     println!();
-    println!(" The page embeds an iframe of the katulong session at:");
-    println!("   {}/", remote.url);
+    println!(" Driving katulong at:");
+    println!("   {}/", opts.remote.url);
     println!();
-    println!(" Click Play on each cell to step through; the iframe reflects");
-    println!(" every change live. Ctrl-C in THIS terminal to tear down.");
+    println!(" Each cell creates / drives a fresh `sipag-d-…` session on");
+    println!(" that katulong. Open the session there to watch it in real time.");
+    println!(" Ctrl-C in THIS terminal to stop the notebook (your katulong");
+    println!(" keeps running).");
     println!("─────────────────────────────────────────────────────────────────────────");
 
     let server = axum::serve(listener, app);
@@ -153,16 +102,14 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         }
         _ = tokio::signal::ctrl_c() => {
             println!();
-            println!("[serve] tearing down");
+            println!("[serve] stopping notebook");
         }
     }
 
-    // Best-effort: close the persistent attach (if any) before
-    // dropping the guard. `TeardownGuard::drop` kills katulong;
-    // tokio runtime shuts down after we return.
-    if let Some((_, attach)) = state.current.lock().await.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
-    }
+    // Best-effort: close + kill the current session so we don't
+    // leave it dangling on the operator's real katulong when they
+    // Ctrl-C the notebook.
+    teardown_current(&state).await;
     Ok(())
 }
 
@@ -172,13 +119,24 @@ struct ServeState {
     remote: RemoteConfig,
     attach_client: KatulongAttachClient,
     http: KatulongClient,
-    /// `(session_name, attach)` for the cell the user is driving.
-    /// Created on POST /api/create; replaced on subsequent calls
-    /// (each call closes the previous attach first).
-    current: Mutex<Option<(String, KatulongAttach)>>,
+    /// `(session, attach)` for the cell the user is driving.
+    /// `session` retains both name and id so we can DELETE on
+    /// teardown without re-listing. Replaced on subsequent
+    /// `/api/create`s; cleared on `/api/close` and `/api/reset`.
+    current: Mutex<Option<(Session, KatulongAttach)>>,
 }
 
 type SharedState = Arc<ServeState>;
+
+async fn teardown_current(state: &SharedState) {
+    let taken = state.current.lock().await.take();
+    if let Some((session, attach)) = taken {
+        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
+        let http = state.http.clone();
+        let id = session.id.clone();
+        let _ = tokio::task::spawn_blocking(move || http.kill_session(&id)).await;
+    }
+}
 
 // ── HTML page ───────────────────────────────────────────────────
 
@@ -195,7 +153,12 @@ struct StateResp {
 }
 
 async fn api_state(State(s): State<SharedState>) -> Json<StateResp> {
-    let current_session = s.current.lock().await.as_ref().map(|(n, _)| n.clone());
+    let current_session = s
+        .current
+        .lock()
+        .await
+        .as_ref()
+        .map(|(sess, _)| sess.name.clone());
     Json(StateResp {
         katulong_url: s.remote.url.clone(),
         current_session,
@@ -204,7 +167,7 @@ async fn api_state(State(s): State<SharedState>) -> Json<StateResp> {
 
 // ── /api/sessions ───────────────────────────────────────────────
 
-async fn api_sessions(State(s): State<SharedState>) -> ApiResult<Json<Vec<crate::Session>>> {
+async fn api_sessions(State(s): State<SharedState>) -> ApiResult<Json<Vec<Session>>> {
     // KatulongClient methods are sync (curl shell-out); jump to a
     // blocking task so we don't pin the runtime.
     let http = s.http.clone();
@@ -224,10 +187,10 @@ struct CreateResp {
 }
 
 async fn api_create(State(s): State<SharedState>) -> ApiResult<Json<CreateResp>> {
-    // Close any previous attach so we don't leak background tasks.
-    if let Some((_, attach)) = s.current.lock().await.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
-    }
+    // Close + kill any previous session so we don't pile them up on
+    // the operator's katulong across notebook clicks.
+    teardown_current(&s).await;
+
     let http = s.http.clone();
     let session = tokio::task::spawn_blocking(move || http.create_dispatch_session())
         .await
@@ -238,11 +201,12 @@ async fn api_create(State(s): State<SharedState>) -> ApiResult<Json<CreateResp>>
         .attach(&session.name, 120, 40)
         .await
         .map_err(|e| ApiError::internal(format!("attach: {e}")))?;
-    *s.current.lock().await = Some((session.name.clone(), attach));
-    Ok(Json(CreateResp {
-        name: session.name,
-        id: session.id,
-    }))
+    let resp = CreateResp {
+        name: session.name.clone(),
+        id: session.id.clone(),
+    };
+    *s.current.lock().await = Some((session, attach));
+    Ok(Json(resp))
 }
 
 // ── /api/input ──────────────────────────────────────────────────
@@ -376,9 +340,7 @@ async fn api_lines(
 // ── /api/close ──────────────────────────────────────────────────
 
 async fn api_close(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
-    if let Some((_, attach)) = s.current.lock().await.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
-    }
+    teardown_current(&s).await;
     Ok(Json(OkResp { ok: true }))
 }
 
@@ -403,25 +365,17 @@ async fn api_snapshot(State(s): State<SharedState>) -> ApiResult<Response> {
 
 // ── /api/reset ──────────────────────────────────────────────────
 
-/// Test-isolation aid: close the persistent attach AND kill every
-/// session on the underlying katulong. Lets a playwright `beforeEach`
-/// start from a known-empty state and avoid the
-/// `MAX_SESSIONS=20` accumulation that surfaces when tests share
-/// one long-lived `serve` instance.
+/// Test-isolation aid: close the notebook's current attach and
+/// delete the one session we created. Used by the Playwright
+/// `beforeEach` to start each test from a known empty state.
+///
+/// Critically, this DOES NOT touch any other session on the
+/// operator's katulong. Earlier iterations nuked everything on the
+/// underlying katulong; that was safe when serve owned a hermetic
+/// subprocess but would obliterate the operator's daily-driver
+/// sessions now that we target a real katulong.
 async fn api_reset(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
-    if let Some((_, attach)) = s.current.lock().await.take() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
-    }
-    let http = s.http.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Ok(sessions) = http.list_sessions() {
-            for sess in sessions {
-                let _ = http.kill_session(&sess.id);
-            }
-        }
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("reset join: {e}")))?;
+    teardown_current(&s).await;
     Ok(Json(OkResp { ok: true }))
 }
 
@@ -507,76 +461,4 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(self.body)).into_response()
     }
-}
-
-// ── subprocess + readiness helpers (shared shape with sandbox) ──
-
-struct TeardownGuard {
-    child: Option<Child>,
-    data_dir: Option<tempfile::TempDir>,
-    tmux_socket: String,
-}
-
-impl Drop for TeardownGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        // Kill the per-sandbox tmux server. tmux servers outlive their
-        // spawning process by design, so without this every sandbox
-        // run leaks an orphan tmux server on its private socket.
-        let _ = std::process::Command::new("tmux")
-            .args(["-L", &self.tmux_socket, "kill-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Some(dir) = self.data_dir.take() {
-            let path = dir.path().to_path_buf();
-            drop(dir);
-            println!("[serve] katulong killed, state dir cleaned: {path:?}");
-        }
-    }
-}
-
-fn free_port() -> std::io::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    Ok(listener.local_addr()?.port())
-}
-
-fn wait_until_ready(port: u16, max: Duration) -> std::io::Result<()> {
-    let deadline = Instant::now() + max;
-    while Instant::now() < deadline {
-        if let Ok(status) = http_head_status(&format!("http://127.0.0.1:{port}/sessions")) {
-            if (200..500).contains(&status) {
-                return Ok(());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(std::io::Error::other(format!(
-        "katulong did not respond on 127.0.0.1:{port}/sessions within {max:?}"
-    )))
-}
-
-fn http_head_status(url: &str) -> std::io::Result<u16> {
-    let parsed = url::Url::parse(url).map_err(std::io::Error::other)?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| std::io::Error::other("missing host"))?;
-    let port = parsed.port().unwrap_or(80);
-    let path = parsed.path();
-    let mut sock = TcpStream::connect((host, port))?;
-    sock.set_read_timeout(Some(Duration::from_millis(500)))?;
-    sock.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let req = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n");
-    sock.write_all(req.as_bytes())?;
-    let mut buf = [0u8; 64];
-    let n = sock.read(&mut buf)?;
-    let head = std::str::from_utf8(&buf[..n]).unwrap_or("");
-    head.split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow!("bad status line: {head:?}"))
-        .map_err(std::io::Error::other)
 }

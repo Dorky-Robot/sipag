@@ -44,10 +44,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # one handler that calls one library function.
 axum = "0.7"
 
-# `tempfile` is shared between the integration test harness and the
-# `sandbox` example. Promoted from dev-deps so the example builds
-# (examples don't see dev-dependencies).
-tempfile = "3"
-
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Used by the integration-test harness (`tests/common`) to give each
+# spawned katulong a private state dir. Not needed at runtime — the
+# library and the `serve` / `sandbox` binaries talk to a real katulong
+# rather than spawning one.
+tempfile = "3"
