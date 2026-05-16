@@ -290,11 +290,9 @@ impl KatulongClient {
     /// For sustained interaction with a session — driving keystrokes,
     /// observing output continuously, doing pattern-based waits —
     /// **prefer the WebSocket attach client** at
-    /// `sipag_core::katulong::client::KatulongAttachClient::attach`
-    /// (forthcoming, see `docs/dispatch-implementation-plan.md` §5).
-    /// The attach maintains a rolling buffer for free; this call
-    /// costs a curl process spawn plus an HTTP round-trip on every
-    /// invocation.
+    /// `katulong_client::KatulongAttachClient::attach`. The attach
+    /// maintains a rolling buffer for free; this call costs a curl
+    /// process spawn plus an HTTP round-trip on every invocation.
     ///
     /// This sync helper remains the right tool for:
     /// - diagnostic / one-shot reads (CLI inspection, gate

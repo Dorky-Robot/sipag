@@ -122,6 +122,11 @@ enum Cmd {
     ///
     /// Reuses the global `--url` / `--api-key` flags (or
     /// `~/.katulong/remote.json`) to find the katulong.
+    ///
+    /// Gated behind the `serve` Cargo feature (default-on for the
+    /// binary; library-only consumers can disable it with
+    /// `default-features = false` to skip axum's compile cost).
+    #[cfg(feature = "serve")]
     Serve {
         /// Port the notebook UI listens on. Open `http://127.0.0.1:<port>`.
         #[arg(long, default_value_t = 8765u16)]
@@ -157,6 +162,7 @@ async fn main() -> Result<()> {
         Cmd::Lines { session, n } => run_lines(&remote, &session, n).await,
         Cmd::Snapshot { session } => run_snapshot(&remote, &session).await,
         Cmd::Offset { session } => run_offset(&remote, &session).await,
+        #[cfg(feature = "serve")]
         Cmd::Serve { port } => {
             katulong_client::serve::run(katulong_client::serve::ServeOpts {
                 port,

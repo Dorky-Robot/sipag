@@ -175,15 +175,12 @@ test.describe("notebook page", () => {
     // must add exactly ONE session. Attaching by id-as-name would
     // make katulong spawn a phantom and the delta would be 2.
     //
-    // Tests share a long-lived `serve` instance (workers=1,
-    // reuseExistingServer=true), so prior tests' Create cells leave
-    // sessions lying around. We assert the DELTA, not the absolute
-    // count.
-    // beforeEach reset cleared every session on katulong, so the
-    // count starts at 0. After Create the server should have
-    // exactly one session — the new sipag-d-* we just made. Two or
-    // more means katulong silently spawned a phantom (the PR #534
-    // regression shape).
+    // The hermetic test katulong starts each Playwright run with an
+    // empty session list; beforeEach's `/api/reset` clears any
+    // notebook-created sessions from a prior test. After Create the
+    // server should have exactly one session — the new sipag-d-* we
+    // just made. Two or more means katulong silently spawned a
+    // phantom (the PR #534 regression shape).
     await page.goto("/");
     await clickPlay(page, "create");
     await expect(page.locator("#meta-session")).toContainText("sipag-d-");
@@ -192,6 +189,64 @@ test.describe("notebook page", () => {
     const out = await outputOf(page, "sessions");
     const idCount = (out.match(/"id"/g) || []).length;
     expect(idCount).toBe(1);
+  });
+
+  test("/api/reset does NOT kill sessions the notebook did not create", async ({
+    page,
+    request,
+  }) => {
+    // /api/reset cleans up notebook-created sessions ONLY (tracked by
+    // id in ServeState). Production sipag's dispatcher creates
+    // sessions in the same `sipag-d-<hex>` namespace; an earlier
+    // iteration of /api/reset prefix-swept that namespace and would
+    // have hard-killed live production dispatch sessions if the
+    // operator pointed the notebook at a shared katulong. This test
+    // pins the id-tracking contract: a session created on the
+    // underlying katulong OUTSIDE the notebook's /api/create path
+    // must survive /api/reset.
+    await page.goto("/");
+
+    const stateResp = await page.request.get("/api/state");
+    const stateBody = (await stateResp.json()) as {
+      katulong_url: string;
+    };
+
+    // Bypass the notebook entirely: hit katulong directly to mint a
+    // session we never told serve about.
+    const outOfBandName = `sipag-d-out-of-band-${Date.now().toString(36)}`;
+    const createResp = await request.post(
+      `${stateBody.katulong_url}/sessions`,
+      { data: { name: outOfBandName } }
+    );
+    expect(createResp.ok()).toBeTruthy();
+    const outOfBandSession = (await createResp.json()) as {
+      name: string;
+      id: string;
+    };
+
+    // Also create one notebook-owned session so we can assert reset
+    // touched OURS but not the out-of-band one.
+    await clickPlay(page, "create");
+    await expect(page.locator("#meta-session")).toContainText("sipag-d-");
+
+    // Reset → kills the notebook's session, leaves the out-of-band
+    // session alone.
+    const resetResp = await request.post("/api/reset");
+    expect(resetResp.ok()).toBeTruthy();
+
+    // Ask katulong directly so we don't depend on the notebook UI.
+    const listResp = await request.get(`${stateBody.katulong_url}/sessions`);
+    const list = (await listResp.json()) as Array<{ id: string; name: string }>;
+
+    expect(
+      list.some((s) => s.id === outOfBandSession.id),
+      "out-of-band session was killed — /api/reset is overstepping its bounds"
+    ).toBeTruthy();
+
+    // Clean up the out-of-band session we created (don't leak across tests).
+    await request.delete(
+      `${stateBody.katulong_url}/sessions/by-id/${outOfBandSession.id}`
+    );
   });
 
   test("close terminates without hanging the page", async ({ page }) => {

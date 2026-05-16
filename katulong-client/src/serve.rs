@@ -24,6 +24,7 @@
 //! attach. `/api/close` and `/api/reset` clean up just that session
 //! — neither touches sessions you didn't create here.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,14 +61,31 @@ pub async fn run(opts: ServeOpts) -> Result<()> {
         .with_context(|| format!("bind {bind}"))?;
     let local_addr = listener.local_addr()?;
     let serve_url = format!("http://{local_addr}");
-    let expected_host = local_addr.to_string();
+    let port = local_addr.port();
+    // Accept the canonical bind authority plus the two common
+    // localhost aliases. Visitors routinely type `localhost:<port>`
+    // or `[::1]:<port>` and rejecting them is a UX regression that
+    // looks like a server bug from the operator's side.
+    let accepted_hosts: HashSet<String> = [
+        format!("127.0.0.1:{port}"),
+        format!("localhost:{port}"),
+        format!("[::1]:{port}"),
+    ]
+    .into_iter()
+    .collect();
+    let accepted_origins: HashSet<String> = accepted_hosts
+        .iter()
+        .map(|h| format!("http://{h}"))
+        .collect();
 
     let state = Arc::new(ServeState {
         remote: opts.remote.clone(),
         attach_client: KatulongAttachClient::new(opts.remote.clone()),
         http: KatulongClient::new(opts.remote.url.clone(), opts.remote.api_key.clone()),
         current: Mutex::new(None),
-        expected_host,
+        created_ids: Mutex::new(HashSet::new()),
+        accepted_hosts,
+        accepted_origins,
     });
 
     let app = Router::new()
@@ -131,13 +149,25 @@ struct ServeState {
     /// teardown without re-listing. Replaced on subsequent
     /// `/api/create`s; cleared on `/api/close` and `/api/reset`.
     current: Mutex<Option<(Session, KatulongAttach)>>,
-    /// Authority the local listener will answer to — e.g.,
-    /// `127.0.0.1:8765`. Built from the bound `local_addr` so it
-    /// matches whatever the operator passed via `--port` and any
-    /// OS-assigned port when 0 is requested. Used by the
-    /// CSRF/DNS-rebinding middleware to reject requests whose
-    /// `Host:` or `Origin:` doesn't match.
-    expected_host: String,
+    /// Session ids THIS notebook process created via `/api/create`.
+    /// `/api/reset` cleans up every id in this set — and ONLY ids in
+    /// this set — so a notebook pointed at a shared katulong can't
+    /// accidentally kill production sipag dispatch sessions (which
+    /// use the same `sipag-d-<hex>` namespace). Survives a previous
+    /// test's crashed-without-close as long as the serve process
+    /// itself is reused.
+    created_ids: Mutex<HashSet<String>>,
+    /// Host strings the middleware accepts in the `Host:` header.
+    /// Built from `expected_host` plus the equivalent `localhost`
+    /// alias — operators routinely browse to `http://localhost:<port>`
+    /// even when serve binds 127.0.0.1, and rejecting that is a UX
+    /// regression. Each entry is a serialized authority
+    /// (`<host>:<port>`); no path/scheme parts.
+    accepted_hosts: HashSet<String>,
+    /// Origin strings the middleware accepts on POSTs. Mirrors
+    /// `accepted_hosts` but with `http://` prefixed. Built once at
+    /// startup; the middleware does an O(1) hash lookup.
+    accepted_origins: HashSet<String>,
 }
 
 type SharedState = Arc<ServeState>;
@@ -148,6 +178,7 @@ async fn teardown_current(state: &SharedState) {
         let _ = tokio::time::timeout(Duration::from_secs(2), attach.close()).await;
         let http = state.http.clone();
         let id = session.id.clone();
+        state.created_ids.lock().await.remove(&id);
         let _ = tokio::task::spawn_blocking(move || http.kill_session(&id)).await;
     }
 }
@@ -219,6 +250,7 @@ async fn api_create(State(s): State<SharedState>) -> ApiResult<Json<CreateResp>>
         name: session.name.clone(),
         id: session.id.clone(),
     };
+    s.created_ids.lock().await.insert(session.id.clone());
     *s.current.lock().await = Some((session, attach));
     Ok(Json(resp))
 }
@@ -360,30 +392,29 @@ async fn api_snapshot(State(s): State<SharedState>) -> ApiResult<Response> {
 // ── /api/reset ──────────────────────────────────────────────────
 
 /// Test-isolation aid: close the notebook's current attach and
-/// delete every `sipag-d-*` session on the katulong (the namespace
-/// the notebook creates into). Used by the Playwright `beforeEach`
-/// to start each test from a known empty state — also catches
-/// leftovers from a prior test that crashed before its own
-/// `/api/close`.
+/// delete every session THIS notebook process previously created
+/// via `/api/create`. Used by the Playwright `beforeEach` to start
+/// each test from a known empty state — also catches leftovers
+/// from a prior test that crashed before its own `/api/close`.
 ///
-/// Critically, this DOES NOT touch any session outside the
-/// `sipag-d-*` namespace. The operator's daily-driver sessions
-/// (typically named `kat_<id>`, `session-…`, etc.) survive
-/// untouched even when the notebook drives a shared katulong.
-/// Earlier iterations nuked everything on the underlying katulong;
-/// that was safe when serve owned a hermetic subprocess but would
-/// obliterate the operator's real sessions now that we target a
-/// real katulong.
+/// Critically, this is keyed by an id-set the notebook itself
+/// populates on every `/api/create`, NOT a prefix-match on the
+/// session-name namespace. Production sipag's `dispatch` path
+/// creates sessions in the same `sipag-d-<hex>` namespace as the
+/// notebook does; an earlier iteration of this handler swept by
+/// prefix and would have hard-killed in-flight production
+/// dispatches if the operator pointed the notebook at a shared
+/// katulong. The notebook-owned id-set rules that out.
 async fn api_reset(State(s): State<SharedState>) -> ApiResult<Json<OkResp>> {
     teardown_current(&s).await;
+    // Drain the id-set so subsequent /api/reset calls don't try to
+    // kill ids we already killed (and so the set doesn't grow
+    // unboundedly across a long-lived serve).
+    let ids: Vec<String> = s.created_ids.lock().await.drain().collect();
     let http = s.http.clone();
     tokio::task::spawn_blocking(move || {
-        if let Ok(sessions) = http.list_sessions() {
-            for sess in sessions {
-                if sess.name.starts_with("sipag-d-") {
-                    let _ = http.kill_session(&sess.id);
-                }
-            }
+        for id in ids {
+            let _ = http.kill_session(&id);
         }
     })
     .await
@@ -420,7 +451,13 @@ async fn local_request_guard(
 ) -> Result<Response, StatusCode> {
     let host = req.headers().get("host").and_then(|v| v.to_str().ok());
     let origin = req.headers().get("origin").and_then(|v| v.to_str().ok());
-    check_local_request(&state.expected_host, req.method(), host, origin)?;
+    check_local_request(
+        &state.accepted_hosts,
+        &state.accepted_origins,
+        req.method(),
+        host,
+        origin,
+    )?;
     Ok(next.run(req).await)
 }
 
@@ -429,23 +466,26 @@ async fn local_request_guard(
 /// Extracted so the negative paths are testable without an axum
 /// `Router` + `tower::Service` rig.
 fn check_local_request(
-    expected_host: &str,
+    accepted_hosts: &HashSet<String>,
+    accepted_origins: &HashSet<String>,
     method: &Method,
     host: Option<&str>,
     origin: Option<&str>,
 ) -> Result<(), StatusCode> {
-    // DNS-rebinding defense: Host MUST be present and MUST match.
-    if host != Some(expected_host) {
-        return Err(StatusCode::FORBIDDEN);
+    // DNS-rebinding defense: `Host:` MUST be present and MUST be
+    // one of the accepted authorities (127.0.0.1, localhost, [::1]
+    // — all at our port).
+    match host {
+        Some(h) if accepted_hosts.contains(h) => {}
+        _ => return Err(StatusCode::FORBIDDEN),
     }
-    // CSRF defense for state-changing POSTs: if Origin is present, it
-    // MUST match our local authority. Origin-less POSTs are non-
+    // CSRF defense for state-changing POSTs: if `Origin:` is present,
+    // it MUST be in the accepted set. Origin-less POSTs are non-
     // browser callers (curl, Playwright's API context, sipag's CLI)
     // and aren't a CSRF vector.
     if method == Method::POST {
         if let Some(origin) = origin {
-            let expected_origin = format!("http://{expected_host}");
-            if origin != expected_origin {
+            if !accepted_origins.contains(origin) {
                 return Err(StatusCode::FORBIDDEN);
             }
         }
@@ -616,15 +656,27 @@ mod tests {
     // Playwright's API context with no Origin), but the negative
     // paths deserve a unit-level guard so a regression loosening the
     // check fails fast in `cargo test`.
-    const HOST: &str = "127.0.0.1:8765";
+    fn test_acceptlists() -> (HashSet<String>, HashSet<String>) {
+        let hosts: HashSet<String> = [
+            "127.0.0.1:8765".to_string(),
+            "localhost:8765".to_string(),
+            "[::1]:8765".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let origins: HashSet<String> = hosts.iter().map(|h| format!("http://{h}")).collect();
+        (hosts, origins)
+    }
 
     #[test]
     fn guard_rejects_post_with_foreign_origin() {
+        let (h, o) = test_acceptlists();
         assert_eq!(
             check_local_request(
-                HOST,
+                &h,
+                &o,
                 &Method::POST,
-                Some(HOST),
+                Some("127.0.0.1:8765"),
                 Some("http://attacker.example")
             ),
             Err(StatusCode::FORBIDDEN)
@@ -633,10 +685,12 @@ mod tests {
 
     #[test]
     fn guard_accepts_post_with_matching_origin() {
+        let (h, o) = test_acceptlists();
         assert!(check_local_request(
-            HOST,
+            &h,
+            &o,
             &Method::POST,
-            Some(HOST),
+            Some("127.0.0.1:8765"),
             Some("http://127.0.0.1:8765")
         )
         .is_ok());
@@ -647,21 +701,89 @@ mod tests {
         // Non-browser callers (curl, Playwright's API context, sipag's
         // CLI when it calls /api/* directly) don't set Origin, and they
         // aren't a CSRF vector — allow them through.
-        assert!(check_local_request(HOST, &Method::POST, Some(HOST), None).is_ok());
+        let (h, o) = test_acceptlists();
+        assert!(check_local_request(&h, &o, &Method::POST, Some("127.0.0.1:8765"), None).is_ok());
     }
 
     #[test]
     fn guard_rejects_request_with_wrong_host() {
+        let (h, o) = test_acceptlists();
         assert_eq!(
-            check_local_request(HOST, &Method::GET, Some("attacker.example:8765"), None),
+            check_local_request(&h, &o, &Method::GET, Some("attacker.example:8765"), None),
             Err(StatusCode::FORBIDDEN)
         );
     }
 
     #[test]
     fn guard_rejects_request_with_no_host() {
+        let (h, o) = test_acceptlists();
         assert_eq!(
-            check_local_request(HOST, &Method::GET, None, None),
+            check_local_request(&h, &o, &Method::GET, None, None),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn guard_accepts_localhost_host_and_origin() {
+        // Operators routinely type `localhost:<port>` instead of the
+        // 127.0.0.1 form the startup banner prints. The middleware
+        // must accept both.
+        let (h, o) = test_acceptlists();
+        assert!(check_local_request(
+            &h,
+            &o,
+            &Method::POST,
+            Some("localhost:8765"),
+            Some("http://localhost:8765")
+        )
+        .is_ok());
+        assert!(check_local_request(&h, &o, &Method::GET, Some("localhost:8765"), None).is_ok());
+    }
+
+    #[test]
+    fn guard_rejects_empty_host() {
+        // Pin the empty-string-vs-Some(_) check so a future
+        // unwrap_or("") refactor on the parsed header doesn't
+        // accidentally let it through.
+        let (h, o) = test_acceptlists();
+        assert_eq!(
+            check_local_request(&h, &o, &Method::GET, Some(""), None),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn guard_rejects_origin_port_elision() {
+        // `Origin: http://127.0.0.1` (no port) is what a browser
+        // would send if serve ran on port 80. Pin the strict match
+        // so a future "support port 80" PR can't loosen it
+        // accidentally.
+        let (h, o) = test_acceptlists();
+        assert_eq!(
+            check_local_request(
+                &h,
+                &o,
+                &Method::POST,
+                Some("127.0.0.1:8765"),
+                Some("http://127.0.0.1")
+            ),
+            Err(StatusCode::FORBIDDEN)
+        );
+    }
+
+    #[test]
+    fn guard_rejects_https_origin_against_http_serve() {
+        // Future "https serve" support must not be a side-effect of
+        // browser-side https — the operator must opt in deliberately.
+        let (h, o) = test_acceptlists();
+        assert_eq!(
+            check_local_request(
+                &h,
+                &o,
+                &Method::POST,
+                Some("127.0.0.1:8765"),
+                Some("https://127.0.0.1:8765")
+            ),
             Err(StatusCode::FORBIDDEN)
         );
     }
