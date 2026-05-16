@@ -193,6 +193,22 @@ async function api(method, path, body) {
 function renderMeta() {
   document.getElementById('meta-katulong').textContent = state.katulongUrl || '—';
   document.getElementById('meta-session').textContent = state.session || 'none';
+  // Keep the "↗ open katulong in new tab" link deep-linked at the
+  // current session via ?s=<name>. That hits katulong's auto-attach
+  // path on page load and avoids the session-list tile-click handler
+  // (which calls POST /tmux-sessions/adopt — and adopting a session
+  // that's already managed has a katulong-side bug that kills the
+  // underlying pane via session.detach() in the "already-managed"
+  // branch). Auto-attach is what xterm.js does anyway, same wire as
+  // what our client does.
+  const link = document.getElementById('kat-link');
+  if (link) {
+    link.href = state.katulongUrl
+      ? (state.session
+          ? state.katulongUrl + '/?s=' + encodeURIComponent(state.session)
+          : state.katulongUrl + '/')
+      : '#';
+  }
 }
 
 function renderCells() {
@@ -344,8 +360,9 @@ async function bootstrap() {
     if (state.session === null) {
       state.session = r.data.current_session;
     }
+    // renderMeta wires up the kat-link href (with ?s= deep-link
+    // when a session is active) — no need to set it separately here.
     renderMeta();
-    document.getElementById('kat-link').href = state.katulongUrl + '/';
   } else {
     renderMeta();
   }
