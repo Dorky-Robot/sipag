@@ -410,11 +410,17 @@ impl KatulongAttach {
         &self.session_name
     }
 
-    /// Send raw bytes as `{type:"input", data:"..."}`. The bytes
-    /// reach the PTY exactly as supplied — including escape
-    /// sequences. Each call is one protocol message; if you want
-    /// paste-then-submit, send the paste body via `paste()` then
-    /// the Enter via `press(KeyName::Enter)` as separate calls.
+    /// Send raw bytes as `{type:"input", data:"..."}` — same wire
+    /// shape xterm.js uses on a keystroke or paste event. The bytes
+    /// reach the PTY exactly as supplied; this client does NOT add
+    /// bracketed-paste markers or any other transformation. If the
+    /// application running in the PTY has enabled bracketed-paste
+    /// mode and the caller wants that semantic, the caller is
+    /// responsible for emitting the `\x1b[200~` / `\x1b[201~`
+    /// markers themselves.
+    ///
+    /// To send a body and submit, call `input(body)` then
+    /// `press(KeyName::Enter)` as separate calls.
     pub async fn input(&self, bytes: impl Into<String>) -> AttachResult<()> {
         let data = bytes.into();
         self.writer_tx
@@ -426,14 +432,6 @@ impl KatulongAttach {
             })
             .await
             .map_err(|_| AttachError::Closed)
-    }
-
-    /// Send a bracketed-paste body. Does NOT include a trailing
-    /// submit Enter — call `press(KeyName::Enter)` afterwards as a
-    /// separate message, which is the whole point of fixing the
-    /// original bug.
-    pub async fn paste(&self, body: &str) -> AttachResult<()> {
-        self.input(wrap_paste(body)).await
     }
 
     /// Send a named keystroke as its byte representation.
@@ -613,12 +611,12 @@ const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 /// finish in 50-200ms; 10s is "we should have noticed by now."
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Bound on the outbound message channel. Sized for: paste body +
-/// submit + a couple of pulls + a heartbeat in flight at once. Drop
-/// policy when full varies by call site (`try_send` for gap-fill
-/// pulls where the next nudge will retry; awaiting `send` for
-/// `DataAvailable`-driven pulls where the server won't necessarily
-/// re-nudge).
+/// Bound on the outbound message channel. Sized for: a multi-line
+/// input body + submit + a couple of pulls + a heartbeat in flight
+/// at once. Drop policy when full varies by call site (`try_send`
+/// for gap-fill pulls where the next nudge will retry; awaiting
+/// `send` for `DataAvailable`-driven pulls where the server won't
+/// necessarily re-nudge).
 const OUTBOUND_CHANNEL_BOUND: usize = 64;
 
 /// Truncate untrusted server payloads to this many bytes before
@@ -1112,14 +1110,6 @@ async fn dispatch_inbound(
     }
 }
 
-/// Wrap a paste body in bracketed-paste markers (no trailing
-/// submit). Pulled out as a free function so the byte shape — the
-/// load-bearing invariant of this whole PR — can be unit-tested
-/// without standing up an attach handle.
-pub(crate) fn wrap_paste(body: &str) -> String {
-    format!("\u{001b}[200~{body}\u{001b}[201~")
-}
-
 /// Truncate a string for inclusion in error messages or tracing
 /// logs. Bounds the size of untrusted server payloads before they
 /// enter sipag's log pipeline.
@@ -1348,32 +1338,6 @@ mod tests {
         // part of the sequence.
         let input = b"start\x1b(Bend";
         assert_eq!(strip_ansi_for_matching(input), b"startend");
-    }
-
-    // ── wrap_paste ──────────────────────────────────────────
-
-    #[test]
-    fn wrap_paste_produces_bpm_with_no_trailing_cr() {
-        // Load-bearing invariant — the original dispatch bug was a
-        // trailing \r getting absorbed into the paste. Pin the
-        // exact byte shape so a future edit can't regress it.
-        let wrapped = wrap_paste("hello world");
-        assert_eq!(wrapped, "\u{001b}[200~hello world\u{001b}[201~");
-        assert!(
-            !wrapped.ends_with('\r'),
-            "paste body must NOT end with carriage return; \
-             submit Enter is sent as a separate input() call"
-        );
-    }
-
-    #[test]
-    fn wrap_paste_round_trips_multi_line_body() {
-        let body = "## Context\n\nLine A\nLine B\n";
-        let wrapped = wrap_paste(body);
-        assert!(wrapped.starts_with("\u{001b}[200~"));
-        assert!(wrapped.ends_with("\u{001b}[201~"));
-        let inner = &wrapped["\u{001b}[200~".len()..wrapped.len() - "\u{001b}[201~".len()];
-        assert_eq!(inner, body);
     }
 
     // ── truncate_for_log ────────────────────────────────────

@@ -202,4 +202,37 @@ test.describe("notebook page", () => {
       timeout: 10_000,
     });
   });
+
+  test("paste does NOT wrap the body in bracketed-paste markers", async ({
+    page,
+  }) => {
+    // Regression: an earlier version of the attach client wrapped
+    // every paste body in `\x1b[200~ … \x1b[201~`. When the shell
+    // hadn't enabled BP mode yet (or didn't recognise the markers),
+    // they leaked into the buffer as literal `[200~…[201~` text.
+    // The client now sends the raw body — same wire shape xterm.js
+    // uses on a paste event — and the shell sees verbatim bytes.
+    await page.goto("/");
+    await clickPlay(page, "create");
+    await expect(page.locator("#meta-session")).toContainText("sipag-d-");
+
+    const token = "playwright-no-bpm-echo-test";
+    await page
+      .locator("#cell-paste input[data-name='body']")
+      .fill(`printf '%s\\n' '${token}'`);
+    await clickPlay(page, "paste");
+    await expectOk(page, "paste");
+    await clickPlay(page, "press");
+    await expectOk(page, "press");
+
+    // The sentinel should appear; BP-marker glyphs must not.
+    await expect(page.locator("#live-view")).toContainText(token, {
+      timeout: 10_000,
+    });
+    const liveText = (await page.locator("#live-view").textContent()) ?? "";
+    expect(liveText).not.toContain("[200~");
+    expect(liveText).not.toContain("[201~");
+    expect(liveText).not.toContain("^[[200~");
+    expect(liveText).not.toContain("^[[201~");
+  });
 });

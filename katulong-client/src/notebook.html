@@ -103,8 +103,8 @@ const CELLS = [
   },
   {
     id: 'paste',
-    title: 'Paste a body (bracketed paste, no submit)',
-    help: 'POST /api/paste — calls attach.paste(body). Does NOT send Enter.',
+    title: 'Send input bytes (the body, no submit)',
+    help: 'POST /api/paste — calls attach.input(body) — same wire shape xterm.js sends on a paste event. No bracketed-paste wrapping; the running app sees the bytes verbatim. Does NOT send Enter.',
     inputs: [
       { name: 'body', kind: 'text', label: 'body', default: "echo hello from notebook" },
     ],

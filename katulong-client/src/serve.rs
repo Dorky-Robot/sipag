@@ -259,10 +259,14 @@ async fn api_paste(
     State(s): State<SharedState>,
     Json(req): Json<PasteReq>,
 ) -> ApiResult<Json<OkResp>> {
+    // Same wire shape xterm.js sends on a paste event: one
+    // `{type:"input"}` with the body verbatim. The running app
+    // decides what to do with the bytes; this client does NOT
+    // bracketed-paste-wrap.
     let guard = s.current.lock().await;
     let (_, attach) = guard.as_ref().ok_or_else(no_session)?;
     attach
-        .paste(&req.body)
+        .input(req.body.clone())
         .await
         .map_err(ApiError::from_attach)?;
     Ok(Json(OkResp { ok: true }))

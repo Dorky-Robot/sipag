@@ -1364,8 +1364,12 @@ async fn dispatch_via_attach_client(
 
     info!(task = task_id, "dispatch v2: TUI ready");
 
-    // Step 2: paste the prompt body.
-    if let Err(e) = attach.paste(&prompt).await {
+    // Step 2: send the prompt body as raw input (same wire shape
+    // xterm.js uses for a paste event — `{type:"input",data:"..."}`).
+    // No bracketed-paste wrapping in this client; if the running
+    // app has BP enabled it'll handle the multi-line body, otherwise
+    // the shell sees the bytes verbatim.
+    if let Err(e) = attach.input(prompt.clone()).await {
         finish_v2(
             attach,
             &state,

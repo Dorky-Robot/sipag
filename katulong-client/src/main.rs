@@ -269,8 +269,15 @@ async fn run_input(remote: &RemoteConfig, session: &str, bytes: &str) -> Result<
 }
 
 async fn run_paste(remote: &RemoteConfig, session: &str, body: &str) -> Result<()> {
+    // `paste` is now a thin wrapper over `input` — same wire shape
+    // xterm.js uses on a paste event. The subcommand stays named
+    // `paste` because operators think of it that way; under the
+    // hood it's just `input(body)`.
     let attach = attach(remote, session).await?;
-    attach.paste(body).await.context("paste")?;
+    attach
+        .input(body.to_string())
+        .await
+        .context("paste/input")?;
     attach.close().await;
     Ok(())
 }
