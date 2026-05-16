@@ -112,6 +112,22 @@ enum Cmd {
     /// Print the current stripped-buffer length. Useful as a
     /// `--from <offset>` argument for a follow-up `wait-for` call.
     Offset { session: String },
+
+    /// Spawn a fresh katulong + serve a notebook-style web UI on
+    /// `--port` that lets you click ▶ on each cell (create, paste,
+    /// press, wait-for, lines, ...) and see the katulong session
+    /// reflect every action in an embedded iframe. The validation
+    /// surface for the headless client.
+    ///
+    /// Requires `--katulong-repo` (path to a katulong checkout).
+    Serve {
+        /// Port the notebook UI listens on. Open `http://127.0.0.1:<port>`.
+        #[arg(long, default_value_t = 8765u16)]
+        port: u16,
+        /// Path to a local katulong checkout (directory containing `server.js`).
+        #[arg(long, env = "KATULONG_REPO")]
+        katulong_repo: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -125,6 +141,21 @@ async fn main() -> Result<()> {
         .ok();
 
     let cli = Cli::parse();
+    // The `serve` subcommand spawns its own katulong and doesn't
+    // need --url/--api-key — short-circuit before `resolve_remote`
+    // so the user doesn't have to pass them.
+    if let Cmd::Serve {
+        port,
+        katulong_repo,
+    } = &cli.cmd
+    {
+        return katulong_client::serve::run(katulong_client::serve::ServeOpts {
+            port: *port,
+            katulong_repo: katulong_repo.clone(),
+        })
+        .await;
+    }
+
     let remote = resolve_remote(&cli)?;
 
     match cli.cmd {
@@ -142,6 +173,7 @@ async fn main() -> Result<()> {
         Cmd::Lines { session, n } => run_lines(&remote, &session, n).await,
         Cmd::Snapshot { session } => run_snapshot(&remote, &session).await,
         Cmd::Offset { session } => run_offset(&remote, &session).await,
+        Cmd::Serve { .. } => unreachable!("handled above"),
     }
 }
 

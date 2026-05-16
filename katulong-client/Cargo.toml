@@ -30,13 +30,19 @@ url = "2"
 futures-util = { version = "0.3", default-features = false }
 regex = "1"
 thiserror = "1"
-tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "io-util", "time", "signal"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
 tracing = "0.1"
 
 # CLI surface for the binary.
 clap = { version = "4", features = ["derive", "env"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# `serve` subcommand: notebook-style web UI for stepping through
+# library calls and watching the katulong session reflect them.
+# Axum keeps the wrapper-server surface tiny — every endpoint is
+# one handler that calls one library function.
+axum = "0.7"
 
 # `tempfile` is shared between the integration test harness and the
 # `sandbox` example. Promoted from dev-deps so the example builds

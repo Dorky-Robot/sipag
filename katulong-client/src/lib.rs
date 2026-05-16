@@ -30,6 +30,7 @@
 pub mod attach;
 pub mod http;
 pub mod protocol;
+pub mod serve;
 
 // Re-export the HTTP REST surface at the crate root.
 pub use http::{

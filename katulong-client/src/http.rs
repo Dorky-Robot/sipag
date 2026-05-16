@@ -141,6 +141,7 @@ impl RemoteConfig {
 }
 
 /// HTTP client for the katulong session API.
+#[derive(Clone)]
 pub struct KatulongClient {
     url: String,
     api_key: String,

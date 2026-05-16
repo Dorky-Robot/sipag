@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>katulong-client — notebook</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #111;
+    --fg: #d4d4d4;
+    --dim: #888;
+    --panel: #1c1c1c;
+    --border: #2a2a2a;
+    --accent: #7aa2f7;
+    --ok: #7ecf73;
+    --err: #f7768e;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  body { display: grid; grid-template-columns: minmax(520px, 1fr) minmax(360px, 1fr);
+    gap: 12px; padding: 12px; height: 100vh; }
+  header { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center;
+    padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--accent); }
+  header .meta { color: var(--dim); }
+  header .pill { display: inline-block; padding: 2px 8px; border: 1px solid var(--border);
+    border-radius: 10px; color: var(--fg); }
+  .cells { overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 6px; }
+  .iframe-wrap { display: flex; flex-direction: column; }
+  .iframe-wrap .label { color: var(--dim); padding-bottom: 6px; }
+  iframe { flex: 1; width: 100%; border: 1px solid var(--border); border-radius: 4px;
+    background: #000; }
+  .cell { background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 12px; }
+  .cell-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .cell-num { color: var(--dim); width: 18px; text-align: right; }
+  .cell-title { font-weight: 600; flex: 1; }
+  .cell-help { color: var(--dim); font-size: 11px; margin-bottom: 8px; }
+  .cell input[type="text"], .cell textarea, .cell select {
+    width: 100%; background: #0d0d0d; color: var(--fg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 5px 8px; font: inherit; }
+  .cell textarea { min-height: 56px; resize: vertical; }
+  .cell .row { display: flex; gap: 8px; margin-bottom: 6px; }
+  .cell .row > * { flex: 1; }
+  .cell button.play { background: var(--accent); color: #000; border: none; border-radius: 3px;
+    padding: 4px 12px; font: inherit; font-weight: 600; cursor: pointer; }
+  .cell button.play:hover { background: #92b3f5; }
+  .cell button.play:disabled { background: #444; color: #888; cursor: not-allowed; }
+  .output { margin-top: 8px; padding: 8px 10px; background: #0a0a0a; border-left: 3px solid var(--border);
+    white-space: pre-wrap; word-break: break-word; color: var(--dim); min-height: 18px; }
+  .output.ok { border-left-color: var(--ok); color: var(--fg); }
+  .output.err { border-left-color: var(--err); color: var(--err); }
+  .output .ts { color: var(--dim); font-size: 11px; }
+  footer { grid-column: 1 / -1; color: var(--dim); font-size: 11px; padding-top: 4px;
+    border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>katulong-client · notebook</h1>
+  <span class="meta">katulong: <span class="pill" id="meta-katulong">—</span></span>
+  <span class="meta">session: <span class="pill" id="meta-session">none</span></span>
+</header>
+
+<section class="cells" id="cells"></section>
+
+<section class="iframe-wrap">
+  <div class="label">live katulong session ↓</div>
+  <iframe id="kat-frame" src="about:blank"></iframe>
+</section>
+
+<footer>
+  Click ▶ on each cell to step through. Every action goes through the same
+  <code>katulong_client</code> library calls sipag's dispatch handler uses.
+  Ctrl-C in the terminal running <code>katulong-client serve</code> to tear down.
+</footer>
+
+<script>
+'use strict';
+
+// One cell = one library call, with editable inputs and an output area.
+const CELLS = [
+  {
+    id: 'create',
+    title: 'Create a fresh session',
+    help: 'POST /api/create — calls KatulongClient::create_dispatch_session() and opens a persistent WS attach to it.',
+    inputs: [],
+    run: () => api('POST', '/api/create'),
+    afterOk: (resp) => { state.session = resp.name; renderMeta(); },
+  },
+  {
+    id: 'paste',
+    title: 'Paste a body (bracketed paste, no submit)',
+    help: 'POST /api/paste — calls attach.paste(body). Does NOT send Enter.',
+    inputs: [
+      { name: 'body', kind: 'text', label: 'body', default: "echo hello from notebook" },
+    ],
+    run: (v) => api('POST', '/api/paste', { body: v.body }),
+  },
+  {
+    id: 'press',
+    title: 'Press a named key',
+    help: 'POST /api/press — calls attach.press(KeyName). Use this to submit after paste, or to send Ctrl-C / Escape / etc.',
+    inputs: [
+      { name: 'key', kind: 'select', label: 'key',
+        options: ['enter', 'escape', 'tab', 'backspace', 'ctrl-c', 'ctrl-d', 'up', 'down', 'left', 'right'],
+        default: 'enter' },
+    ],
+    run: (v) => api('POST', '/api/press', { key: v.key }),
+  },
+  {
+    id: 'wait',
+    title: 'Wait for a regex match',
+    help: 'POST /api/wait-for — calls attach.wait_for(re, from, timeout). Blocks until the regex matches the ANSI-stripped rolling buffer.',
+    inputs: [
+      { name: 'pattern', kind: 'text', label: 'regex', default: 'hello from notebook' },
+      { name: 'from', kind: 'select', label: 'from',
+        options: ['now', 'attach'], default: 'attach' },
+      { name: 'timeout', kind: 'text', label: 'timeout (s)', default: '5' },
+    ],
+    run: (v) => api('POST', '/api/wait-for', {
+      pattern: v.pattern,
+      from: v.from,
+      timeout: parseInt(v.timeout, 10) || 0,
+    }),
+  },
+  {
+    id: 'lines',
+    title: 'Last N lines (stripped)',
+    help: 'GET /api/lines?n=N — calls attach.last_n_lines(n). What the operator would see in the browser tab, minus ANSI styles.',
+    inputs: [
+      { name: 'n', kind: 'text', label: 'n', default: '15' },
+    ],
+    run: (v) => api('GET', '/api/lines?n=' + encodeURIComponent(v.n || '40')),
+  },
+  {
+    id: 'sessions',
+    title: 'List sessions on the server',
+    help: 'GET /api/sessions — calls KatulongClient::list_sessions(). Useful as a regression check (after attaching by name, count must stay 1; by id, katulong spawns a phantom).',
+    inputs: [],
+    run: () => api('GET', '/api/sessions'),
+  },
+  {
+    id: 'close',
+    title: 'Close the current attach',
+    help: 'POST /api/close — calls KatulongAttach::close(). Wrapped in a 2s timeout; a regression to the buggy close ordering would surface as a 504 here.',
+    inputs: [],
+    run: () => api('POST', '/api/close'),
+    afterOk: () => { state.session = null; renderMeta(); },
+  },
+];
+
+const state = {
+  katulongUrl: '',
+  session: null,
+};
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers['content-type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, opts);
+  const ct = resp.headers.get('content-type') || '';
+  const data = ct.includes('json') ? await resp.json() : await resp.text();
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+function renderMeta() {
+  document.getElementById('meta-katulong').textContent = state.katulongUrl || '—';
+  document.getElementById('meta-session').textContent = state.session || 'none';
+}
+
+function renderCells() {
+  const root = document.getElementById('cells');
+  CELLS.forEach((cell, i) => {
+    const el = document.createElement('div');
+    el.className = 'cell';
+    el.id = 'cell-' + cell.id;
+    const inputsHtml = cell.inputs.map((inp) => {
+      if (inp.kind === 'select') {
+        const opts = inp.options.map((o) =>
+          `<option value="${o}"${o === inp.default ? ' selected' : ''}>${o}</option>`).join('');
+        return `<label class="row"><span style="color:var(--dim)">${inp.label}</span>
+          <select data-name="${inp.name}">${opts}</select></label>`;
+      }
+      return `<label class="row"><span style="color:var(--dim)">${inp.label}</span>
+        <input type="text" data-name="${inp.name}" value="${inp.default ?? ''}"></label>`;
+    }).join('');
+    el.innerHTML = `
+      <div class="cell-head">
+        <span class="cell-num">${i + 1}.</span>
+        <span class="cell-title">${cell.title}</span>
+        <button class="play" data-cell="${cell.id}">▶ Play</button>
+      </div>
+      <div class="cell-help">${cell.help}</div>
+      ${inputsHtml}
+      <div class="output" id="out-${cell.id}">—</div>
+    `;
+    root.appendChild(el);
+  });
+  root.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button.play');
+    if (!btn) return;
+    const cellId = btn.dataset.cell;
+    const cell = CELLS.find((c) => c.id === cellId);
+    if (!cell) return;
+    const cellEl = document.getElementById('cell-' + cellId);
+    const values = {};
+    cell.inputs.forEach((inp) => {
+      const node = cellEl.querySelector(`[data-name="${inp.name}"]`);
+      values[inp.name] = node ? node.value : '';
+    });
+    btn.disabled = true;
+    try {
+      const result = await cell.run(values);
+      renderOutput(cellId, result);
+      if (result.ok && cell.afterOk) cell.afterOk(result.data);
+    } catch (err) {
+      renderOutput(cellId, { ok: false, status: 0, data: String(err) });
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function renderOutput(cellId, result) {
+  const out = document.getElementById('out-' + cellId);
+  const ts = new Date().toISOString().split('T')[1].slice(0, 8);
+  out.className = 'output ' + (result.ok ? 'ok' : 'err');
+  const pretty = typeof result.data === 'string'
+    ? result.data
+    : JSON.stringify(result.data, null, 2);
+  out.innerHTML = `<span class="ts">[${ts} · ${result.status}]</span>\n${escapeHtml(pretty)}`;
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+async function bootstrap() {
+  renderCells();
+  const r = await api('GET', '/api/state');
+  if (r.ok) {
+    state.katulongUrl = r.data.katulong_url;
+    state.session = r.data.current_session;
+    renderMeta();
+    document.getElementById('kat-frame').src = state.katulongUrl + '/';
+  } else {
+    renderMeta();
+  }
+}
+
+bootstrap();
+</script>
+
+</body>
+</html>
