@@ -28,10 +28,10 @@ use sipag_core::board::{
     KrStance, Observation, Project, ProjectKind, Task, TaskStatus, MISC_PROJECT,
 };
 use sipag_core::gate::{self, GateInput};
-use sipag_core::katulong::client::{
-    AttachError, KatulongAttachClient, KeyName, WaitFrom, DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS,
+use sipag_core::katulong::attach::{DEFAULT_ATTACH_COLS, DEFAULT_ATTACH_ROWS};
+use sipag_core::katulong::{
+    AttachError, KatulongAttach, KatulongAttachClient, KeyName, RemoteConfig, WaitFrom,
 };
-use sipag_core::katulong::RemoteConfig;
 use sipag_core::nudge::{self, NudgeInput};
 use tracing::{info, warn};
 
@@ -1364,8 +1364,12 @@ async fn dispatch_via_attach_client(
 
     info!(task = task_id, "dispatch v2: TUI ready");
 
-    // Step 2: paste the prompt body.
-    if let Err(e) = attach.paste(&prompt).await {
+    // Step 2: send the prompt body as raw input (same wire shape
+    // xterm.js uses for a paste event — `{type:"input",data:"..."}`).
+    // No bracketed-paste wrapping in this client; if the running
+    // app has BP enabled it'll handle the multi-line body, otherwise
+    // the shell sees the bytes verbatim.
+    if let Err(e) = attach.input(prompt.clone()).await {
         finish_v2(
             attach,
             &state,
@@ -1464,7 +1468,7 @@ async fn dispatch_via_attach_client(
 /// attach is always closed cleanly even on early returns.
 #[allow(clippy::too_many_arguments)]
 async fn finish_v2(
-    attach: sipag_core::katulong::client::KatulongAttach,
+    attach: KatulongAttach,
     state: &AppState,
     host_id: &str,
     session_name_str: &str,

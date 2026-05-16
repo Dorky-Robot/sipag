@@ -1,0 +1,70 @@
+[package]
+name = "katulong-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Headless Rust client for katulong — a programmatic 'browser' that speaks katulong's HTTP + WebSocket wire protocol"
+
+[lib]
+name = "katulong_client"
+path = "src/lib.rs"
+
+# Modular by design: the same library is usable from sipag (the task
+# manager) AND as a standalone CLI for poking sessions from the shell.
+# `katulong-client paste <session> '<body>' && katulong-client press
+# <session> enter` lets you validate behaviour from a terminal without
+# round-tripping through sipag.
+[[bin]]
+name = "katulong-client"
+path = "src/main.rs"
+
+[features]
+# The notebook web UI (`katulong-client serve`) pulls in axum and a
+# small amount of HTML/JSON glue. Library consumers that only need the
+# headless HTTP/WS client — sipag-core today, any other dispatcher
+# tomorrow — disable this with `default-features = false` and skip
+# axum's transitive compile cost (hyper, tower, http-body, ...).
+default = ["serve"]
+serve = ["dep:axum"]
+
+[dependencies]
+# HTTP + URL handling for the REST surface (`/sessions`, `/sessions/by-id/:id/output`, ...).
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+# WS attach client.
+futures-util = { version = "0.3", default-features = false }
+regex = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "macros", "net", "io-util", "time", "signal"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
+# rustls 0.23 dropped its built-in default provider; calling code MUST
+# install one before any TLS handshake or rustls panics at runtime.
+# `ring` is the lighter of the two options and what tokio-tungstenite's
+# CI builds against. Installed best-effort from
+# `KatulongAttachClient::new` (idempotent via OnceLock) so library
+# users (sipag) don't have to know about it.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tracing = "0.1"
+
+# CLI surface for the binary.
+clap = { version = "4", features = ["derive", "env"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# `serve` subcommand: notebook-style web UI for stepping through
+# library calls and watching the katulong session reflect them.
+# Axum keeps the wrapper-server surface tiny — every endpoint is
+# one handler that calls one library function. Optional: gated
+# behind the `serve` feature so library-only consumers don't pay
+# axum's transitive compile cost.
+axum = { version = "0.7", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+# Used by the integration-test harness (`tests/common`) to give each
+# spawned katulong a private state dir. Not needed at runtime — the
+# library and the `serve` / `sandbox` binaries talk to a real katulong
+# rather than spawning one.
+tempfile = "3"

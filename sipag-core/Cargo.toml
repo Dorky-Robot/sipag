@@ -6,6 +6,13 @@ edition = "2021"
 description = "Core library for sipag — sandbox launcher for Claude Code"
 
 [dependencies]
+# Katulong wire client lives in its own workspace crate so it can be
+# developed and tested in isolation. `sipag-core::katulong` re-exports
+# it for backward compatibility with existing call sites. We disable
+# the `serve` default feature so sipag-core (a library) doesn't
+# transitively pull axum and its tower/hyper/http-body chain — that's
+# only needed for the `katulong-client serve` notebook binary.
+katulong-client = { path = "../katulong-client", default-features = false }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 log = "0.4"
@@ -21,16 +28,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = { version = "0.3", default-features = false }
 # Auth subsystem — ported from katulong-auth.
 thiserror = "1"
-# `net`/`io-util`/`time` needed by the katulong WS attach client (see
-# docs/dispatch-implementation-plan.md §5). The pre-existing `sync, fs,
-# rt, macros` set covered the synchronous helpers; we widen for the
-# tokio-tungstenite path.
-tokio = { version = "1", features = ["sync", "fs", "rt", "macros", "net", "io-util", "time"] }
-# WebSocket client for the katulong attach path. Same rustls stack
-# `reqwest` already pulls in, so no duplicate TLS implementations.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
-# Used by the attach client's `wait_for` rolling-buffer matcher.
-regex = "1"
+# Synchronous helpers + a small async surface. The WS-specific
+# features (`net`/`io-util`/`time`/`signal`) live in `katulong-client`
+# now; we kept only what sipag-core itself uses.
+tokio = { version = "1", features = ["sync", "fs", "rt", "macros"] }
 tracing = "0.1"
 scrypt = { version = "0.11", default-features = false, features = ["simple"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

@@ -20,9 +20,6 @@
 //! function here points at the new path, that's the canonical place
 //! to look once the migration lands.
 
-pub mod client;
-pub mod protocol;
-
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
@@ -96,11 +93,25 @@ pub struct SessionStatus {
 }
 
 /// Remote connection config from `~/.katulong/remote.json`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// `Debug` is hand-implemented (not derived) so the bearer token
+/// stays out of logs. A future `tracing::debug!(?remote)` would
+/// otherwise drop the api key into any logging pipeline that ingests
+/// our diagnostics.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteConfig {
     pub url: String,
     #[serde(rename = "apiKey")]
     pub api_key: String,
+}
+
+impl std::fmt::Debug for RemoteConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteConfig")
+            .field("url", &self.url)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RemoteConfig {
@@ -144,6 +155,7 @@ impl RemoteConfig {
 }
 
 /// HTTP client for the katulong session API.
+#[derive(Clone)]
 pub struct KatulongClient {
     url: String,
     api_key: String,
@@ -278,11 +290,9 @@ impl KatulongClient {
     /// For sustained interaction with a session — driving keystrokes,
     /// observing output continuously, doing pattern-based waits —
     /// **prefer the WebSocket attach client** at
-    /// `sipag_core::katulong::client::KatulongAttachClient::attach`
-    /// (forthcoming, see `docs/dispatch-implementation-plan.md` §5).
-    /// The attach maintains a rolling buffer for free; this call
-    /// costs a curl process spawn plus an HTTP round-trip on every
-    /// invocation.
+    /// `katulong_client::KatulongAttachClient::attach`. The attach
+    /// maintains a rolling buffer for free; this call costs a curl
+    /// process spawn plus an HTTP round-trip on every invocation.
     ///
     /// This sync helper remains the right tool for:
     /// - diagnostic / one-shot reads (CLI inspection, gate

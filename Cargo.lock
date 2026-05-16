@@ -1446,6 +1446,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "katulong-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "futures-util",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2791,9 +2812,9 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures-util",
+ "katulong-client",
  "log",
  "rand_core 0.6.4",
- "regex",
  "reqwest",
  "scrypt",
  "serde",
@@ -2803,7 +2824,6 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
- "tokio-tungstenite",
  "toml",
  "tracing",
  "url",

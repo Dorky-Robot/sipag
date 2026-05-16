@@ -57,8 +57,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
-use super::protocol::{Inbound, Outbound};
-use super::RemoteConfig;
+use crate::protocol::{Inbound, Outbound};
+use crate::RemoteConfig;
 
 // ── public types ────────────────────────────────────────────────
 
@@ -183,6 +183,14 @@ pub struct KatulongAttachClient {
 
 impl KatulongAttachClient {
     pub fn new(remote: RemoteConfig) -> Self {
+        // rustls 0.23 has no default crypto provider; the first TLS
+        // handshake panics unless one is installed. Library users
+        // (sipag) shouldn't have to know about this — we install
+        // best-effort here. If something else in the process already
+        // installed a provider, `install_default` returns Err and we
+        // silently keep the existing one. The `OnceLock` is just to
+        // avoid the work on every `new()`.
+        ensure_crypto_provider();
         Self {
             remote: Arc::new(remote),
         }
@@ -410,12 +418,27 @@ impl KatulongAttach {
         &self.session_name
     }
 
-    /// Send raw bytes as `{type:"input", data:"..."}`. The bytes
-    /// reach the PTY exactly as supplied — including escape
-    /// sequences. Each call is one protocol message; if you want
-    /// paste-then-submit, send the paste body via `paste()` then
-    /// the Enter via `press(KeyName::Enter)` as separate calls.
+    /// Send raw bytes as `{type:"input", data:"..."}` — same wire
+    /// shape xterm.js uses on a keystroke or paste event. The bytes
+    /// reach the PTY exactly as supplied; this client does NOT add
+    /// bracketed-paste markers or any other transformation. If the
+    /// application running in the PTY has enabled bracketed-paste
+    /// mode and the caller wants that semantic, the caller is
+    /// responsible for emitting the `\x1b[200~` / `\x1b[201~`
+    /// markers themselves.
+    ///
+    /// To send a body and submit, call `input(body)` then
+    /// `press(KeyName::Enter)` as separate calls.
+    ///
+    /// Returns an error if the attach has gone terminal (session
+    /// removed, transport error, exit). Without this check, the
+    /// channel send would still succeed (the writer task is alive
+    /// and ready) and the WS frame would still be transmitted —
+    /// but katulong silently drops Input messages for unknown
+    /// sessions, so the bytes would vanish and the caller would
+    /// never know.
     pub async fn input(&self, bytes: impl Into<String>) -> AttachResult<()> {
+        self.check_not_terminal().await?;
         let data = bytes.into();
         self.writer_tx
             .as_ref()
@@ -428,12 +451,15 @@ impl KatulongAttach {
             .map_err(|_| AttachError::Closed)
     }
 
-    /// Send a bracketed-paste body. Does NOT include a trailing
-    /// submit Enter — call `press(KeyName::Enter)` afterwards as a
-    /// separate message, which is the whole point of fixing the
-    /// original bug.
-    pub async fn paste(&self, body: &str) -> AttachResult<()> {
-        self.input(wrap_paste(body)).await
+    /// Check whether the attach has gone terminal (the reader task
+    /// observed `session-removed` / `exit` / a transport error).
+    /// Called at the start of every outbound op so callers see the
+    /// underlying reason instead of a misleading `Ok(())`.
+    async fn check_not_terminal(&self) -> AttachResult<()> {
+        if let Some(reason) = self.state.lock().await.terminal.as_ref() {
+            return Err(reason.clone().into());
+        }
+        Ok(())
     }
 
     /// Send a named keystroke as its byte representation.
@@ -454,6 +480,7 @@ impl KatulongAttach {
     /// anything, but TUI apps reflow based on PTY size, so it's
     /// worth setting a reasonable default after attach.
     pub async fn resize(&self, cols: u16, rows: u16) -> AttachResult<()> {
+        self.check_not_terminal().await?;
         self.writer_tx
             .as_ref()
             .ok_or(AttachError::Closed)?
@@ -613,12 +640,12 @@ const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
 /// finish in 50-200ms; 10s is "we should have noticed by now."
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Bound on the outbound message channel. Sized for: paste body +
-/// submit + a couple of pulls + a heartbeat in flight at once. Drop
-/// policy when full varies by call site (`try_send` for gap-fill
-/// pulls where the next nudge will retry; awaiting `send` for
-/// `DataAvailable`-driven pulls where the server won't necessarily
-/// re-nudge).
+/// Bound on the outbound message channel. Sized for: a multi-line
+/// input body + submit + a couple of pulls + a heartbeat in flight
+/// at once. Drop policy when full varies by call site (`try_send`
+/// for gap-fill pulls where the next nudge will retry; awaiting
+/// `send` for `DataAvailable`-driven pulls where the server won't
+/// necessarily re-nudge).
 const OUTBOUND_CHANNEL_BOUND: usize = 64;
 
 /// Truncate untrusted server payloads to this many bytes before
@@ -1002,6 +1029,13 @@ async fn dispatch_inbound(
     writer_tx: &mpsc::Sender<Outbound>,
     session_name: &str,
 ) {
+    // One-line trace of every inbound message we receive — set
+    // `RUST_LOG=katulong_client=info` to capture. Used to diagnose
+    // the "session ends with exit code 0 when the operator opens the
+    // session in a second katulong tab" repro: when Exit shows up
+    // here, the most recent N inbound lines tell us what katulong
+    // did just before it killed us.
+    tracing::info!(target: "katulong_client::attach::inbound", "{}", inbound_one_liner(&msg));
     match msg {
         Inbound::Attached { session, data } if session == session_name => {
             // Treated as a snapshot (reconnect or re-attach).
@@ -1018,10 +1052,18 @@ async fn dispatch_inbound(
             cursor,
         } if session == session_name => {
             let mut st = state.lock().await;
-            if !data.is_empty() {
-                st.append_bytes(data.as_bytes());
+            // Monotonic guard checked BEFORE mutation: a stale
+            // PullResponse (older cursor than ours) would otherwise
+            // re-append already-applied bytes (since Pull responses
+            // are "bytes since `from_seq`" — duplicate Pull = duplicate
+            // bytes). Skip both the append and the cursor write so
+            // wait_for matchers don't see ghosts.
+            if cursor > st.cursor {
+                if !data.is_empty() {
+                    st.append_bytes(data.as_bytes());
+                }
+                st.cursor = cursor;
             }
-            st.cursor = cursor;
         }
         Inbound::PullSnapshot {
             session,
@@ -1029,8 +1071,16 @@ async fn dispatch_inbound(
             cursor,
         } if session == session_name => {
             let mut st = state.lock().await;
-            st.replace_buffer(data.into_bytes());
-            st.cursor = cursor;
+            // Monotonic guard checked BEFORE mutation: snapshot bytes
+            // are the WHOLE buffer; applying a stale snapshot after a
+            // fresher one would replay old content AND reset every
+            // pending wait_for's lower_bound (replace_buffer side
+            // effect), breaking the FromNow contract. Skip the
+            // replacement entirely when the snapshot is stale.
+            if cursor > st.cursor {
+                st.replace_buffer(data.into_bytes());
+                st.cursor = cursor;
+            }
         }
         Inbound::Output {
             session,
@@ -1088,9 +1138,20 @@ async fn dispatch_inbound(
             }
         }
         Inbound::Exit { session, code } if session == session_name => {
+            tracing::warn!(
+                target: "katulong_client::attach::inbound",
+                session = %session,
+                code,
+                "EXIT received from katulong — marking attach terminal"
+            );
             state.lock().await.mark_terminal(TerminalReason::Exit(code));
         }
         Inbound::SessionRemoved { session } if session == session_name => {
+            tracing::warn!(
+                target: "katulong_client::attach::inbound",
+                session = %session,
+                "SESSION_REMOVED received from katulong — marking attach terminal"
+            );
             state
                 .lock()
                 .await
@@ -1112,12 +1173,77 @@ async fn dispatch_inbound(
     }
 }
 
-/// Wrap a paste body in bracketed-paste markers (no trailing
-/// submit). Pulled out as a free function so the byte shape — the
-/// load-bearing invariant of this whole PR — can be unit-tested
-/// without standing up an attach handle.
-pub(crate) fn wrap_paste(body: &str) -> String {
-    format!("\u{001b}[200~{body}\u{001b}[201~")
+/// Best-effort install of rustls's ring crypto provider. Idempotent
+/// across calls and threads; safe if another part of the process
+/// already installed a (possibly different) provider — we just keep
+/// theirs. rustls 0.23+ requires this before any TLS handshake or
+/// the connect path panics with "Could not automatically determine
+/// the process-level CryptoProvider".
+pub(crate) fn ensure_crypto_provider() {
+    use std::sync::OnceLock;
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        // Returns Err if a provider is already installed — which is
+        // fine, that just means someone got here first.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// Compact one-line summary of an Inbound for the diagnostic
+/// reader trace. We deliberately omit the data payload (potentially
+/// huge ANSI bytes) and keep only the shape + key fields a human
+/// needs to recognise which event was which.
+fn inbound_one_liner(msg: &Inbound) -> String {
+    match msg {
+        Inbound::Attached { session, data } => {
+            format!("Attached session={session} buf={}B", data.len())
+        }
+        Inbound::SeqInit { session, seq } => {
+            format!("SeqInit session={session} seq={seq}")
+        }
+        Inbound::PullResponse {
+            session,
+            data,
+            cursor,
+        } => format!(
+            "PullResponse session={session} bytes={} cursor={cursor}",
+            data.len()
+        ),
+        Inbound::PullSnapshot {
+            session,
+            data,
+            cursor,
+        } => format!(
+            "PullSnapshot session={session} bytes={} cursor={cursor}",
+            data.len()
+        ),
+        Inbound::Output {
+            session,
+            data,
+            from_seq,
+            cursor,
+        } => format!(
+            "Output session={session} bytes={} from={from_seq} to={cursor}",
+            data.len()
+        ),
+        Inbound::DataAvailable { session } => format!("DataAvailable session={session}"),
+        Inbound::StateCheck {
+            session,
+            fingerprint,
+            seq,
+        } => format!("StateCheck session={session} seq={seq} fp={fingerprint}"),
+        Inbound::Exit { session, code } => format!("Exit session={session} code={code}"),
+        Inbound::SessionRemoved { session } => format!("SessionRemoved session={session}"),
+        Inbound::ResizeSync { cols, rows } => format!("ResizeSync cols={cols} rows={rows}"),
+        Inbound::Switched { session } => format!("Switched session={session}"),
+        Inbound::SessionRenamed { name, id } => format!("SessionRenamed name={name} id={id}"),
+        Inbound::SessionUpdated { .. } => "SessionUpdated".to_string(),
+        Inbound::Error { message } => {
+            format!("Error message={}", truncate_for_log(message))
+        }
+        Inbound::Pong => "Pong".to_string(),
+        Inbound::Other => "Other".to_string(),
+    }
 }
 
 /// Truncate a string for inclusion in error messages or tracing
@@ -1143,6 +1269,17 @@ fn truncate_for_log(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ensure_crypto_provider_is_idempotent() {
+        // Two back-to-back calls must not panic. The first installs;
+        // the second hits the OnceLock no-op path. Library users get
+        // this guarantee — every `KatulongAttachClient::new` calls
+        // through, and a sipag process that constructs several
+        // clients shouldn't crash.
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+    }
 
     #[test]
     fn ws_url_swaps_https_for_wss() {
@@ -1348,32 +1485,6 @@ mod tests {
         // part of the sequence.
         let input = b"start\x1b(Bend";
         assert_eq!(strip_ansi_for_matching(input), b"startend");
-    }
-
-    // ── wrap_paste ──────────────────────────────────────────
-
-    #[test]
-    fn wrap_paste_produces_bpm_with_no_trailing_cr() {
-        // Load-bearing invariant — the original dispatch bug was a
-        // trailing \r getting absorbed into the paste. Pin the
-        // exact byte shape so a future edit can't regress it.
-        let wrapped = wrap_paste("hello world");
-        assert_eq!(wrapped, "\u{001b}[200~hello world\u{001b}[201~");
-        assert!(
-            !wrapped.ends_with('\r'),
-            "paste body must NOT end with carriage return; \
-             submit Enter is sent as a separate input() call"
-        );
-    }
-
-    #[test]
-    fn wrap_paste_round_trips_multi_line_body() {
-        let body = "## Context\n\nLine A\nLine B\n";
-        let wrapped = wrap_paste(body);
-        assert!(wrapped.starts_with("\u{001b}[200~"));
-        assert!(wrapped.ends_with("\u{001b}[201~"));
-        let inner = &wrapped["\u{001b}[200~".len()..wrapped.len() - "\u{001b}[201~".len()];
-        assert_eq!(inner, body);
     }
 
     // ── truncate_for_log ────────────────────────────────────
@@ -2112,6 +2223,63 @@ mod tests {
         let result = attach
             .wait_for(&re, WaitFrom::FromAttach, Some(Duration::from_secs(1)))
             .await;
+        assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn input_returns_terminal_reason_when_session_removed() {
+        // Without this check, input() succeeds silently after the
+        // session is gone — the writer task is alive and the WS
+        // frame ships, but katulong's `writeInput` looks up the
+        // session by name, doesn't find it, and silently drops the
+        // bytes. The notebook UI returns ok:true and nothing
+        // happens. This test pins that input() now surfaces the
+        // terminal reason instead.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.input("would-vanish").await;
+        assert!(
+            matches!(result, Err(AttachError::SessionRemoved)),
+            "input() must propagate the terminal reason, not silently succeed; got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn input_returns_transport_error_when_terminal_via_transport() {
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::Transport("network dead".into()));
+        }
+        let result = attach.input("would-vanish").await;
+        assert!(matches!(result, Err(AttachError::Transport(_))));
+    }
+
+    #[tokio::test]
+    async fn press_returns_terminal_reason_when_session_removed() {
+        // press() routes through input(), so it inherits the
+        // terminal check. Pin it explicitly so a future split of
+        // the two methods keeps the behaviour.
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.press(KeyName::Enter).await;
+        assert!(matches!(result, Err(AttachError::SessionRemoved)));
+    }
+
+    #[tokio::test]
+    async fn resize_returns_terminal_reason_when_session_removed() {
+        let attach = make_test_attach();
+        {
+            let mut st = attach.state.lock().await;
+            st.mark_terminal(TerminalReason::SessionRemoved);
+        }
+        let result = attach.resize(80, 24).await;
         assert!(matches!(result, Err(AttachError::SessionRemoved)));
     }
 
