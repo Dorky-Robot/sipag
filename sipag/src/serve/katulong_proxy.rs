@@ -44,7 +44,7 @@ pub(super) fn sanitize_upstream_body(body: &str) -> String {
         .collect()
 }
 
-/// Parse `POST /sessions` response as `sipag_core::katulong::Session`,
+/// Parse `POST /sessions` response as `sipag_core::katulong::TmuxSession`,
 /// validate the id format, and return the id. Returns a
 /// (status, body) pair on parse or validation failure so callers
 /// can adapt to their preferred response idiom.
@@ -52,7 +52,7 @@ async fn extract_session_id(
     resp: reqwest::Response,
     host_id: &str,
 ) -> std::result::Result<String, (StatusCode, String)> {
-    let session = match resp.json::<sipag_core::katulong::Session>().await {
+    let session = match resp.json::<sipag_core::katulong::TmuxSession>().await {
         Ok(s) => s,
         Err(e) => {
             warn!(host = %host_id, error = %e, "parse session create response failed");
@@ -134,7 +134,7 @@ pub(super) async fn create_or_find_session(
                     ),
                 ));
             }
-            let sessions: Vec<sipag_core::katulong::Session> = match list_resp.json().await {
+            let sessions: Vec<sipag_core::katulong::TmuxSession> = match list_resp.json().await {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(host = %host_id, error = %e, "parse /sessions list failed");

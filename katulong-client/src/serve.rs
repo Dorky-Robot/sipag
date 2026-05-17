@@ -40,7 +40,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     AttachError, KatulongAttach, KatulongAttachClient, KatulongClient, KeyName, RegexMatch,
-    RemoteConfig, Session, WaitFrom,
+    RemoteConfig, TmuxSession, WaitFrom,
 };
 
 pub struct ServeOpts {
@@ -148,7 +148,7 @@ struct ServeState {
     /// `session` retains both name and id so we can DELETE on
     /// teardown without re-listing. Replaced on subsequent
     /// `/api/create`s; cleared on `/api/close` and `/api/reset`.
-    current: Mutex<Option<(Session, KatulongAttach)>>,
+    current: Mutex<Option<(TmuxSession, KatulongAttach)>>,
     /// Session ids THIS notebook process created via `/api/create`.
     /// `/api/reset` cleans up every id in this set — and ONLY ids in
     /// this set — so a notebook pointed at a shared katulong can't
@@ -212,7 +212,7 @@ async fn api_state(State(s): State<SharedState>) -> Json<StateResp> {
 
 // ── /api/sessions ───────────────────────────────────────────────
 
-async fn api_sessions(State(s): State<SharedState>) -> ApiResult<Json<Vec<Session>>> {
+async fn api_sessions(State(s): State<SharedState>) -> ApiResult<Json<Vec<TmuxSession>>> {
     // KatulongClient methods are sync (curl shell-out); jump to a
     // blocking task so we don't pin the runtime.
     let http = s.http.clone();
