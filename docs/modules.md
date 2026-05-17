@@ -9,7 +9,7 @@
 - 🟡 lives in code today, needs polish or relocation
 - 🟧 mixed in with other things, candidate for extraction
 - 🔴 scattered or duplicated, structural debt
-- ⛔ deprecated — see `[[memory: deprecate-with-rationale]]` (don't delete, preserve as "we tried this")
+- ⛔ deprecated — see `[[feedback-deprecate-with-rationale]]` (don't delete, preserve as "we tried this")
 - ❓ open question — answer in a follow-up edit
 
 ---
@@ -132,7 +132,7 @@ plat ←   │  Topology            │                │   Identity           
 | LLM / gemma client | `sipag-core/src/llm.rs` (300 LOC) | 🟡 — Experimentation's observe-side infrastructure |
 | Dispatch mechanics (CLI + TUI paths) | `sipag/src/cli.rs`, `tui/src/board_app.rs:353` (uses sync `KatulongClient::from_remote_json()` + calls `katulong::{session_name, worktree_command, agent_command}` inline — the exact dispatch-policy helpers §9 #9 lifts) | 🟧 — the `act` sub-module; **TUI is the third dedup site** alongside CLI and serve |
 | Dispatch mechanics (web path) | `sipag/src/serve/htmx.rs` + URL builders | 🔴 — same act surface duplicated, plus the #527 unbounded-body vector |
-| Refinement pipeline | `sipag-core/src/feature.rs` (837), `sipag-core/src/refine.rs` (1364) | ⛔ **deprecated** — kanban-shaped; replaced by Experimentation. Don't delete; preserve as "we tried this" per `[[feedback-deprecate-with-rationale]]`. Strip wiring, add deprecation note pointing at this doc. |
+| Refinement pipeline | `sipag-core/src/feature.rs` (847), `sipag-core/src/refine.rs` (1367) | ⛔ **deprecated** — kanban-shaped; replaced by Experimentation. Don't delete; preserve as "we tried this" per `[[feedback-deprecate-with-rationale]]`. Strip wiring, add deprecation note pointing at this doc. |
 | Categorize loop | `sipag/src/serve/categorize.rs` | 🟧 — fold into `observe` / `iterate` |
 | Background workers (expand, research, scheduler) | `sipag/src/serve/workers/` | ❓ — what's the seam against `observe` / `iterate`? Same code path, different trigger? |
 
@@ -245,7 +245,7 @@ DDD principle: when two contexts have different words for the same shape, the bo
 | `sipag-core/src/gate.rs` | Experimentation `observe` | merge with nudge into one classifier |
 | `sipag-core/src/nudge.rs` | Experimentation `observe` | merge with gate |
 | `sipag-core/src/llm.rs` | Topology (as `ollama-client`); consumed by Experimentation `observe` | promote to crate |
-| `sipag-core/src/pubsub.rs` | ❓ if sipag becomes a pure consumer of katulong's broker, this whole module dies; needs confirmation sipag doesn't publish topics for outside consumers |
+| `sipag-core/src/pubsub.rs` | **stays for now** — load-bearing (16+ publish sites in `sipag/src/serve/`). Future decision: keep in-process broker, or route sipag's own topics into katulong's broker per `[[feedback-fix-at-right-layer]]`. See §10 + §9 #16. |
 | `sipag-core/src/hosts.rs` | Topology | reconcile with katulong mesh.json |
 | `sipag-core/src/config.rs` | Cross-cutting | stay |
 | `sipag-core/src/auth/` | Identity | extract to `sipag-auth` (low priority) |
@@ -290,7 +290,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 
 14. **Agent API endpoint wiring.** Steering. Type-driven; types landed in Phase 1 (#5). The published-language types should drive the route shapes naturally.
 15. **Promote `auth/` to its own crate** (`sipag-auth` or `dorky-auth`). Identity. Lowest urgency — works fine today, just big.
-16. **Decide `pubsub.rs` fate.** Topology. Confirm sipag isn't publishing topics for outside consumers; if not, deprecate per `[[feedback-deprecate-with-rationale]]`; if it is, route those publishes to katulong's broker (per `[[fix-at-right-layer]]`).
+16. **Decide `pubsub.rs` future** (not its fate — load-bearing today). Topology. sipag's broker has 16+ publish sites internally; see §10. The decision is whether to keep an in-process broker or route sipag's own topics into katulong's broker per `[[feedback-fix-at-right-layer]]`. Defer until queue items #2 + #7 prove out the katulong-consumer side; the consolidate-vs-keep call is much easier with both ends working.
 
 ---
 
@@ -300,7 +300,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - **§3 IteratePolicy plug shape**: trait with a `decide(experiment, outcome) -> NextAction` method, or richer (multi-step planning)?
 - **§3 workers/**: relationship to `observe` / `iterate`. Are `expand`/`research`/`scheduler` background-triggered iteration policies, or a separate kind of work?
 - **§4 hosts.rs vs mesh.json**: overlapping topology configs. One source of truth or two?
-- **§4 pubsub.rs**: ~~does sipag publish its own topics (for external consumers / future bridges), or is it purely a consumer of katulong's?~~ **Resolved 2026-05-17:** grep of `sipag/src/serve/` for `.publish(` returns zero non-test hits — sipag is consumer-only. The whole module is therefore a deprecation candidate; deprecate alongside Phase 3 #16. Reconfirm before deprecating in case a publish path lands between now and then.
+- **§4 pubsub.rs** — sipag's broker is **load-bearing**, not a deprecation candidate. Round-1 review claimed sipag was consumer-only based on a faulty grep; the actual state (verified 2026-05-17) is that `sipag/src/serve/` has 16+ `.publish(` call sites — `workers/{expand,research,scheduler,mod}.rs`, `htmx.rs` (6), `observers.rs`, `board_view.rs`, `ws.rs`. Topics include `workers/activity`, `observations/activity`, plus per-item `discourse_topic()` channels. The broker serves sipag's own intra-process consumers (UI updates, worker coordination). The real architectural question is whether sipag's internal topics should be **published into katulong's broker** instead of sipag running its own — per `[[feedback-fix-at-right-layer]]`. That would unify the pub/sub seam at the katulong layer but requires sipag's UI subscribers to round-trip through the network. Worth weighing, but not in Phase 3 — first prove out the katulong consumer path (queue items #2 / #7).
 - **§4 Topology context scope**: today §4 bundles mesh/host config + wire protocols + protocol shapes. These are different shapes ("Topology" feels like infra-config; "Wire" feels like client libraries). Should **Wire** be a sibling context to **Topology**, with `katulong-client` / `ollama-client` living under Wire and `hosts.rs` / mesh.json under Topology? Affects where the response-size cap conceptually lives (§7).
 - **§6 ColumnName + WorkflowStatus + TmuxSessionStatus**: are these *domain nouns* or *wire/presentation schema nouns*? `ColumnName` smells like a UI presentation concern that might never need to appear in `sipag-core`; `TmuxSessionStatus` might be a wire response shape, not a domain type. Worth distinguishing "domain language per context" from "schema language per wire/UI seam" so we don't pollute domain modules with concerns that only matter at boundaries.
 - **§6 type prefixes vs module paths**: prefer `Trial`, `Outcome`, `Stance` reached via module paths (`experimentation::Trial` vs `steering::KrStance`)? More idiomatic Rust; less visible at call sites.
@@ -315,3 +315,4 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - 2026-05-17 — full rewrite around DDD bounded contexts (Steering / Experimentation / Topology / Identity). Folded former "Refinement" / "Execution" / "Sensing" into Experimentation per the RL/Edison work model (see memory: `project-sipag-work-model-experimentation`). Established naming disambiguation for overloaded `Session` / `Status`. Marked `feature.rs` + `refine.rs` as ⛔ deprecated (preserve, don't delete, per `feedback-deprecate-with-rationale`).
 - 2026-05-17 — re-sequenced §9 into three phases (structural language first, then bug-fix-driven, then cleanup). Rationale: every PR that ships in the old vocabulary entrenches it. Front-loading language work means subsequent PRs migrate the codebase organically.
 - 2026-05-17 — review-fix round on PR #536 — fixed URL typo (keglong → katulong), normalized memory name to `feedback-deprecate-with-rationale`, corrected LOC counts (feature/refine/auth), enumerated `serve/workers/` files, added `serve/categorize.rs` row, added Claude-subprocess breadcrumb to §4, closed pubsub open question with grep finding, opened topology-split and domain-vs-schema-noun questions in §10, acknowledged phase-ordering trade-off in §9 (interleaving permissible after #1 + #2 land), explicit TUI-as-third-dedup-site note.
+- 2026-05-17 — review-fix round 2 on PR #536 — reverted the **factually wrong** pubsub resolution (sipag's broker has 16+ internal publish sites — it's load-bearing, NOT a deprecation candidate); reframed §10 + §9 #16 around the correct architectural question (in-process broker vs routing into katulong's broker). LOC drift round-2 (feature.rs 837→847, refine.rs 1364→1367 — the round-1 banner additions pushed them up again). Normalized the two memory references that still used the unprefixed form (`[[memory: deprecate-with-rationale]]` in the §0 legend and `[[fix-at-right-layer]]` in pubsub paragraphs).
