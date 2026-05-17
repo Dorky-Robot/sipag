@@ -70,12 +70,31 @@ fn help_lists_subcommands() {
     let output = sipag().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // `feature` and `refine` subcommands were deprecated 2026-05-17
-    // along with sipag_core::{feature, refine}. See docs/modules.md §3.
-    for cmd in &["dispatch", "up", "tui", "add", "list", "move", "version"] {
+    // Positive assertions — every wired subcommand should appear in the
+    // top-level help. List intentionally exhaustive so a future
+    // deprecation/rename can't slip past silently (pre-2026-05-17 this
+    // list only covered the "user-facing core" and missed
+    // projects/project/sub/serve).
+    for cmd in &[
+        "dispatch", "up", "tui", "add", "list", "move", "projects", "project", "sub", "serve",
+        "version",
+    ] {
         assert!(
             stdout.contains(cmd),
             "Help text should mention '{cmd}' subcommand"
+        );
+    }
+
+    // Negative assertions — the deprecated `feature` + `refine`
+    // subcommands were stripped 2026-05-17. A regression that
+    // accidentally re-added either should fail loudly here (without
+    // these guards, the positive list alone wouldn't catch a re-add).
+    // See sipag_core::{feature, refine} module doc-comments and
+    // docs/modules.md §3 for the deprecation rationale.
+    for deprecated in &["feature", "refine"] {
+        assert!(
+            !stdout.contains(deprecated),
+            "Help text should NOT mention deprecated '{deprecated}' subcommand"
         );
     }
 }

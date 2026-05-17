@@ -11,6 +11,9 @@
 //!
 //! Source preserved per `feedback-deprecate-with-rationale` memory. All
 //! wiring has been stripped (CLI `sipag refine` subcommand removed).
+//! See [`crate::feature`]'s top-of-file doc for the on-disk-data
+//! reachability note — feature files left over from older installs are
+//! no longer reachable from the CLI.
 //!
 //! The Node-port (`katulong/lib/dispatch-refine.js`) translation work
 //! captured here may have **reusable** pieces for Experimentation's `act`

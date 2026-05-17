@@ -116,7 +116,7 @@ plat ←   │  Topology            │                │   Identity           
 **Sub-responsibilities.**
 
 - **act** — fire the spike. Currently the dispatch path: katulong session create, agent command exec, worktree setup.
-- **observe** — collect the feedback signal. Currently: pane scrollback fetch + gemma classification. Future: katulong pub/sub subscriber driving typed `Outcome`s directly (most signals don't need an LLM call — see katulong issues [#715](https://github.com/Dorky-Robot/keglong/issues/715) / [#716](https://github.com/Dorky-Robot/katulong/issues/716)).
+- **observe** — collect the feedback signal. Currently: pane scrollback fetch + gemma classification. Future: katulong pub/sub subscriber driving typed `Outcome`s directly (most signals don't need an LLM call — see katulong issues [#715](https://github.com/Dorky-Robot/katulong/issues/715) / [#716](https://github.com/Dorky-Robot/katulong/issues/716)).
 - **iterate** — decide what to try next given the latest outcome. This is where the `IteratePolicy` plugs in.
 
 **Where it lives today.**
@@ -130,9 +130,9 @@ plat ←   │  Topology            │                │   Identity           
 | Recovery loop (`verify_and_heal_dispatch`) | `sipag/src/serve/htmx.rs:1577` | 🔴 — **delete** when attach client owns keystrokes (per existing dispatch-implementation-plan §7) |
 | Observation aggregate | `sipag-core/src/board/observation.rs` | 🟧 — belongs to Experimentation, not the board |
 | LLM / gemma client | `sipag-core/src/llm.rs` (300 LOC) | 🟡 — Experimentation's observe-side infrastructure |
-| Dispatch mechanics (CLI + TUI paths) | `sipag/src/cli.rs`, `tui/src/board_app.rs` (uses sync `KatulongClient`) | 🟧 — the `act` sub-module |
+| Dispatch mechanics (CLI + TUI paths) | `sipag/src/cli.rs`, `tui/src/board_app.rs:353` (uses sync `KatulongClient::from_remote_json()` + calls `katulong::{session_name, worktree_command, agent_command}` inline — the exact dispatch-policy helpers §9 #9 lifts) | 🟧 — the `act` sub-module; **TUI is the third dedup site** alongside CLI and serve |
 | Dispatch mechanics (web path) | `sipag/src/serve/htmx.rs` + URL builders | 🔴 — same act surface duplicated, plus the #527 unbounded-body vector |
-| Refinement pipeline | `sipag-core/src/feature.rs` (811), `sipag-core/src/refine.rs` (1342) | ⛔ **deprecated** — kanban-shaped; replaced by Experimentation. Don't delete; preserve as "we tried this" per `[[deprecate-with-rationale]]`. Strip wiring, add deprecation note pointing at this doc. |
+| Refinement pipeline | `sipag-core/src/feature.rs` (837), `sipag-core/src/refine.rs` (1364) | ⛔ **deprecated** — kanban-shaped; replaced by Experimentation. Don't delete; preserve as "we tried this" per `[[feedback-deprecate-with-rationale]]`. Strip wiring, add deprecation note pointing at this doc. |
 | Categorize loop | `sipag/src/serve/categorize.rs` | 🟧 — fold into `observe` / `iterate` |
 | Background workers (expand, research, scheduler) | `sipag/src/serve/workers/` | ❓ — what's the seam against `observe` / `iterate`? Same code path, different trigger? |
 
@@ -165,7 +165,7 @@ plat ←   │  Topology            │                │   Identity           
 | katulong HTTP (async) for serve | ❌ not in client; sipag uses reqwest + URL builders | 🔴 — **#527 root cause**; queue item #1 |
 | katulong SSE subscriber | ❌ not in client (only `sub_url()` builder exists) | 🔴 — queue item #2 |
 | Ollama HTTP client | `sipag-core/src/llm.rs` | 🟡 — could promote to `ollama-client` crate (queue item #3) |
-| Claude subprocess client | inline in `sipag-core/src/refine.rs` | ⛔ (because refine.rs is deprecated); reusable parts may need lifting elsewhere if Experimentation's `act` sub-module needs to spawn claude directly |
+| Claude subprocess client | inline in `sipag-core/src/refine.rs` (the stream-json parser at lines ~181–516 is the reusable core: `Command::new("claude").args(["-p", "--output-format", "stream-json", ...])` + `BufReader::lines()` pumping `tool_use` events) | ⛔ (because refine.rs is deprecated); if Experimentation's `act` sub-module needs to spawn claude, lift that range deliberately rather than rehabilitate the module in place |
 | Dispatch-policy helpers (worktree, agent command, session naming) | `katulong-client/src/http.rs:477-548` | 🟧 — sipag concepts in a wire crate; lift to Experimentation's `act` sub-module |
 | Filed katulong upstream gaps | [Dorky-Robot/katulong#715](https://github.com/Dorky-Robot/katulong/issues/715), [#716](https://github.com/Dorky-Robot/katulong/issues/716) | ⏳ awaiting upstream |
 
@@ -184,7 +184,7 @@ plat ←   │  Topology            │                │   Identity           
 
 | Piece | Path | Status |
 |---|---|---|
-| Auth state + store + setup tokens + webauthn + sessions | `sipag-core/src/auth/` (~1860 LOC across 6 files) | 🟡 self-contained, mature |
+| Auth state + store + setup tokens + webauthn + sessions | `sipag-core/src/auth/` (~2045 LOC across 9 files: mod, credential, error, random, session, setup_token, state, store, webauthn) | 🟡 self-contained, mature |
 | Serve-side handlers + middleware | `sipag/src/serve/{auth, auth_middleware, cookie, devices, login, tokens, access}.rs` (7 files) | 🟡 already decomposed reasonably |
 
 **Extraction.** Candidate for `sipag-auth` (or `dorky-auth`) own crate. Lowest urgency — works fine, no open bugs.
@@ -254,7 +254,8 @@ DDD principle: when two contexts have different words for the same shape, the bo
 | `sipag/src/serve/htmx.rs` (2169 🔴) | split by feature after wire clients + classifier extract | dispatch UI / observation UI / transcript proxy / recovery (the last gets deleted with attach-client wiring) |
 | `sipag/src/serve/board_view.rs` (2276 🔴) | Steering's web surface | needs decomposition |
 | `sipag/src/serve/katulong_proxy.rs` | dies | when async katulong HTTP client lands |
-| `sipag/src/serve/workers/` | ❓ Experimentation `iterate` or its own thing? |
+| `sipag/src/serve/workers/{expand,research,scheduler}.rs` (plus `mod.rs`) | ❓ Experimentation `iterate` or its own thing? — `expand` / `research` look like agent-driven iteration; `scheduler` looks more cross-cutting. Triage individually. |
+| `sipag/src/serve/categorize.rs` (199 LOC) | Experimentation `observe` | gemma-driven classification of board items — same trust boundary as the rest of `observe`. |
 
 ---
 
@@ -264,9 +265,11 @@ DDD principle: when two contexts have different words for the same shape, the bo
 
 The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making Phase 2 PRs smaller and self-consistent.
 
+**Accepted risk:** Phase 2 bug fixes #6 (closes sipag #527) and #11 (closes sipag #528 by deletion) close *live security-adjacent vectors* (unbounded response body, unsafe LLM→PTY recovery loop). Strict serialization of Phase 1 before Phase 2 leaves both open longer than necessary. **Interleaving is permissible** once Phase 1 #1 + #2 (this PR + the mechanical naming pass) land — at that point the Topology context's wire vocabulary is settled enough that #6's new async HTTP client can ship in the right language without waiting for the rest of Phase 1. Items #3-#5 (Experiment aggregate, Idea ACL, Agent API types) are mostly Steering/Experimentation work and don't block Topology PRs.
+
 ### Phase 1 — structural language (front-loaded; no bugs closed yet)
 
-1. **Deprecate `feature.rs` + `refine.rs`.** Experimentation. Strip wiring, add deprecation notes per `[[deprecate-with-rationale]]`. Stops the old kanban language from competing with the new. Lowest coupling, ships first.
+1. **Deprecate `feature.rs` + `refine.rs`.** Experimentation. Strip wiring, add deprecation notes per `[[feedback-deprecate-with-rationale]]`. Stops the old kanban language from competing with the new. Lowest coupling, ships first.
 2. **Naming disambiguation pass.** Cross-cutting. Mechanical rename: `Session` → `TmuxSession` / `AuthSession` / `ClaudeSession` / `DispatchSession`; `Status` → `KrStance` / `WorkflowStatus` / `ColumnName` / `TmuxSessionStatus` per the §6 table. One focused PR per context to keep diffs reviewable.
 3. **`Experiment` + `Trial` + `Outcome` + `IteratePolicy` as first-class types.** Experimentation. Additive — introduce alongside `Task`, alias `Task = Trial` for transition. Includes moving `board/observation.rs` into Experimentation. First-class on-disk format for `Experiment` per [[project-sipag-work-model-experimentation]].
 4. **`Idea` aggregate + `promote_idea` ACL.** Steering ↔ Experimentation. First instance of a named cross-context translation; sets the pattern for future ACLs.
@@ -287,7 +290,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 
 14. **Agent API endpoint wiring.** Steering. Type-driven; types landed in Phase 1 (#5). The published-language types should drive the route shapes naturally.
 15. **Promote `auth/` to its own crate** (`sipag-auth` or `dorky-auth`). Identity. Lowest urgency — works fine today, just big.
-16. **Decide `pubsub.rs` fate.** Topology. Confirm sipag isn't publishing topics for outside consumers; if not, deprecate per `[[deprecate-with-rationale]]`; if it is, route those publishes to katulong's broker (per `[[fix-at-right-layer]]`).
+16. **Decide `pubsub.rs` fate.** Topology. Confirm sipag isn't publishing topics for outside consumers; if not, deprecate per `[[feedback-deprecate-with-rationale]]`; if it is, route those publishes to katulong's broker (per `[[fix-at-right-layer]]`).
 
 ---
 
@@ -297,7 +300,9 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - **§3 IteratePolicy plug shape**: trait with a `decide(experiment, outcome) -> NextAction` method, or richer (multi-step planning)?
 - **§3 workers/**: relationship to `observe` / `iterate`. Are `expand`/`research`/`scheduler` background-triggered iteration policies, or a separate kind of work?
 - **§4 hosts.rs vs mesh.json**: overlapping topology configs. One source of truth or two?
-- **§4 pubsub.rs**: does sipag publish its own topics (for external consumers / future bridges), or is it purely a consumer of katulong's? If consumer-only, the whole module deprecates.
+- **§4 pubsub.rs**: ~~does sipag publish its own topics (for external consumers / future bridges), or is it purely a consumer of katulong's?~~ **Resolved 2026-05-17:** grep of `sipag/src/serve/` for `.publish(` returns zero non-test hits — sipag is consumer-only. The whole module is therefore a deprecation candidate; deprecate alongside Phase 3 #16. Reconfirm before deprecating in case a publish path lands between now and then.
+- **§4 Topology context scope**: today §4 bundles mesh/host config + wire protocols + protocol shapes. These are different shapes ("Topology" feels like infra-config; "Wire" feels like client libraries). Should **Wire** be a sibling context to **Topology**, with `katulong-client` / `ollama-client` living under Wire and `hosts.rs` / mesh.json under Topology? Affects where the response-size cap conceptually lives (§7).
+- **§6 ColumnName + WorkflowStatus + TmuxSessionStatus**: are these *domain nouns* or *wire/presentation schema nouns*? `ColumnName` smells like a UI presentation concern that might never need to appear in `sipag-core`; `TmuxSessionStatus` might be a wire response shape, not a domain type. Worth distinguishing "domain language per context" from "schema language per wire/UI seam" so we don't pollute domain modules with concerns that only matter at boundaries.
 - **§6 type prefixes vs module paths**: prefer `Trial`, `Outcome`, `Stance` reached via module paths (`experimentation::Trial` vs `steering::KrStance`)? More idiomatic Rust; less visible at call sites.
 - **Crate naming**: `sipag-experimentation` (project-coupled) or `dorky-experimentation` (mesh-shared)? Same question for auth, pubsub.
 
@@ -309,3 +314,4 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - 2026-05-17 — reframed §3 from "dispatch intelligence layer" to event-driven session classifier + observer. Filed upstream katulong issues [#715](https://github.com/Dorky-Robot/katulong/issues/715) + [#716](https://github.com/Dorky-Robot/katulong/issues/716).
 - 2026-05-17 — full rewrite around DDD bounded contexts (Steering / Experimentation / Topology / Identity). Folded former "Refinement" / "Execution" / "Sensing" into Experimentation per the RL/Edison work model (see memory: `project-sipag-work-model-experimentation`). Established naming disambiguation for overloaded `Session` / `Status`. Marked `feature.rs` + `refine.rs` as ⛔ deprecated (preserve, don't delete, per `feedback-deprecate-with-rationale`).
 - 2026-05-17 — re-sequenced §9 into three phases (structural language first, then bug-fix-driven, then cleanup). Rationale: every PR that ships in the old vocabulary entrenches it. Front-loading language work means subsequent PRs migrate the codebase organically.
+- 2026-05-17 — review-fix round on PR #536 — fixed URL typo (keglong → katulong), normalized memory name to `feedback-deprecate-with-rationale`, corrected LOC counts (feature/refine/auth), enumerated `serve/workers/` files, added `serve/categorize.rs` row, added Claude-subprocess breadcrumb to §4, closed pubsub open question with grep finding, opened topology-split and domain-vs-schema-noun questions in §10, acknowledged phase-ordering trade-off in §9 (interleaving permissible after #1 + #2 land), explicit TUI-as-third-dedup-site note.

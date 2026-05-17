@@ -6,13 +6,18 @@ pub mod config;
 /// context (spike → observe → iterate). Source preserved as "we tried
 /// this" per memory `feedback-deprecate-with-rationale`. See
 /// `docs/modules.md` §3 and memory
-/// `project-sipag-work-model-experimentation` for rationale. The
-/// `#[deprecated]` attribute is intentionally omitted: external wiring
-/// has been stripped (no CLI subcommands), so the attribute's audience
-/// (external callers) doesn't exist. The deprecation banner inside
-/// `feature.rs` is the human-facing notice; add `#[deprecated]` back if
-/// the module ever picks up a new caller you want a compile-time warning
-/// on.
+/// `project-sipag-work-model-experimentation` for rationale.
+///
+/// The `#[deprecated]` attribute is intentionally omitted: no in-tree
+/// caller depends on this module (CLI subcommands were stripped, no
+/// `serve/` or `tui/` references), and the attribute would only fire on
+/// out-of-tree consumers we'd rather not surprise mid-revision. The
+/// human-visible deprecation banner inside `feature.rs` is the
+/// discoverability mechanism. Add `#[deprecated]` back if the module
+/// ever picks up a new caller you want a compile-time warning on —
+/// **important**: [`refine`] also uses [`feature::Feature`], so they
+/// must be deprecated as a unit (otherwise the test-harness friendly
+/// fire from `#[deprecated]` returns).
 pub mod feature;
 pub mod gate;
 pub mod hosts;

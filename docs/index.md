@@ -4,22 +4,17 @@
 
 ---
 
-sipag owns the project board (tasks, statuses, roles), refines raw feature
-ideas into actionable tickets, and ships the work to running terminal
-sessions managed by [katulong](https://github.com/Dorky-Robot/katulong).
-Each task knows which role it belongs to; dispatching a task tells katulong
-to launch the role's command in the right session.
+sipag owns the project board (tasks, statuses, roles) and ships the work
+to running terminal sessions managed by
+[katulong](https://github.com/Dorky-Robot/katulong). Each task knows which
+role it belongs to; dispatching a task tells katulong to launch the role's
+command in the right session.
 
-## The two halves
+## Two commands carry most of the weight
 
 ```bash
-# Refine raw ideas into tickets
-sipag feature add "wire up the new dispatcher"   # capture an idea
-sipag refine f-...                               # turn it into actionable tickets
-
-# Dispatch tickets to running sessions
-sipag dispatch <task_id>                         # send a task to its katulong session
-sipag tui                                        # open the kanban board
+sipag dispatch <task_id>   # send a task to its katulong session
+sipag tui                  # open the kanban board (default with no args)
 ```
 
 Everything else (`sipag add`, `sipag list`, `sipag move`, `sipag projects`,
@@ -31,11 +26,7 @@ directory, use [hulma](https://github.com/Dorky-Robot/hulma).
 ## How it works
 
 ```
-sipag feature add ...    Capture a raw idea in the dispatch store
-        ↓
-sipag refine <feature>   Spawn Claude to turn raw ideas into ticket bullets
-        ↓
-sipag add ...            Title becomes a task on the board
+sipag add ...            Add a task to the board
         ↓
 sipag dispatch <id>      Send the task to its role's katulong session
         ↓
@@ -44,10 +35,19 @@ katulong session         Agent runs the role's command, picks up the task
 sipag move <id> review   You move work along as the agent finishes
 ```
 
-sipag drives the work, but the long-running terminal sessions where agents
-actually run live in katulong. sipag tells katulong what to do next; the
-refinement step is the one place sipag itself spawns a `claude` subprocess
-to chew through raw ideas in the background.
+sipag drives the work; the long-running terminal sessions where agents
+actually run live in katulong. sipag tells katulong what to do next.
+
+!!! note "Refinement pipeline deprecated 2026-05-17"
+
+    Earlier versions exposed `sipag feature add` and `sipag refine
+    <feature>` for turning raw ideas into actionable tickets via a
+    background `claude` subprocess. That pipeline was retired in favor
+    of a new **Experimentation** work model (spike → observe →
+    iterate) currently being designed. See
+    [`docs/modules.md`](https://github.com/Dorky-Robot/sipag/blob/main/docs/modules.md)
+    §3 for the new direction. The deprecated source is preserved in
+    `sipag-core/src/{feature,refine}.rs` with deprecation banners.
 
 ---
 
@@ -77,13 +77,13 @@ to chew through raw ideas in the background.
 ## Part of the dorky robot stack
 
 ```
-hulma (scaffold)  →  sipag (refine + board + dispatch)  →  katulong (sessions)  →  agents
+hulma (scaffold)  →  sipag (board + dispatch)  →  katulong (sessions)  →  agents
 ```
 
 - [hulma](https://github.com/Dorky-Robot/hulma) — project-aware Claude Code scaffolder
 - [katulong](https://github.com/Dorky-Robot/katulong) — long-running terminal sessions
 - [kubo](https://github.com/Dorky-Robot/kubo) — isolated dev environments in Docker
-- **sipag** — refinement + board + dispatcher
+- **sipag** — board + dispatcher
 
 ---
 

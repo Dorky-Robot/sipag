@@ -22,6 +22,16 @@
 //! remaining intra-crate user is [`crate::refine`], which is also
 //! deprecated together with this module.
 //!
+//! ## On-disk data
+//!
+//! Pre-existing feature files at `~/.sipag/projects/<project>/features/f-*.md`
+//! are **left on disk** (sipag does not auto-migrate or delete them) but are
+//! **no longer reachable from the CLI** — `sipag feature add | list | show`
+//! and `sipag refine` are gone. If you have files there from an older
+//! install, read them directly with your editor; the on-disk format is
+//! plain markdown + YAML frontmatter (intentionally byte-compatible with
+//! katulong's `dispatch-store.js`).
+//!
 //! ---
 //!
 //! ## Original docs (preserved for archaeology)
