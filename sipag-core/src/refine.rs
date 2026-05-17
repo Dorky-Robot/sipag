@@ -1,5 +1,27 @@
 //! Dispatch Refinement Engine — headless batch.
 //!
+//! # ⛔ Deprecated 2026-05-17
+//!
+//! Companion to [`crate::feature`] — the batch processor that turns raw
+//! features into actionable tickets via a `claude` subprocess. Deprecated
+//! together with `feature` per the work-model reframe: Experimentation
+//! replaces the kanban refinement pipeline. See
+//! [`crate::feature`]'s top-of-file doc, `docs/modules.md` §3, and project
+//! memory `project-sipag-work-model-experimentation` for the rationale.
+//!
+//! Source preserved per `feedback-deprecate-with-rationale` memory. All
+//! wiring has been stripped (CLI `sipag refine` subcommand removed).
+//!
+//! The Node-port (`katulong/lib/dispatch-refine.js`) translation work
+//! captured here may have **reusable** pieces for Experimentation's `act`
+//! sub-module if the agent loop ever needs to spawn `claude` directly
+//! with `--output-format stream-json` and pump `tool_use` events. Lift
+//! deliberately, don't rehabilitate this module in place.
+//!
+//! ---
+//!
+//! ## Original docs (preserved for archaeology)
+//!
 //! Runs a single `claude` subprocess with `--output-format stream-json` to
 //! refine one or more raw feature ideas into actionable tickets. Progress
 //! bullets are derived from `tool_use` events in the stream and appended to
