@@ -70,12 +70,31 @@ fn help_lists_subcommands() {
     let output = sipag().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    // Positive assertions — every wired subcommand should appear in the
+    // top-level help. List intentionally exhaustive so a future
+    // deprecation/rename can't slip past silently (pre-2026-05-17 this
+    // list only covered the "user-facing core" and missed
+    // projects/project/sub/serve).
     for cmd in &[
-        "dispatch", "up", "tui", "add", "list", "move", "refine", "version",
+        "dispatch", "up", "tui", "add", "list", "move", "projects", "project", "sub", "serve",
+        "version",
     ] {
         assert!(
             stdout.contains(cmd),
             "Help text should mention '{cmd}' subcommand"
+        );
+    }
+
+    // Negative assertions — the deprecated `feature` + `refine`
+    // subcommands were stripped 2026-05-17. A regression that
+    // accidentally re-added either should fail loudly here (without
+    // these guards, the positive list alone wouldn't catch a re-add).
+    // See sipag_core::{feature, refine} module doc-comments and
+    // docs/modules.md §3 for the deprecation rationale.
+    for deprecated in &["feature", "refine"] {
+        assert!(
+            !stdout.contains(deprecated),
+            "Help text should NOT mention deprecated '{deprecated}' subcommand"
         );
     }
 }
@@ -172,83 +191,10 @@ fn up_with_no_roles() {
         .stdout(predicate::str::contains("No roles configured"));
 }
 
-// ── Feature store ──────────────────────────────────────────────────────────
-
-fn setup_project(dir: &TempDir) {
-    let project_dir = dir.path().join("projects/testproj");
-    fs::create_dir_all(project_dir.join("tasks")).unwrap();
-    fs::create_dir_all(project_dir.join("roles")).unwrap();
-    fs::write(
-        project_dir.join("project.toml"),
-        "name = \"testproj\"\nrepo = \"a/b\"\nstatuses = [\"todo\", \"done\"]\n",
-    )
-    .unwrap();
-    fs::write(
-        dir.path().join("config.toml"),
-        "default_project = \"testproj\"\n",
-    )
-    .unwrap();
-}
-
-#[test]
-fn feature_add_help_works() {
-    sipag()
-        .args(["feature", "add", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("raw idea"));
-}
-
-#[test]
-fn feature_add_succeeds_and_prints_id() {
-    let dir = temp_sipag_dir();
-    setup_project(&dir);
-    sipag()
-        .args(["feature", "add", "wire up the new dispatcher"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::starts_with("f-"));
-}
-
-#[test]
-fn feature_list_shows_added_feature() {
-    let dir = temp_sipag_dir();
-    setup_project(&dir);
-    sipag()
-        .args(["feature", "add", "do the new thing"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success();
-    sipag()
-        .args(["feature", "list"])
-        .env("SIPAG_DIR", dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("do the new thing"))
-        .stdout(predicate::str::contains("raw"));
-}
-
-// ── Refine ─────────────────────────────────────────────────────────────────
-
-#[test]
-fn refine_help_works() {
-    sipag()
-        .args(["refine", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Refine"))
-        .stdout(predicate::str::contains("FEATURE_ID"));
-}
-
-#[test]
-fn refine_requires_feature_id() {
-    sipag()
-        .arg("refine")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("FEATURE_ID"));
-}
+// The `feature_*` and `refine_*` smoke tests (and their `setup_project`
+// helper) were removed 2026-05-17 with the rest of the deprecated
+// refinement wiring. See sipag_core::{feature, refine} module
+// doc-comments and docs/modules.md §3.
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 

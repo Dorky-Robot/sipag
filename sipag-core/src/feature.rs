@@ -1,5 +1,41 @@
 //! Per-feature markdown+frontmatter store (the dispatch feature store).
 //!
+//! # ⛔ Deprecated 2026-05-17
+//!
+//! This module implements the **kanban-shaped refinement pipeline**
+//! (`raw → grouped → refined → ticket`) that has been replaced by the
+//! **Experimentation context** (spike → observe → iterate) per the
+//! work-model reframe documented in `docs/modules.md` §3 and the project
+//! memory `project-sipag-work-model-experimentation`. The thesis behind
+//! deprecation: with cheap AI spikes, the cheapest specification of work
+//! is to *try it and observe the result*, not to refine an upfront
+//! ticket. Refinement-as-a-pipeline assumed tasks were expensive enough
+//! to need batch upfront specification — that premise no longer holds.
+//!
+//! The source is **deliberately preserved**, not deleted, per the
+//! `feedback-deprecate-with-rationale` memory: the diwa-indexed codebase
+//! becomes a discoverable trail of "we tried this and moved away from
+//! it." Familiar paths are easy to fall back into; an explicit
+//! deprecation marker prevents future sessions from re-walking this one.
+//!
+//! All wiring has been stripped (CLI subcommands removed). The only
+//! remaining intra-crate user is [`crate::refine`], which is also
+//! deprecated together with this module.
+//!
+//! ## On-disk data
+//!
+//! Pre-existing feature files at `~/.sipag/projects/<project>/features/f-*.md`
+//! are **left on disk** (sipag does not auto-migrate or delete them) but are
+//! **no longer reachable from the CLI** — `sipag feature add | list | show`
+//! and `sipag refine` are gone. If you have files there from an older
+//! install, read them directly with your editor; the on-disk format is
+//! plain markdown + YAML frontmatter (intentionally byte-compatible with
+//! katulong's `dispatch-store.js`).
+//!
+//! ---
+//!
+//! ## Original docs (preserved for archaeology)
+//!
 //! Each feature lives in its own file under
 //! `{sipag_dir}/projects/{project}/features/f-<uuid>.md`.
 //!

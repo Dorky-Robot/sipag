@@ -101,60 +101,24 @@ Register a new project. The first project you add is set as the default.
 sipag project add <NAME> --repo <OWNER/REPO>
 ```
 
-## sipag feature
+## sipag feature / sipag refine — deprecated 2026-05-17
 
-Manage the dispatch feature store — raw ideas waiting to be refined into
-actionable tickets. Features live under
-`~/.sipag/projects/<project>/features/f-<uuid>.md` as markdown files with a
-small frontmatter block.
+Earlier versions exposed `sipag feature add | list | show` and
+`sipag refine <FEATURE_ID>` for capturing raw ideas and turning them
+into actionable tickets via a background `claude -p` subprocess. That
+kanban-shaped refinement pipeline was retired in favor of a new
+**Experimentation** work model (spike → observe → iterate) currently
+being designed. The CLI surface is gone; running `sipag feature` or
+`sipag refine` now fails with clap's "unrecognized subcommand."
 
-### sipag feature add
+Pre-existing files at `~/.sipag/projects/<project>/features/f-*.md`
+are left on disk (sipag does not auto-migrate or delete them) but are
+no longer reachable from the CLI — read them directly with your
+editor if you need to.
 
-Capture a raw idea. Prints the new feature id (`f-...`) on stdout.
-
-```
-sipag feature add <TEXT> [--project NAME] [--projects p1,p2,...]
-```
-
-| Flag | Description |
-|------|-------------|
-| `<TEXT>` | The raw idea text (becomes the body of the feature) |
-| `-p`, `--project` | Project name (default: from config) |
-| `--projects` | Comma-separated list of projects this feature should target |
-
-### sipag feature list
-
-List features in the dispatch store, optionally filtered by status.
-
-```
-sipag feature list [--project NAME] [--status raw|grouped|refined|needs-info|active]
-```
-
-### sipag feature show
-
-Print a feature's frontmatter and body.
-
-```
-sipag feature show <FEATURE_ID> [--project NAME]
-```
-
-## sipag refine
-
-Refine one or more raw features into actionable tickets. Spawns a `claude -p`
-subprocess and streams its output, parsing the resulting bullets and writing
-them back to the feature store. Failed refinements revert to `raw`.
-
-```
-sipag refine <FEATURE_ID>... [--project NAME]
-```
-
-| Flag | Description |
-|------|-------------|
-| `<FEATURE_ID>` | One or more feature ids (e.g. `f-abc123 f-def456`) |
-| `-p`, `--project` | Project name (default: from config) |
-
-Progress (one bullet per line) prints to stderr; the final ticket list goes
-to stdout so you can pipe `sipag refine` into another command.
+See [`docs/modules.md`](https://github.com/Dorky-Robot/sipag/blob/main/docs/modules.md)
+§3 for the new direction. The deprecated source is preserved in
+`sipag-core/src/{feature,refine}.rs` with deprecation banners.
 
 ## sipag sub
 
