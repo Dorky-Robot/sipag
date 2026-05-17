@@ -298,6 +298,13 @@ fn infer_categorization(session_name: &str, sipag_dir: &std::path::Path) -> (Str
 /// observation-level view. We *do* pluck the bits of `meta` we want to
 /// archive on the Observation so ended sessions still have a label,
 /// summary, and Claude UUID after katulong stops listing them.
+///
+/// **Intentionally distinct from `katulong_client::TmuxSession`** — that
+/// wire type holds only `{id, name}`; this struct adds the `meta` fields
+/// we need to archive but the client crate drops. Acts as the informal
+/// sipag-side ACL between the wire shape and the observation domain.
+/// See `docs/modules.md` §6 — candidate for a named ACL when Phase 1 #3
+/// introduces the `Outcome` type.
 #[derive(Debug, Deserialize)]
 struct KatulongSession {
     id: String,
