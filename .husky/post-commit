@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+
+# diwa: enqueue repo for indexing
+# The daemon (installed via `diwa daemon install`) picks up the flag and
+# indexes in the background, so this hook stays fast.
+if command -v diwa >/dev/null 2>&1; then
+  diwa enqueue . >/dev/null 2>&1 &
+fi

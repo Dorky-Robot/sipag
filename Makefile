@@ -55,13 +55,20 @@ serve:
 	cargo run -p sipag -- serve --port 7100
 
 # ── Hook installation ─────────────────────────────────────────────────────────
-# Run once after cloning to activate pre-commit and pre-push quality gates.
+# Run once after cloning to activate pre-commit + pre-push quality gates plus
+# the post-commit / post-merge diwa indexing hooks.
 install-hooks:
 	git config core.hooksPath .husky
-	chmod +x .husky/pre-commit .husky/pre-push
+	chmod +x .husky/pre-commit .husky/pre-push .husky/post-commit .husky/post-merge
 	@echo "Git hooks installed (core.hooksPath → .husky)"
-	@echo "  pre-commit: gitleaks, typos, cargo deny, fmt, clippy, shellcheck"
-	@echo "  pre-push:   cargo test, cargo machete, gitleaks"
+	@echo "  pre-commit:  gitleaks, typos, cargo deny, fmt, clippy, shellcheck"
+	@echo "  pre-push:    cargo test, cargo machete, gitleaks"
+	@echo "  post-commit: diwa enqueue (semantic indexing — no-op without diwa installed)"
+	@echo "  post-merge:  diwa enqueue (same)"
+	@echo ""
+	@echo "Diwa (semantic git-history search) is recommended but optional."
+	@echo "Install: brew install dorky-robot/tap/diwa && diwa init ."
+	@echo "Query:   diwa search Dorky-Robot/sipag \"<your question>\""
 
 # ── Review agents ─────────────────────────────────────────────────────────────
 # Invoke specialized Claude Code review agents from .claude/agents/.

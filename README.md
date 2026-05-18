@@ -181,7 +181,24 @@ make test            # cargo test
 make lint            # cargo clippy -D warnings
 make fmt             # cargo fmt
 make dev             # lint + fmt-check + test
+make install-hooks   # one-time: activate pre-commit + pre-push + post-commit/merge hooks
 ```
+
+### Recommended: install diwa for semantic search
+
+[Diwa](https://github.com/Dorky-Robot/diwa) indexes git history and surfaces
+decisions / patterns / learnings extracted from commits + PR descriptions.
+It's how we navigate "why did we decide X" without rereading every doc:
+
+```bash
+brew install dorky-robot/tap/diwa
+diwa init .
+diwa search Dorky-Robot/sipag "lens-worker abstraction"
+```
+
+The repo's post-commit + post-merge hooks call `diwa enqueue .` to keep
+the index fresh. Without diwa installed they're a no-op; install when you
+want the index.
 
 ## Documentation
 
