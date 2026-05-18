@@ -18,8 +18,8 @@
 
 sipag's strategic posture (from VISION.md):
 
-- **Steering is human, execution is agent.** The human surface is Objectives + KRs + Standing + Ideas. Tasks/trials live *below* the human surface.
-- **The agent loop is empirical, not procedural.** Spike → observe → iterate. OKRs provide the reward signal; the substrate provides gradient ascent. *"It's the coding version of reinforcement learning... the Thomas Edison of experiment, observe, tweak, iterate"* (memory: `project-sipag-work-model-experimentation`).
+- **Steering is human, execution is agent.** The human surface is Objectives + KRs + Standing + Ideas. Tasks live *below* the human surface.
+- **The agent loop is empirical, not procedural.** Spike → observe → record (was "iterate" — see §3 reframe; Claude is the iterator, sipag records). OKRs provide the reward signal; the substrate provides gradient ascent. *"It's the coding version of reinforcement learning... the Thomas Edison of experiment, observe, tweak, iterate"* (memory: `project-sipag-work-model-experimentation`).
 - **The fix happens at the right layer.** When the right home for a signal is in a tool we own (katulong, kubo), extend that tool — don't add sipag-side workarounds (memory: `feedback-fix-at-right-layer`).
 
 These three principles drive every contextual choice below.
@@ -30,10 +30,12 @@ These three principles drive every contextual choice below.
 
 Four bounded contexts. Each owns its language; translation happens at named anti-corruption layers (§6).
 
+> **See also:** [`docs/feature-matrix.md`](feature-matrix.md) tracks per-capability state (✅/🟡/🟧/🔴/⏳/🚫) organized by the same bounded contexts. modules.md is the architectural design; feature-matrix.md is the running scorecard for what's shipped, what's gapped, and what's deliberately out of scope.
+
 | Context | Side of the line | What it owns | Posture |
 |---|---|---|---|
 | **Steering** | human | direction + reward signal | strategic, qualitative, durable |
-| **Experimentation** | agent | the spike-observe-iterate loop | tactical, empirical, fast |
+| **Experimentation** | agent | the spike-observe-record loop | tactical, empirical, fast |
 | **Topology** | platform | where things run | infrastructure, mostly stable |
 | **Identity** | platform | who can do what | infrastructure, mostly stable |
 
@@ -47,7 +49,7 @@ The human/agent boundary cuts between Steering and Experimentation. The platform
                                        │ (ACL)
                          ┌─────────────▼───────────────────────┐
                   agent  │   Experimentation:                  │
-                         │     spike → observe → iterate       │
+                         │     spike → observe → record        │
                          └─────────────┬───────────────────────┘
                                        │ (ACLs to platform)
               ┌────────────────────────┴─────────────────────────┐
@@ -127,8 +129,23 @@ plat ←   │  Topology            │                │   Identity           
 **Sub-responsibilities.**
 
 - **act** — kick off whatever the human or agent is going to do. Today: katulong session create + agent command exec + worktree setup. Doesn't change in this reframe; lives wherever dispatch lives.
-- **observe** — gemma4 watches katulong's `claude/<uuid>` event stream (and the new `sessions/<id>/*` topics when [katulong#715](https://github.com/Dorky-Robot/katulong/issues/715) / [#716](https://github.com/Dorky-Robot/katulong/issues/716) land). Maintains a sliding window of recent events per session. Periodically (or on threshold-crossing events) prompts gemma4 with the window + project KR context + the structured-output schema for the recording API. Dispatches gemma4's emitted action to the recording function.
+- **observe** — gemma4 watches katulong's `claude/<uuid>` event stream (and the new `sessions/<id>/*` topics when [katulong#715](https://github.com/Dorky-Robot/katulong/issues/715) / [#716](https://github.com/Dorky-Robot/katulong/issues/716) land). Maintains a sliding window of recent events per session. **On threshold-crossing events** (specific event kinds: `permission-request`, `reply` containing terminal-phrase patterns, silence > N seconds, etc.) prompts gemma4 with the window + project KR context + the structured-output schema for the recording API. Dispatches gemma4's emitted action to the recording function. *(Threshold-based not periodic — periodic ticks at scale spend a gemma call per session per minute, even when nothing's happening. Open question §10: exact threshold list.)*
 - **record** — the internal recording API itself (Rust functions, sipag-internal — NOT exposed externally). Persists each action into pub/sub (`observations/<kr_id>` topic, say) so UI can render reactively.
+
+**Failure-mode policy (sub-responsibility-level invariants).**
+
+These are the places the implementer will invent a policy on day one if the doc doesn't commit to one:
+
+- **Malformed gemma4 JSON / schema violation** — drop the action, increment a per-session "bridge confusion" counter, log at WARN. Don't retry-with-reflection in the first cut (cost; complexity). If the counter crosses a threshold per session, surface to `ask_human` ("the auto-observer is misfiring on this session — review?"). The window keeps moving regardless; gemma4 sees fresh context on the next threshold trigger.
+- **Recording-API call fails** (validated JSON but e.g., `kr_id` doesn't exist) — same: drop, counter, log. Reject the action; don't auto-create the missing entity.
+- **Sliding window overlap / dedup** — each action records the source-event seq range it derived from; if two consecutive windows would dispatch the same kind+payload over the same range, second is dropped. Keeps the same observation from re-firing across overlapping windows.
+- **`ask_human` fan-in semantics** — sipag dedupes by (session_id, normalized-question-text-hash) over a configurable window (default 5 min). Three windows in a row that gemma4 thinks warrant the same human question become one sidebar item, not three.
+- **Gemma4 unreachable** — bridge silently no-ops; observation stops for that session until ollama comes back. Don't fall back to LLM-free derivation (separate path with separate failure modes). The katulong event log is still being captured by the SSE subscriber; gemma4 catches up on whatever's relevant when it returns.
+
+**Testability invariants** (Phase 1 #3 must preserve):
+
+- Bridge dispatcher is a pipeline of pure functions + one async ollama call: `(window, kr_context) → render_prompt → call_ollama → parse_action → dispatch_to_recording_api`. The pure-render and pure-parse halves are unit-testable without a live ollama, matching the `gate.rs::render_user_prompt` + `gate.rs::parse_decision` template that's already proven out.
+- Recording-API functions take an injectable `dyn PubSubSink` (or equivalent) so tests construct a mock sink and assert what gets appended.
 
 **Where it lives today.**
 
@@ -165,7 +182,7 @@ plat ←   │  Topology            │                │   Identity           
 
 **Ubiquitous language.**
 
-- **Nouns**: `Host`, `Peer`, `MeshTopology`, `KatulongInstance`, `OllamaHost`, `TmuxSession`, `WireOutcome`
+- **Nouns**: `Host`, `Peer`, `MeshTopology`, `KatulongInstance`, `OllamaHost`, `TmuxSession`, `WireResponse` (the typed shape katulong returns from an HTTP/SSE call — distinct from the retired Experimentation `Outcome`; this is the post-deserialization-and-validation envelope that flows into Experimentation's gemma4 bridge as input)
 - **Verbs**: `register_host`, `resolve_peer`, `dispatch_to_host`, `subscribe`, `attach`, `exec`
 
 **Where it lives today.**
@@ -268,7 +285,7 @@ DDD principle: when two contexts have different words for the same shape, the bo
 | `sipag/src/serve/htmx.rs` (2169 🔴) | split by feature after wire clients + classifier extract | dispatch UI / observation UI / transcript proxy / recovery (the last gets deleted with attach-client wiring) |
 | `sipag/src/serve/board_view.rs` (2276 🔴) | Steering's web surface | needs decomposition |
 | `sipag/src/serve/katulong_proxy.rs` | dies | when async katulong HTTP client lands |
-| `sipag/src/serve/workers/{expand,research,scheduler}.rs` (plus `mod.rs`) | ❓ Experimentation `iterate` or its own thing? — `expand` / `research` look like agent-driven iteration; `scheduler` looks more cross-cutting. Triage individually. |
+| `sipag/src/serve/workers/{expand,research,scheduler}.rs` (plus `mod.rs`) | ❓ Experimentation `observe` / `record` consumers, or their own thing? — `expand` / `research` look like background actors that consume the recording API; `scheduler` looks more cross-cutting. Triage individually. |
 | `sipag/src/serve/categorize.rs` (199 LOC) | Experimentation `observe` | gemma-driven classification of board items — same trust boundary as the rest of `observe`. |
 
 ---
@@ -312,7 +329,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 
 - **§2 Agent API surface**: what's the auth model? Same passkey + cookie session as the human, or a separate service-account / bearer-token flow?
 - ~~**§3 IteratePolicy plug shape**: trait with a `decide(experiment, outcome) -> NextAction` method, or richer (multi-step planning)?~~ **Resolved 2026-05-17:** `IteratePolicy` removed entirely in the §3 reframe. Claude is the iterator; sipag doesn't iterate.
-- **§3 workers/**: relationship to `observe` / `iterate`. Are `expand`/`research`/`scheduler` background-triggered iteration policies, or a separate kind of work?
+- **§3 workers/**: relationship to `observe` / `record`. Are `expand`/`research`/`scheduler` background actors that consume the recording API, or a separate kind of work?
 - **§4 hosts.rs vs mesh.json**: overlapping topology configs. One source of truth or two?
 - **§4 pubsub.rs** — sipag's broker is **load-bearing**, not a deprecation candidate. Round-1 review claimed sipag was consumer-only based on a faulty grep; the actual state (verified 2026-05-17) is that `sipag/src/serve/` has 16+ `.publish(` call sites — `workers/{expand,research,scheduler,mod}.rs`, `htmx.rs` (6), `observers.rs`, `board_view.rs`, `ws.rs`. Topics include `workers/activity`, `observations/activity`, plus per-item `discourse_topic()` channels. The broker serves sipag's own intra-process consumers (UI updates, worker coordination). The real architectural question is whether sipag's internal topics should be **published into katulong's broker** instead of sipag running its own — per `[[feedback-fix-at-right-layer]]`. That would unify the pub/sub seam at the katulong layer but requires sipag's UI subscribers to round-trip through the network. Worth weighing, but not until queue items #2 + #7 land — first prove out the katulong consumer path so the consolidate-vs-keep call has both ends working.
 - **§4 Topology context scope**: today §4 bundles mesh/host config + wire protocols + protocol shapes. These are different shapes ("Topology" feels like infra-config; "Wire" feels like client libraries). Should **Wire** be a sibling context to **Topology**, with `katulong-client` / `ollama-client` living under Wire and `hosts.rs` / mesh.json under Topology? Affects where the response-size cap conceptually lives (§7).
@@ -331,6 +348,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - 2026-05-17 — review-fix round on PR #536 — fixed URL typo (keglong → katulong), normalized memory name to `feedback-deprecate-with-rationale`, corrected LOC counts (feature/refine/auth), enumerated `serve/workers/` files, added `serve/categorize.rs` row, added Claude-subprocess breadcrumb to §4, closed pubsub open question with grep finding, opened topology-split and domain-vs-schema-noun questions in §10, acknowledged phase-ordering trade-off in §9 (interleaving permissible after #1 + #2 land), explicit TUI-as-third-dedup-site note.
 - 2026-05-17 — review-fix round 2 on PR #536 — reverted the **factually wrong** pubsub resolution (sipag's broker has 16+ internal publish sites — it's load-bearing, NOT a deprecation candidate); reframed §10 + §9 #16 around the correct architectural question (in-process broker vs routing into katulong's broker). LOC drift round-2 (feature.rs 837→847, refine.rs 1364→1367 — the round-1 banner additions pushed them up again). Normalized the two memory references that still used the unprefixed form (`[[memory: deprecate-with-rationale]]` in the §0 legend and `[[fix-at-right-layer]]` in pubsub paragraphs).
 - 2026-05-17 — Phase 1 #2 (partial): renamed `katulong_client::Session` → `TmuxSession` and `katulong_client::SessionStatus` → `TmuxSessionStatus` (plus the one external consumer in `sipag/src/serve/katulong_proxy.rs`). `KatulongSession` rejected in favor of `TmuxSession` — the type literally models a tmux session and `katulong_client::` already namespaces it. Deferred: auth's `Session` (no in-file collision today; revisit on touch), all `Status` renames (waiting on §10 domain-vs-schema-noun), `ClaudeSession` / `DispatchSession` (greenfield names for types not yet introduced). §6 table updated with per-row status; §9 #2 noted as partially landed.
-- 2026-05-17 — review-fix round 1 on PR #537 — corrected the deferral rationale for auth's `Session` rename (call sites import bare `Session` via re-export, NOT the module-path-qualified form the prior wording claimed); annotated `sipag/src/serve/observers.rs::KatulongSession` as the informal sipag-side ACL distinct from the new `katulong_client::TmuxSession`, with a candidate-for-naming reference to Phase 1 #3 (`Outcome`).
+- 2026-05-17 — review-fix round 1 on PR #537 — corrected the deferral rationale for auth's `Session` rename (call sites import bare `Session` via re-export, NOT the module-path-qualified form the prior wording claimed); annotated `sipag/src/serve/observers.rs::KatulongSession` as the informal sipag-side ACL distinct from the new `katulong_client::TmuxSession`, with a candidate-for-naming reference to Phase 1 #3 (originally `Outcome`; the §3 reframe later that day retired `Outcome` — the equivalent reference today is `RecordedAction`).
 - 2026-05-17 — review-fix round 2 on PR #537 — round-1 rationale fix landed in §6 but the parallel sentence in §9 #2 still parroted the old "module path already disambiguates" wording. Updated §9 #2 to point at §6 for the full rationale.
 - 2026-05-17 — **major §3 reframe**: Experimentation aggregates collapsed. State-machine framing (`Trial`, `IteratePolicy`, `WorkflowStatus`, `Outcome`-as-state-payload) retired entirely — the new shape is event log + gemma4 bridge + internal recording API + recorded actions. Driven by user's MCP-shaped framing: "more vibey and loose, like MCP." Followed by user's Demeter catch on a proposed sipag-as-MCP-server design — corrected to gemma4-as-bridge (sipag never reaches past katulong to Claude; gemma4 watches katulong events and dispatches structured JSON actions to internal recording API). Saved as memory `feedback-strict-layer-coupling`. Updates touched: §3 (responsibilities, language, aggregates, sub-responsibilities, what-lives-where, what's-missing), §6 ACL table (new gemma4-bridge two-stage ACL row, removed Trial/Outcome rows), §8 migration map (Task stays as Task, observation.rs reframed), §9 Phase 1 #3 rewritten + #7 cross-referenced + #9 dependency reframed, §10 IteratePolicy question resolved (no longer needed). Existing `claude_transcript_url` + `observation_transcript_handler` reframed as a 🔴 Demeter violation that retires when SSE subscriber lands.
+- 2026-05-17 — review-fix round 1 on PR #538 — stale-vocab sweep (`iterate` → `record` reached §0/§1 prose + ASCII diagram + §8 workers row + §10 question); §4 Topology nouns renamed `WireOutcome` → `WireResponse` with clarifying parenthetical (the former collided with retired Experimentation `Outcome`); §3 sub-responsibilities expanded with **failure-mode policy** (malformed gemma JSON, recording-API call failures, sliding-window overlap dedup, `ask_human` fan-in, gemma unreachable) and **testability invariants** (pipeline of pure functions + injectable PubSubSink — matches `gate.rs::parse_decision`/`render_user_prompt` template); switched the observation trigger from "periodic" to "threshold-crossing events" with cost rationale; added §1 forward link to feature-matrix.md; cli-reference.md tombstone phrasing updated `iterate` → `record`; edit-log entry for PR #537 round-1 updated to note `Outcome` → `RecordedAction` rename.

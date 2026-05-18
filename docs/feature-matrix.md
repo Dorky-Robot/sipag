@@ -5,10 +5,11 @@
 
 ## How to use this doc
 
-- One row per user-facing or system-level capability (not per file or module — that's `modules.md`'s job).
+- One row per **user-facing or system-level capability** (not per file or module — that's `modules.md`'s job). A useful litmus test: if the row could be deleted without losing a user-observable capability, it belongs in modules.md. Module-level concerns leaking into this doc is the canonical doc-rot vector — keep the rubric tight.
 - Status reflects the *capability* state, not the underlying code's quality. A feature can be ✅ shipped while its implementing module is 🔴 messy.
 - Group by [bounded context](modules.md#1-the-context-map) so the human/agent line stays visible.
 - Edits welcome. When status changes, leave a one-liner in §10 edit log.
+- Cross-cutting: tombstones for retired modules.md concepts (e.g., `Trial`, `IteratePolicy`) stay here only when their *absence* affects user-visible capability — to mark "this was promised, withdrawn, here's the replacement." Pure module-shape decisions belong in modules.md.
 
 ## Surface priority (set 2026-05-17)
 
@@ -45,7 +46,7 @@ The human's two questions per VISION: "what are we optimizing for" and "is it wo
 | **promote_idea → Experiment** (the ACL crossing into Experimentation) | 🔴 | n/a — depends on Idea + Experiment types | Per modules.md §6, this is the first-class cross-context ACL. Blocked on Phase 1 #3 + #4. |
 | **Agent API surface** — read KRs, `report_stance` from agent | 🔴 | not implemented | VISION-planned: same `POST /tasks` and `PATCH /tasks/:id` endpoints exposed for agent loops. Phase 1 #5 + Phase 3 #14 in modules.md §9. |
 | **KR-level summary across projects** (the "three objectives, six KRs, eleven tasks" view from VISION) | 🟡 | `sipag/src/serve/board_view.rs` | Exists in web UI. CLI ⏳. |
-| **Accept / redirect agent-proposed work at the KR level** | 🔴 | no agent loop pushing proposals today | VISION's intended boundary. Comes alive when Agent API + Experimentation `iterate` policies land. |
+| **Accept / redirect agent-proposed work at the KR level** | 🔴 | no agent loop pushing proposals today | VISION's intended boundary. Comes alive when the Agent API + the gemma4 bridge's recording API (`suggest_stance`, `propose_task`) start emitting proposals the human surface can accept/redirect. |
 
 ---
 
@@ -58,7 +59,7 @@ The spike → observe → record loop per [`project-sipag-work-model-experimenta
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
 | **Dispatch a task to a katulong session** | ✅ | `sipag/src/cli.rs::run_dispatch_task`, `sipag/src/serve/htmx.rs` (web path) | Sync CLI path works; web path is the 🔴 #527 surface (closes in Phase 2 #6). |
-| **Auto-create worktree** for the dispatched task | ✅ | `katulong-client/src/http.rs:513` (`worktree_command`) | Wired via role's `worktree = true`. Helper currently in the wire crate; lifted to `act` sub-module in Phase 2 #12. |
+| **Auto-create worktree** for the dispatched task | ✅ | `katulong-client/src/http.rs:523` (`worktree_command`) | Wired via role's `worktree = true`. Helper currently in the wire crate; lifted to `act` sub-module in Phase 2 #12. |
 | **Generate unique dispatch session name** (`sipag-d-<hex>`) | ✅ | `katulong-client/src/http.rs:494` | Per-dispatch tile so the auto-summarizer can rename without breaking back-pointers. |
 | **Build agent launch command** (`cd <wt> && <role-cmd> -p '…'`) with shell-quote-escape | ✅ | `katulong-client/src/http.rs:533` | Single-quote escape verified by 3 unit tests. |
 | **Spin up persistent role tiles** (`sipag up`) | ✅ | `sipag/src/cli.rs::run_up` | Project-level "warm the sessions" command. |
@@ -210,3 +211,4 @@ Each absence is a feature. Don't accidentally build these.
 - 2026-05-17 — initial draft.
 - 2026-05-17 — added UI-first surface priority. CLI rows that previously flagged "CLI surface absent" as a gap re-framed as ⏳ deferred. See memory `feedback-sipag-ui-first`.
 - 2026-05-17 — §2 Experimentation reframed. State-machine vocabulary (`Trial`, `IteratePolicy`, `Conclude an experiment`) struck through and marked 🚫 (removed from roadmap). Added "Record" sub-section (was "Iterate") with internal recording API, gemma4 bridge dispatcher, and `RecordedAction` rows. §3 Topology gained an explicit Demeter-violation row for the existing Claude-transcript-proxy reach. §9 NOT-in-scope grew three rows: sipag-as-MCP-server-to-Claude (Demeter), sipag-parsing-Claude-transcripts-directly (Demeter, in reverse), state-machine trial tracking (kanban-shaped). See memories `feedback-strict-layer-coupling`, `project-sipag-work-model-experimentation`.
+- 2026-05-17 — review-fix round 1 on PR #538 — corrected stale "Experimentation `iterate` policies" reference in §1 KR-acceptance row to point at the gemma4-bridge recording API; fixed `worktree_command` line number (513→523); tightened "How to use" rubric with explicit doc-rot anti-pattern + carve-out for retired-concept tombstones. (Companion: modules.md §1 now forward-links here.)
