@@ -1,7 +1,9 @@
 # sipag feature matrix
 
+> *Companion to [`narrative.md`](narrative.md): that doc is the customer-facing product story; this is the per-capability scorecard tracking that story's delivery.*
+
 **Status:** working draft, iterating collaboratively.
-**Frame:** [`VISION.md`](../VISION.md) → product posture; [`docs/modules.md`](modules.md) → how we'll restructure to get there; **this doc** → what sipag actually offers (capability-level), where the gaps are, and what we're deliberately *not* building.
+**Frame:** [`narrative.md`](narrative.md) → product story. [`../VISION.md`](../VISION.md) → strategic principles. [`modules.md`](modules.md) → architecture. **This doc** → what sipag actually offers (capability-level), where the gaps are, and what we're deliberately *not* building.
 
 ## How to use this doc
 

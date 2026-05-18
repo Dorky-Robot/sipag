@@ -1,6 +1,10 @@
 # sipag
 
-**Board-driven work dispatcher for Claude Code crews.**
+**The OKR layer for an agentic fleet.**
+
+> For the product story (a day with sipag, the FAQ, what it deliberately
+> isn't), see [`narrative.md`](narrative.md). This page is the landing-page
+> overview + install instructions.
 
 ---
 

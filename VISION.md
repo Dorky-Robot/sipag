@@ -1,5 +1,7 @@
 # sipag — Product Vision
 
+> *Companion to [`docs/narrative.md`](docs/narrative.md): that doc is the customer-facing product story; this is the strategic principles behind the shape — the bets, the deliberate absences, the user shape we're building toward.*
+
 ## One-liner
 
 The OKR layer for an agentic fleet. Humans steer at "what are we

@@ -1,7 +1,9 @@
 # sipag modules — domain map
 
+> *Companion to [`narrative.md`](narrative.md): that doc is the customer-facing product story; this is the architecture that implements it (DDD bounded contexts, lens-worker abstraction, phase queue).*
+
 **Status:** working draft, iterating collaboratively.
-**Frame:** [`VISION.md`](../VISION.md) → product posture. This doc → how the codebase carries that posture. DDD bounded contexts as the organizing principle.
+**Frame:** [`narrative.md`](narrative.md) → product story. [`../VISION.md`](../VISION.md) → strategic principles. This doc → how the codebase carries them.
 
 ## Reading guide
 
