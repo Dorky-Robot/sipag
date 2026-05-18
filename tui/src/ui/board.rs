@@ -1,4 +1,4 @@
-//! Kanban board renderer — v4 multi-project task board view.
+//! Interactive board renderer — v4 multi-project task board view.
 
 use crate::board_app::{BoardApp, InputMode};
 use ratatui::{
@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
 };
 
-/// Render the kanban board.
+/// Render the interactive board.
 pub fn render_board(f: &mut Frame, app: &BoardApp) {
     let area = f.area();
 
@@ -21,7 +21,7 @@ pub fn render_board(f: &mut Frame, app: &BoardApp) {
 
     let chunks = Layout::vertical([
         Constraint::Length(1), // project tabs
-        Constraint::Min(5),    // kanban columns
+        Constraint::Min(5),    // board columns
         Constraint::Length(1), // role status bar
         Constraint::Length(1), // keybindings footer
     ])

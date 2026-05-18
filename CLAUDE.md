@@ -39,7 +39,9 @@ sipag-core/src/                # Library — domain logic + auth + LLM client + 
 ├── gate.rs                    # early lens-worker prototype (pre-dispatch classifier)
 ├── nudge.rs                   # early lens-worker prototype (post-dispatch observer)
 ├── hosts.rs                   # multi-host mesh config
-├── katulong.rs                # re-export of katulong-client crate (back-compat shim)
+│                              # (no katulong.rs file — `lib.rs:30` does
+│                              # `pub use katulong_client as katulong;` as
+│                              # a back-compat shim for the extracted crate)
 ├── llm.rs                     # ollama HTTP client — gemma4 lives here
 └── pubsub.rs                  # file-backed durable broker (load-bearing; sipag-internal)
 
@@ -82,14 +84,19 @@ Everything sipag knows lives under `~/.sipag/` as TOML/JSONL:
 ├── hosts.toml                         # multi-host mesh registration
 ├── pubsub/                            # file-backed durable broker
 │   └── <topic>/log.jsonl
+├── objectives/                        # top-level Objectives (project-agnostic)
+│   └── <id>/
+│       ├── objective.toml             # Objective metadata
+│       └── key-results/<NNN>.toml     # KRs attached to this Objective
 └── projects/
     └── <project>/
         ├── project.toml               # name, repo, statuses, ProjectKind
-        ├── objectives/<id>.toml       # Objective + KrRefs
-        ├── key_results/<id>.toml      # KeyResult + KrStance
+        ├── key-results/<NNN>.toml     # KRs scoped to this project
         ├── tasks/<id>.toml            # Task (board-level work unit)
         └── roles/<role>.toml          # Role template (command + worktree)
 ```
+
+Two parallel KR locations today (project-scoped vs Objective-scoped) — both are load-bearing per `sipag-core/src/board/key_result.rs:77` (project) and `:149` (objective).
 
 A future addition (Phase 1 #3 in modules.md §9): a **local vector corpus** sibling to the TOML state, holding observations and derived insights tagged + timestamped + embedded via ollama.
 
@@ -130,8 +137,13 @@ Two upstream issues filed (Phase 1 #3 depends on the topics they add):
 
 - `SIPAG_DIR` — overrides `~/.sipag` for board state.
 - `SIPAG_DEV=1` — enables tower-livereload + filesystem watcher in `sipag serve`.
-
-(The legacy `SIPAG_DISPATCH_V2` flag from the v2 dispatch series is no longer load-bearing — v2 has shipped. The fallback path remains until the Phase 2 #11 recovery deletion lands per `docs/modules.md` §9.)
+- `SIPAG_DISPATCH_V2=1` — routes `sipag serve` dispatches through the
+  `KatulongAttachClient` (WS attach + explicit `wait_for` handshake) instead
+  of the legacy `verify_and_heal_dispatch` keystroke loop. **Default OFF**
+  — the legacy path is still the default until Phase 2 #11 in
+  `docs/modules.md` §9 deletes `verify_and_heal_dispatch` outright. See
+  `sipag/src/serve/htmx.rs::dispatch_v2_enabled` for the truthy-value
+  semantics. Set this to `1` in production to ride the v2 attach path.
 
 ## Conventions
 
@@ -187,7 +199,7 @@ Each tool composes; any can be replaced. Sipag's only runtime dependency is a re
 - **Vision**: [`VISION.md`](VISION.md) — the strategic anchor; don't reframe operational changes into it.
 - **Architecture**: [`docs/modules.md`](docs/modules.md) — DDD bounded contexts, lens-worker abstraction, phase queue.
 - **Capability state**: [`docs/feature-matrix.md`](docs/feature-matrix.md) — per-capability ✅/🟡/🟧/🔴/⏳/🚫 with code locations.
-- **Memories** (accumulated context across sessions): `~/.claude/projects/.../memory/`. Most load-bearing today:
+- **Memories** (accumulated context across sessions): live under `~/.claude/projects/<encoded-cwd>/memory/`. **Naming convention**: in-repo references use hyphens (`feedback-strict-layer-coupling`); on-disk filenames use underscores (`feedback_strict_layer_coupling.md`). Most load-bearing today:
   - `feedback-strict-layer-coupling` — sipag never reaches past katulong; gemma is the bridge
   - `feedback-fix-at-right-layer` — when sipag would need a workaround, extend the upstream tool instead
   - `feedback-deprecate-with-rationale` — abandon modules by deprecating + recording why

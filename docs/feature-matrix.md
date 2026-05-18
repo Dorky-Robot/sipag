@@ -150,7 +150,7 @@ How a human (or agent) actually drives sipag.
 | Surface | Status | Where (code) | What's there |
 |---|---|---|---|
 | **CLI** (`sipag …`) | ✅ | `sipag/src/cli.rs` | `dispatch`, `up`, `tui`, `add`, `list`, `move`, `projects`, `project`, `sub`, `serve`, `version`. **No Steering subcommands (`objective` / `kr` / `idea`) by design** — UI-first priority; CLI surface for Steering is parked until the web UI is solid. |
-| **TUI** (kanban board) | ✅ | `tui/src/board_app.rs` | Default with no args. Works for the dispatch-side workflow. |
+| **TUI** (interactive board) | ✅ | `tui/src/board_app.rs` | Default with no args. Works for the dispatch-side workflow. |
 | **Web UI** (`sipag serve`, port 7100) | ✅ | `sipag/src/serve/` (19 files; htmx + maud templates) | Where Steering lives today. |
 | **Pub/sub subscribe** (`sipag sub <topic>`) | ✅ | `sipag/src/cli.rs::run_sub` | Subscribes to katulong topics for shell-level inspection. |
 | **Dev-loop** (`SIPAG_DEV=1`, cargo-watch + tower-livereload) | ✅ | `serve/` startup | Iterates the web UI fast during sipag development. |
