@@ -197,16 +197,16 @@ DDD principle: when two contexts have different words for the same shape, the bo
 
 ### Naming disambiguation
 
-| Today | Context | Rename to |
-|---|---|---|
-| `Session` (in `katulong-client::http`) | Topology | `TmuxSession` (or `KatulongSession`) |
-| `Session` (in `serve/auth`) | Identity | `AuthSession` |
-| Claude UUID (in `claude/<uuid>` topics) | Experimentation (observe input) | `ClaudeSession` |
-| `sipag-d-<hex>` dispatch session | Experimentation | `DispatchSession` (or fold into `Trial`) |
-| `Status` (in `Project`, column name) | Steering | `ColumnName` or `BoardStatus` |
-| `TaskStatus` | Experimentation | `WorkflowStatus` (per-trial) |
-| `SessionStatus` (alive / has-child) | Topology | `TmuxSessionStatus` |
-| `KrStance` | Steering | already unambiguous ✓ |
+| Today | Context | Rename to | Status |
+|---|---|---|---|
+| `Session` (in `katulong-client::http`) | Topology | `TmuxSession` | ✅ done 2026-05-17 (PR #537). `KatulongSession` rejected — the type literally models a tmux session, and leaving `KatulongSession` unclaimed makes room for the existing `sipag/src/serve/observers.rs::KatulongSession` (richer post-deserialization shape with `meta.*` fields the wire type drops) to formalize as a named sipag-side ACL when Phase 1 #3 lands. |
+| `Session` (in `sipag-core::auth::session`) | Identity | `AuthSession` | 🟡 deferred — call sites import bare `Session` via `sipag_core::auth::{...}` (re-exported from `auth/mod.rs`), but no in-file collision with another `Session` today since auth and katulong-client types are never co-imported. Defer until a second `Session` lands in the same file or the auth crate is touched for other reasons. |
+| Claude UUID (in `claude/<uuid>` topics) | Experimentation (observe input) | `ClaudeSession` | greenfield — no type today, just a `String` UUID. Use this name when a type appears. |
+| `sipag-d-<hex>` dispatch session | Experimentation | `DispatchSession` (or fold into `Trial`) | greenfield — no type today, just a name pattern from `generate_dispatch_session_name`. Decision deferred to `Trial` introduction (Phase 1 #3). |
+| `Status` (in `Project`, column name) | Steering | `ColumnName` or `BoardStatus` | 🟡 **deferred** — see §10 domain-vs-schema-noun question |
+| `TaskStatus` | Experimentation | `WorkflowStatus` (per-trial) | 🟡 deferred until §10 resolved (likely also affected by Phase 1 #3 `Trial` rename) |
+| `SessionStatus` (alive / has-child) | Topology | `TmuxSessionStatus` | ✅ done 2026-05-17 |
+| `KrStance` | Steering | already unambiguous ✓ | ✅ |
 
 ### Named ACLs
 
@@ -270,7 +270,7 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 ### Phase 1 — structural language (front-loaded; no bugs closed yet)
 
 1. **Deprecate `feature.rs` + `refine.rs`.** Experimentation. Strip wiring, add deprecation notes per `[[feedback-deprecate-with-rationale]]`. Stops the old kanban language from competing with the new. Lowest coupling, ships first.
-2. **Naming disambiguation pass.** Cross-cutting. Mechanical rename: `Session` → `TmuxSession` / `AuthSession` / `ClaudeSession` / `DispatchSession`; `Status` → `KrStance` / `WorkflowStatus` / `ColumnName` / `TmuxSessionStatus` per the §6 table. One focused PR per context to keep diffs reviewable.
+2. **Naming disambiguation pass.** Cross-cutting. Mechanical rename per the §6 table — splitting overloaded `Session` and `Status` across contexts. Sized as multiple focused PRs (one per context) to keep diffs reviewable. **Partially landed 2026-05-17**: katulong-client's `Session` → `TmuxSession` and `SessionStatus` → `TmuxSessionStatus` done; auth's `Session` → `AuthSession` deferred (no in-file collision today; revisit when auth is touched — see §6 row for the full rationale); all `Status` renames deferred until §10 domain-vs-schema-noun question resolves; `ClaudeSession` / `DispatchSession` are greenfield names for types that don't exist yet.
 3. **`Experiment` + `Trial` + `Outcome` + `IteratePolicy` as first-class types.** Experimentation. Additive — introduce alongside `Task`, alias `Task = Trial` for transition. Includes moving `board/observation.rs` into Experimentation. First-class on-disk format for `Experiment` per [[project-sipag-work-model-experimentation]].
 4. **`Idea` aggregate + `promote_idea` ACL.** Steering ↔ Experimentation. First instance of a named cross-context translation; sets the pattern for future ACLs.
 5. **Agent API published-language types.** Steering. Define the typed shapes for read-only KR/objective views and `report_stance` commands — *types only*, no endpoint wiring yet. Establishes the protocol so Phase 2 work can write toward it.
@@ -316,3 +316,6 @@ The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making
 - 2026-05-17 — re-sequenced §9 into three phases (structural language first, then bug-fix-driven, then cleanup). Rationale: every PR that ships in the old vocabulary entrenches it. Front-loading language work means subsequent PRs migrate the codebase organically.
 - 2026-05-17 — review-fix round on PR #536 — fixed URL typo (keglong → katulong), normalized memory name to `feedback-deprecate-with-rationale`, corrected LOC counts (feature/refine/auth), enumerated `serve/workers/` files, added `serve/categorize.rs` row, added Claude-subprocess breadcrumb to §4, closed pubsub open question with grep finding, opened topology-split and domain-vs-schema-noun questions in §10, acknowledged phase-ordering trade-off in §9 (interleaving permissible after #1 + #2 land), explicit TUI-as-third-dedup-site note.
 - 2026-05-17 — review-fix round 2 on PR #536 — reverted the **factually wrong** pubsub resolution (sipag's broker has 16+ internal publish sites — it's load-bearing, NOT a deprecation candidate); reframed §10 + §9 #16 around the correct architectural question (in-process broker vs routing into katulong's broker). LOC drift round-2 (feature.rs 837→847, refine.rs 1364→1367 — the round-1 banner additions pushed them up again). Normalized the two memory references that still used the unprefixed form (`[[memory: deprecate-with-rationale]]` in the §0 legend and `[[fix-at-right-layer]]` in pubsub paragraphs).
+- 2026-05-17 — Phase 1 #2 (partial): renamed `katulong_client::Session` → `TmuxSession` and `katulong_client::SessionStatus` → `TmuxSessionStatus` (plus the one external consumer in `sipag/src/serve/katulong_proxy.rs`). `KatulongSession` rejected in favor of `TmuxSession` — the type literally models a tmux session and `katulong_client::` already namespaces it. Deferred: auth's `Session` (no in-file collision today; revisit on touch), all `Status` renames (waiting on §10 domain-vs-schema-noun), `ClaudeSession` / `DispatchSession` (greenfield names for types not yet introduced). §6 table updated with per-row status; §9 #2 noted as partially landed.
+- 2026-05-17 — review-fix round 1 on PR #537 — corrected the deferral rationale for auth's `Session` rename (call sites import bare `Session` via re-export, NOT the module-path-qualified form the prior wording claimed); annotated `sipag/src/serve/observers.rs::KatulongSession` as the informal sipag-side ACL distinct from the new `katulong_client::TmuxSession`, with a candidate-for-naming reference to Phase 1 #3 (`Outcome`).
+- 2026-05-17 — review-fix round 2 on PR #537 — round-1 rationale fix landed in §6 but the parallel sentence in §9 #2 still parroted the old "module path already disambiguates" wording. Updated §9 #2 to point at §6 for the full rationale.

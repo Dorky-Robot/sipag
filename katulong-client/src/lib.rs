@@ -44,7 +44,7 @@ pub use http::{
     agent_command, claude_respond_url, claude_transcript_url, exec_url,
     generate_dispatch_session_name, is_valid_session_id, kill_url, output_lines_url, session_name,
     sessions_url, status_url, worktree_branch, worktree_command, worktree_path, KatulongClient,
-    RemoteConfig, Session, SessionStatus,
+    RemoteConfig, TmuxSession, TmuxSessionStatus,
 };
 
 // Re-export the most common attach types so callers don't need to

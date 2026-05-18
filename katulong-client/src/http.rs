@@ -7,7 +7,7 @@
 //! can be renamed, ids can't, so an in-flight request never gets
 //! invalidated by a rename. Callers create-or-find a session by name
 //! once via [`KatulongClient::create_session`], capture the returned
-//! [`Session::id`], then pass that id to subsequent operations.
+//! [`TmuxSession::id`], then pass that id to subsequent operations.
 //!
 //! ## Status (2026-05-13)
 //!
@@ -27,15 +27,15 @@ use std::process::Command;
 /// A katulong session. `id` is the stable, immutable handle used for
 /// all I/O calls; `name` is the friendly identifier (e.g. `katulong--dev`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Session {
+pub struct TmuxSession {
     pub id: String,
     pub name: String,
 }
 
-impl Session {
+impl TmuxSession {
     /// Defense-in-depth check that the server-supplied `id` is safe
     /// to interpolate into a URL path segment. Call after
-    /// deserializing a `Session` from a katulong response, before
+    /// deserializing a `TmuxSession` from a katulong response, before
     /// the id flows into [`exec_url`] / [`status_url`] / [`kill_url`]
     /// / [`output_lines_url`].
     ///
@@ -70,7 +70,7 @@ const SESSION_ID_MAX_LEN: usize = 64;
 /// returning a crafted id (`../admin`, `foo?inject=1`) would steer
 /// sipag's outbound requests at unintended endpoints on the same
 /// host. Use directly when only an `&str` is in scope; when you
-/// already have a [`Session`], prefer [`Session::validate_id`].
+/// already have a [`TmuxSession`], prefer [`TmuxSession::validate_id`].
 pub fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= SESSION_ID_MAX_LEN
@@ -83,7 +83,7 @@ pub fn is_valid_session_id(id: &str) -> bool {
 /// sipag currently consumes are mapped; katulong returns more (pane,
 /// agent, childCount) and serde silently drops them.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionStatus {
+pub struct TmuxSessionStatus {
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -186,7 +186,7 @@ impl KatulongClient {
     /// for the persistent role-tile use case (`sipag up`), where the
     /// caller deliberately wants `{project}--{role}` to be findable
     /// across runs.
-    pub fn create_dispatch_session(&self) -> Result<Session> {
+    pub fn create_dispatch_session(&self) -> Result<TmuxSession> {
         let name = generate_dispatch_session_name();
         self.create_session(&name)
     }
@@ -196,12 +196,12 @@ impl KatulongClient {
     /// `{name, id}` on create and 409 with `{error}` on conflict; on
     /// conflict this method falls back to `list_sessions` to recover
     /// the existing id, so the call is idempotent.
-    pub fn create_session(&self, name: &str) -> Result<Session> {
+    pub fn create_session(&self, name: &str) -> Result<TmuxSession> {
         let body = serde_json::json!({ "name": name });
         let url = sessions_url(&self.url);
         let resp = curl_post(&url, &self.api_key, &body.to_string())?;
 
-        let session: Session = match resp.status {
+        let session: TmuxSession = match resp.status {
             200 | 201 => serde_json::from_str(&resp.body)
                 .with_context(|| format!("invalid create response for '{name}': {}", resp.body))?,
             409 => self
@@ -224,10 +224,10 @@ impl KatulongClient {
     ///
     /// Returned ids are NOT validated by this method. The single
     /// internal caller ([`Self::create_session`]'s 409 fallback)
-    /// validates the one id it picks via [`Session::validate_id`].
+    /// validates the one id it picks via [`TmuxSession::validate_id`].
     /// Any future caller that passes a returned id to a URL builder
     /// must do the same.
-    pub fn list_sessions(&self) -> Result<Vec<Session>> {
+    pub fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
         let url = sessions_url(&self.url);
         let resp = curl_get(&url, &self.api_key)?;
         if resp.status != 200 {
@@ -244,7 +244,7 @@ impl KatulongClient {
     /// `POST /sessions/by-id/{id}/exec` — send a command. The katulong
     /// server appends `\r` to the input, so this is for line-oriented
     /// commands. Caller must pass the session's stable `id`, not its
-    /// friendly name (see [`Session`]).
+    /// friendly name (see [`TmuxSession`]).
     pub fn exec_session(&self, id: &str, input: &str) -> Result<()> {
         let body = serde_json::json!({ "input": input });
         let url = exec_url(&self.url, id);
@@ -269,7 +269,7 @@ impl KatulongClient {
     /// (see `docs/dispatch-design.md` §5.3 / "verify_and_heal" history).
     /// For dispatch progress detection, the attach client's
     /// rolling-buffer pattern matching is the right primitive.
-    pub fn session_status(&self, id: &str) -> Result<SessionStatus> {
+    pub fn session_status(&self, id: &str) -> Result<TmuxSessionStatus> {
         let url = status_url(&self.url, id);
         let resp = curl_get(&url, &self.api_key)?;
         if resp.status != 200 {
@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn session_validate_id_returns_err_on_bad_id() {
-        let bad = Session {
+        let bad = TmuxSession {
             id: "../admin".to_string(),
             name: "katulong--dev".to_string(),
         };
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn session_validate_id_passes_on_real_id() {
-        let ok = Session {
+        let ok = TmuxSession {
             id: "Tj9HtvbDQ06zsCbu7dM6-".to_string(),
             name: "katulong--dev".to_string(),
         };
@@ -852,7 +852,7 @@ mod tests {
             "hasChildProcesses": false,
             "external": false
         }"#;
-        let s: Session = serde_json::from_str(payload).unwrap();
+        let s: TmuxSession = serde_json::from_str(payload).unwrap();
         assert_eq!(s.id, "s_abc123");
         assert_eq!(s.name, "katulong--dev");
     }
@@ -869,7 +869,7 @@ mod tests {
             "pane": null,
             "agent": null
         }"#;
-        let st: SessionStatus = serde_json::from_str(payload).unwrap();
+        let st: TmuxSessionStatus = serde_json::from_str(payload).unwrap();
         assert_eq!(st.id, "s_abc123");
         assert!(st.alive);
         assert!(st.has_child_processes);
