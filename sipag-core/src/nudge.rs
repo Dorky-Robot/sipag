@@ -1,22 +1,24 @@
 //! Dispatch nudge loop — gemma4 observes the pane and reports state.
 //!
-//! ## Status (2026-05-13)
+//! ## Status (2026-05-17)
 //!
-//! **This module is being repositioned as a long-loop observer.**
-//! The current wiring in `sipag/src/serve/htmx.rs::verify_and_heal_dispatch`
-//! still uses it to drive keystrokes (paste → submit → recover),
-//! but that is the **legacy path** scheduled for removal in step 7
-//! of `docs/dispatch-implementation-plan.md` when the attach client
-//! ([`crate::katulong::client`]) wires into the dispatch handler.
-//! After that, this module's role narrows to: every 30-60s, read
-//! the rolling buffer of an open attach, ask gemma what state the
-//! session is in (running, stuck, needs-human, done), persist that
-//! status onto the task. `NudgeDecision::keystrokes` becomes
-//! informational only — the mechanical paste/submit handshake is
-//! owned by the attach client, not gemma.
+//! **Early lens-worker prototype.** This module is an early version
+//! of the lens-worker pattern documented in `docs/modules.md` §3
+//! (Experimentation): gemma reads context, returns a structured
+//! classification, sipag dispatches on it. When Phase 1 #3 lands
+//! (modules.md §9), this folds into the lens-worker abstraction as
+//! a worker with a "post-dispatch progress" lens.
 //!
-//! See `docs/dispatch-design.md` §7 ("The LLM's actual job") for
-//! the split rationale.
+//! Until then: the legacy keystroke-driving path in
+//! `sipag/src/serve/htmx.rs::verify_and_heal_dispatch` still
+//! uses this module to drive paste / submit / recover. That entire
+//! path retires when Phase 2 #11 in modules.md §9 lands (attach
+//! client owns keystrokes; recovery loop is deleted, not refactored).
+//! `NudgeDecision::keystrokes` becomes informational only after
+//! that — the mechanical paste/submit handshake is owned by the
+//! attach client, not gemma. See memory `feedback-strict-layer-coupling`
+//! for the rationale (the bridge is gemma's only job; mechanical
+//! actuation is a different concern).
 //!
 //! ## Original (transitional) design
 //!

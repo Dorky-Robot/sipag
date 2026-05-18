@@ -1,7 +1,9 @@
 # Getting started
 
-This page walks through installing sipag, registering a project, adding a
-task, and dispatching it to a katulong session.
+This page walks through the **tactical dispatch workflow**: installing
+sipag, registering a project, adding a task, and dispatching it to a
+katulong session. For the strategic frame — sipag as the OKR layer for an
+agentic fleet — see [`VISION.md`](https://github.com/Dorky-Robot/sipag/blob/main/VISION.md).
 
 ## Prerequisites
 
@@ -108,9 +110,9 @@ sipag will:
 sipag tui
 ```
 
-The TUI is a kanban view of every project's tasks. Use the arrow keys to
-move between cards; hotkeys add, move, and dispatch tasks without leaving the
-board.
+The TUI is an interactive board across every project's tasks. Use the arrow
+keys to move between cards; hotkeys add, move, and dispatch tasks without
+leaving the board.
 
 ## Next steps
 

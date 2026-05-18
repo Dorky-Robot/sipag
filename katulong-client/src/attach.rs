@@ -3,10 +3,9 @@
 //! Sipag opens a WebSocket to katulong as a "headless katulong
 //! client" — the same kind of client the browser tile is, with the
 //! same auth, the same wire protocol, the same lifecycle — just
-//! without a human rendering pixels. See
-//! `docs/dispatch-design.md` §5a and
-//! `docs/dispatch-implementation-plan.md` §5 for the design;
-//! `protocol.rs` for the JSON message contract.
+//! without a human rendering pixels. See `protocol.rs` for the JSON
+//! message contract; `docs/modules.md` §3 (Experimentation) for how
+//! this attach is consumed by the gemma4 bridge lens-worker.
 //!
 //! ## Architecture
 //!
@@ -622,8 +621,11 @@ impl Drop for KatulongAttach {
 /// `WS_BACKPRESSURE_BYTES = 1 MiB` so we never carry less history
 /// than katulong was willing to buffer for us.
 ///
-/// Not configurable yet — see `docs/dispatch-implementation-plan.md`
-/// §5.3 for the design rationale.
+/// Not configurable yet — bounded memory is the design choice
+/// (aligns with katulong's per-client backpressure cap; consumers can
+/// always fetch older context from the corpus via `corpus.search` per
+/// `docs/modules.md` §3 — the in-attach buffer doesn't need to hold
+/// everything).
 const BUFFER_SOFT_CAP: usize = 1_048_576; // 1 MiB
 
 /// Hard cap per inbound WebSocket message, enforced by the

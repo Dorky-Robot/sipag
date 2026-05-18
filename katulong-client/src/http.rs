@@ -13,12 +13,10 @@
 //!
 //! This module is the one-shot HTTP path. It stays here for session
 //! lifecycle calls (`create_session`, `list_sessions`, `kill_session`)
-//! and for diagnostic reads. The dispatch path is migrating to a
-//! long-lived WebSocket attach via the [`protocol`] submodule and
-//! (forthcoming) `client` submodule — see
-//! `docs/dispatch-implementation-plan.md`. Where a docstring on a
-//! function here points at the new path, that's the canonical place
-//! to look once the migration lands.
+//! and for diagnostic reads. The dispatch path migrated to the
+//! long-lived WebSocket attach via the [`protocol`] + [`attach`]
+//! submodules (PRs #532-#535). For the current architecture see
+//! `docs/modules.md` §3 (Experimentation) and §4 (Topology).
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -265,10 +263,10 @@ impl KatulongClient {
     /// **Do NOT use `agent.running` as a "task is in flight"
     /// signal.** It reports the Claude process *existing*, not
     /// Claude *doing work* — an idle Claude TUI waiting on input
-    /// still has `agent.running = true`. We've been bitten by this
-    /// (see `docs/dispatch-design.md` §5.3 / "verify_and_heal" history).
-    /// For dispatch progress detection, the attach client's
-    /// rolling-buffer pattern matching is the right primitive.
+    /// still has `agent.running = true`. For dispatch progress
+    /// detection, the attach client's rolling-buffer pattern matching
+    /// is the right primitive (and Phase 2 #11 in `docs/modules.md`
+    /// §9 retires the recovery-loop fallback that ever needed this).
     pub fn session_status(&self, id: &str) -> Result<TmuxSessionStatus> {
         let url = status_url(&self.url, id);
         let resp = curl_get(&url, &self.api_key)?;
