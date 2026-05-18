@@ -107,7 +107,7 @@ Earlier versions exposed `sipag feature add | list | show` and
 `sipag refine <FEATURE_ID>` for capturing raw ideas and turning them
 into actionable tickets via a background `claude -p` subprocess. That
 kanban-shaped refinement pipeline was retired in favor of a new
-**Experimentation** work model (spike → observe → iterate) currently
+**Experimentation** work model (spike → observe → record) currently
 being designed. The CLI surface is gone; running `sipag feature` or
 `sipag refine` now fails with clap's "unrecognized subcommand."
 
