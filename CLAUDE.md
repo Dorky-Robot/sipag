@@ -161,6 +161,8 @@ Hooks are the sole quality gate. Code that gets pushed is already validated.
 
 **Pre-push** (~2-3 min): cargo test --workspace (blocking), cargo machete (warning), gitleaks final scan (blocking).
 
+**Post-commit / post-merge** (instant — `diwa enqueue .` runs in background): semantic indexing of new commits into diwa's searchable knowledge base. No-op if diwa isn't installed; doesn't slow anything down either way.
+
 Install once after cloning:
 
 ```bash
@@ -169,6 +171,28 @@ make install-hooks
 
 - **Never use `--no-verify`**. Fix the issue instead.
 - Run `make dev` before opening or updating PRs.
+
+### Searching the repo's history with diwa
+
+**Diwa is the canonical search tool for sipag**, not `grep`/`rg` alone. Diwa indexes every commit and extracts tagged insights (`[decision]`, `[architecture]`, `[pattern]`, `[learning]`, `[reflection]`) from commit messages + PR descriptions. Searches return semantic hits across the entire history, not just keyword matches.
+
+```bash
+# Install (one-time per machine):
+brew install dorky-robot/tap/diwa
+diwa init .          # registers this repo with the daemon
+
+# Query (anywhere in the repo):
+diwa search Dorky-Robot/sipag "lens-worker abstraction"
+diwa search Dorky-Robot/sipag "why did we kill the recording API"
+diwa search Dorky-Robot/sipag "strict layer coupling rationale"
+
+# Browse / stats / re-index:
+diwa browse Dorky-Robot/sipag    # scrollable TUI
+diwa stats                       # index size, etc.
+diwa reindex Dorky-Robot/sipag   # rebuild from scratch (rare)
+```
+
+This matters for Claude sessions specifically: reach for `diwa search` BEFORE `grep`/`rg` when looking for "why did we decide X" or "where did we discuss Y." Diwa hits include cross-PR rationale, edit-log entries, and the kind of historical context that's easy to lose in a long codebase.
 
 ## Working on sipag
 
