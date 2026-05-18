@@ -1,9 +1,9 @@
 # Getting started
 
-This page walks through the **tactical dispatch workflow**: installing
-sipag, registering a project, adding a task, and dispatching it to a
-katulong session. For the strategic frame — sipag as the OKR layer for an
-agentic fleet — see [`VISION.md`](https://github.com/Dorky-Robot/sipag/blob/main/VISION.md).
+> For the product story (what sipag is, what it feels like to use, the FAQ),
+> see [`narrative.md`](narrative.md). This page walks through the
+> **tactical dispatch workflow**: installing sipag, registering a project,
+> adding a task, and dispatching it to a katulong session.
 
 ## Prerequisites
 

@@ -12,9 +12,14 @@
 
 ## What is sipag?
 
+> For the product story (what it feels like, why it exists, the FAQ),
+> see [`docs/narrative.md`](docs/narrative.md). This README is install
+> + a tactical overview.
+
 sipag is the layer where humans steer an agentic dev fleet via **Objectives
 + Key Results**. Strategic direction lives at the top; agents handle
-execution underneath. See [`VISION.md`](VISION.md) for the full posture.
+execution underneath. See [`VISION.md`](VISION.md) for the strategic
+principles behind the shape.
 
 Tactically today: sipag owns the project board (tasks, statuses, roles) and
 ships work to running terminal sessions managed by
