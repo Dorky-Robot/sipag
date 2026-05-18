@@ -138,6 +138,7 @@ Now that you have the narrative spine, here's where each supporting doc fits:
 | [`modules.md`](modules.md) | The architecture — DDD bounded contexts, lens-worker abstraction, phase queue |
 | [`feature-matrix.md`](feature-matrix.md) | The capability scorecard — what's shipped, what's gapped, what's deliberately not in scope |
 | [`getting-started.md`](getting-started.md) | The tactical how-to — install, register a project, dispatch a task |
+| [`dispatch.md`](dispatch.md) | What actually happens when you click "Dispatch" — flow diagrams + file:line refs |
 | [`cli-reference.md`](cli-reference.md) | Every command + flag |
 | [`../README.md`](../README.md) | Repo-root overview + install instructions |
 | [`../CLAUDE.md`](../CLAUDE.md) | Internal priming for Claude Code sessions working on sipag itself |
