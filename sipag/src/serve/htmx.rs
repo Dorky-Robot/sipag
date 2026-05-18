@@ -723,9 +723,9 @@ async fn dispatch_task_handler(
     //
     //   legacy: gemma4 keystroke-driving nudge loop via
     //   `verify_and_heal_dispatch`. Kept as a fallback while v2
-    //   bakes in production; scheduled for removal in
-    //   `docs/dispatch-implementation-plan.md` §11 step 7 once
-    //   v2 has proven out.
+    //   bakes in production; scheduled for removal per
+    //   `docs/modules.md` §9 Phase 2 #11 (closes sipag #528 by
+    //   deletion — see also memory `feedback-strict-layer-coupling`).
     //
     // Enable v2 by setting `SIPAG_DISPATCH_V2=1` in the
     // LaunchAgent's environment.

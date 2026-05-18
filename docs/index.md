@@ -14,7 +14,7 @@ command in the right session.
 
 ```bash
 sipag dispatch <task_id>   # send a task to its katulong session
-sipag tui                  # open the kanban board (default with no args)
+sipag tui                  # open the interactive board (default with no args)
 ```
 
 Everything else (`sipag add`, `sipag list`, `sipag move`, `sipag projects`,

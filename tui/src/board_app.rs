@@ -1,4 +1,4 @@
-//! Kanban board app state — v4 multi-project task board.
+//! Interactive board app state — v4 multi-project task board.
 
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -6,7 +6,7 @@ use sipag_core::board::{self, Task, TaskStatus};
 use sipag_core::katulong;
 use std::path::PathBuf;
 
-/// The kanban board application state.
+/// The interactive board application state.
 pub struct BoardApp {
     pub sipag_dir: PathBuf,
 

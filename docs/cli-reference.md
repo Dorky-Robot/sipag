@@ -38,7 +38,7 @@ sipag up [PROJECT]
 
 ## sipag tui
 
-Open the interactive kanban TUI. Running `sipag` with no arguments does the
+Open the interactive board TUI. Running `sipag` with no arguments does the
 same thing.
 
 ```

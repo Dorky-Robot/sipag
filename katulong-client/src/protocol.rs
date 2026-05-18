@@ -9,9 +9,9 @@
 //! The browser already speaks this protocol via
 //! `katulong/public/lib/input-sender.js` (outbound) and the
 //! handlers in `katulong/lib/ws-manager.js` (inbound + outbound
-//! dispatch). Sipag is becoming a second kind of client speaking
-//! the exact same protocol; see `docs/dispatch-design.md` §5a and
-//! `docs/dispatch-implementation-plan.md` §3 for the design.
+//! dispatch). Sipag is a second kind of client speaking the exact
+//! same protocol; for the broader architecture see `docs/modules.md`
+//! §4 (Topology).
 //!
 //! Every message is a single JSON object on a single transport
 //! frame. We model them as tagged enums (`#[serde(tag = "type")]`)

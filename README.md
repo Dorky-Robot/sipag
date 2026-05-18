@@ -6,20 +6,25 @@
 
 <img src="sipag.jpg" alt="sipag" width="300">
 
-*Board-driven work dispatcher for Claude Code crews.*
+*The OKR layer for an agentic fleet.*
 
 </div>
 
 ## What is sipag?
 
-sipag owns the project board (tasks, statuses, roles) and ships work to
-running terminal sessions managed by [katulong](https://github.com/Dorky-Robot/katulong).
-Each task knows which role it belongs to; dispatching a task tells katulong
-to launch the role's command in the right session.
+sipag is the layer where humans steer an agentic dev fleet via **Objectives
++ Key Results**. Strategic direction lives at the top; agents handle
+execution underneath. See [`VISION.md`](VISION.md) for the full posture.
+
+Tactically today: sipag owns the project board (tasks, statuses, roles) and
+ships work to running terminal sessions managed by
+[katulong](https://github.com/Dorky-Robot/katulong). Each task knows which
+role it belongs to; dispatching a task tells katulong to launch the role's
+command in the right session.
 
 1. **`sipag dispatch <task_id>`** — Sends a task to its role's katulong session
    and moves it to `in-progress`.
-2. **`sipag tui`** — Live kanban board across all configured projects.
+2. **`sipag tui`** — Interactive board view across all configured projects.
 
 To set up review agents and slash commands in a project's `.claude/`
 directory, use [hulma](https://github.com/Dorky-Robot/hulma).
@@ -70,7 +75,7 @@ terminal sessions live in katulong; sipag just tells katulong what to do next.
 ### sipag tui
 
 Running `sipag` with no arguments (or `sipag tui`) opens an interactive
-kanban view. Columns reflect the project's configured statuses; arrow keys
+board view. Columns reflect the project's configured statuses; arrow keys
 move between cards, and a few hotkeys add/move/dispatch tasks without
 leaving the TUI.
 
@@ -140,7 +145,7 @@ Dispatch talks to katulong over HTTP; configure the connection at
 ```
 sipag dispatch <TASK_ID>     Dispatch a task to its role's katulong session
 sipag up [project]           Spin up sessions for every role in the project
-sipag tui                    Launch the kanban TUI (same as no args)
+sipag tui                    Launch the interactive board (same as no args)
 sipag add <title>            Add a task to the board
 sipag list                   List tasks on the board
 sipag move <id> <status>     Move a task to a new status
@@ -153,13 +158,13 @@ sipag version                Print version
 ## Part of the dorky robot stack
 
 ```
-kubo (think)  →  sipag (board)  →  katulong (sessions)  →  agents
+kubo (think)  →  sipag (OKR + dispatch)  →  katulong (sessions)  →  agents
 ```
 
 - [kubo](https://github.com/Dorky-Robot/kubo) — chain-of-thought reasoning, breaks problems into steps
 - [katulong](https://github.com/Dorky-Robot/katulong) — long-running terminal sessions for agents
 - [hulma](https://github.com/Dorky-Robot/hulma) — scaffolds review agents and slash commands into a project
-- **sipag** — board + dispatcher, turns backlog into in-flight work
+- **sipag** — the OKR layer; humans steer here, agents work below
 
 ## Development
 
