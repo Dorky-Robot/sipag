@@ -18,7 +18,7 @@ The yellow KR is the auth refactor. There's a small sidebar item on it: *"Two of
 
 You read both options for ninety seconds. You pick the explicit whitelisting. Close the tab.
 
-That afternoon, the KR flips green. The agents converged on your choice. Two more Objectives have new observations in their sidebars — one strategic, one a pattern someone's lens-worker noticed about test flakiness across three repos. You scan them. Nothing needs you. You close the tab again.
+That afternoon, you check back. The agents converged on your choice; you flip the KR green. Two more Objectives have new observations in their sidebars — one strategic, one a pattern someone's lens-worker noticed about test flakiness across three repos. You scan them. Nothing needs you. You close the tab again.
 
 You never wrote a ticket. Never moved a card between columns. Never assigned anyone. You wrote what mattered up front; the fleet handled the rest; sipag surfaced the one thing in your day that actually needed a human.
 
@@ -57,7 +57,7 @@ If you find yourself dragging cards, that's a smell — the agent layer hasn't a
 
 You write **Objectives** — free-text, hypothesis-shaped, lived in until they don't matter. Under each Objective you write **Key Results** — also free-text, with a traffic-light stance (green / yellow / red / done). That's your entire surface.
 
-Below the surface: every Objective and KR you write is also a **lens**. A lens is sipag's word for "a perspective through which to read what's happening." When you write a KR, a small background worker starts watching what the fleet is doing — through the lens of that KR. It looks at commits, agent transcripts, test results, anything else available, and writes back observations into a private corpus that's always growing. When the worker sees something the human should know about, it surfaces it as a note, a question, or a proposed stance change under the KR's sidebar.
+Below the surface: every Objective and KR you write is also a **lens**. A lens is sipag's word for "a perspective through which to read what's happening." When you write a KR, a small background worker starts watching what the fleet is doing — through the lens of that KR. It looks at commits, agent transcripts, test results, anything else available, and keeps a running notebook of what it observes. When the worker sees something the human should know about, it surfaces it as a note, a question, or a proposed stance change under the KR's sidebar.
 
 That's it. Write what matters. Wait. Read what surfaces. Steer.
 
@@ -91,7 +91,12 @@ No. Sipag refuses to be a kanban tool by design — every list item in the "deli
 They will, regularly. The point is that the human catches it at the KR level — "this stance is yellow, the fleet's stuck on cookie-domain handling, here's the question" — and redirects with a sentence, not by reassigning tasks or rewriting tickets. The blast radius of any single agent's wrong direction is small because the human checks in at KR-stance granularity, not task granularity.
 
 **How does sipag know what's important enough to surface?**
-A small local LLM (gemma running locally; not your private code going to a cloud) reads through what the fleet has been doing and decides. Each KR you write is also a system prompt for a background worker that reads through this lens. When the worker sees something material to that KR, it writes a note, a blocker, a question, or proposes a stance change. Nothing gets sent unless the worker thinks it matters. When you see a question, gemma flagged it; when you don't, gemma didn't.
+A small local LLM (by default, gemma running against a local ollama daemon — your private code never has to leave your machine) reads through what the fleet has been doing and decides. Each KR you write is also a system prompt for a background worker that reads through this lens. When the worker sees something material to that KR, it writes a note, a blocker, a question, or proposes a stance change. Nothing gets sent unless the worker thinks it matters. When you see a question, gemma flagged it; when you don't, gemma didn't.
+
+That said: gemma will miss things. Lens-workers are pattern-matchers, not omniscient — when a worker doesn't think something matters, it won't surface. Two safety nets: you can always open the live attach to a session and watch directly, and KR stances are reviewable on whatever cadence you set (weekly is a reasonable default). When something gets missed, you'll usually see it as a KR drifting yellow without a corresponding question — the absence is itself a signal.
+
+**Doesn't running gemma continuously cost a lot?**
+Gemma is local — there's no per-token cost, just CPU/GPU on your own hardware. The bigger concern is *call volume*. Lens-workers don't fire on a wall-clock schedule regardless of activity; they fire on threshold-crossing events (a new permission request arrives, a session has been silent for a while, the corpus has accumulated enough new content to warrant a derivation pass). A quiet day costs essentially nothing. A busy day costs whatever your hardware can handle. With a GPU, gemma is near-free; on CPU-only hardware, the practical trade-off is observation latency vs. contention with your other work — both tunable.
 
 **Can I see what the agents are actually doing?**
 Yes. Each session has a live attach you can open — same as opening a terminal tab on the agent's shell. Watching is fine; you just shouldn't *have* to watch in order to know whether things are working. The KR stance + the surfaced notes are designed to tell you that without you having to attach.
@@ -106,7 +111,7 @@ Those tools optimize for human-coordinating-with-human and add AI as a feature o
 Those operate at the keystroke or single-session level. Sipag operates at the *fleet* level — directing many agents over many objectives over weeks or months. It does not write code. It is the layer between the human's strategic intent and the agents that do the work.
 
 **Where does the data live?**
-Locally, under `~/.sipag/`. TOML files for the human-written content; a vector corpus for the agent-derived observations; a file-backed pub/sub broker for the in-flight events. There is no SaaS dependency. You point sipag at a [katulong](https://github.com/Dorky-Robot/katulong) server for session management — that can be your own machine or a server on your mesh.
+Locally, under `~/.sipag/`. TOML files for the human-written content; a vector corpus for the agent-derived observations (Phase 1 work — see [`feature-matrix.md`](feature-matrix.md)); a file-backed pub/sub broker for the in-flight events. There is no SaaS dependency. You point sipag at a [katulong](https://github.com/Dorky-Robot/katulong) server for session management — that can be your own machine or a server on your mesh.
 
 **What happens if I leave sipag running and walk away for a week?**
 The fleet continues. Lens-workers continue deriving. Sipag accumulates insights in the corpus, surfaces what the workers think is material, lets the rest sit. When you come back, the KR sidebars tell you the story of the week. If something needed you and you weren't there, that KR's stance went yellow or red; if everything went well, it stayed green.
