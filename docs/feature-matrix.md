@@ -36,6 +36,8 @@ The TUI (`sipag tui`) is a separate dispatch-side surface that pre-existed this 
 
 The human's two questions per VISION: "what are we optimizing for" and "is it working." Everything else here is in service of those.
 
+**Dual role (set 2026-05-17):** every Steering entry (Objective / KR / Standing / Idea / named pattern) is *also* a lens definition — its text serves as the system prompt of a corresponding `LensWorker` in Experimentation. Adding a KR spawns a lens-worker; editing the text changes the worker's behavior; retiring the entry retires the worker. The Steering UI doubles as the lens registry; no separate "lens configuration" surface needed. See `docs/modules.md` §3 and §6.
+
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
 | Create / view / close an **Objective** | 🟡 | `sipag-core/src/board/objective.rs` + `sipag/src/serve/board_view.rs` | Type exists; web UI exposes objectives. CLI ⏳ per UI-first priority. |
@@ -52,7 +54,7 @@ The human's two questions per VISION: "what are we optimizing for" and "is it wo
 
 ## 2. Experimentation features (agent surface)
 
-The spike → observe → record loop per [`project-sipag-work-model-experimentation`](../.claude/memory). **Reframed 2026-05-17**: there's no `Trial` aggregate, no `IteratePolicy` trait, no state machine. The event log is the source of truth. **Claude is the iterator**; sipag observes via gemma4 (watching katulong's published `claude/<uuid>` events) and records structured signals into KR-tagged pub/sub. Sipag never reaches past katulong to talk to Claude directly — gemma4 is the bridge. See `[[feedback-strict-layer-coupling]]`.
+The spike → observe → derive loop per [`project-sipag-work-model-experimentation`](../.claude/memory). **Reframed 2026-05-17 (third pass — lens-worker abstraction)**: no state machine, no per-classification recording verbs. Instead: a local vector **corpus** + a registry of **lens-workers** (each Steering entry is a lens; plus project-meta and ad-hoc lenses) + four verbs (`observe` workhorse + 3 structural). The gemma bridge is just the first lens-worker. Claude is the iterator; sipag observes, derives, and surfaces. Sipag never reaches past katulong — gemma4 is the bridge. See `[[feedback-strict-layer-coupling]]`.
 
 ### Act — fire a spike
 
@@ -80,20 +82,27 @@ The spike → observe → record loop per [`project-sipag-work-model-experimenta
 | **Cross-host observation** (subscribe to all mesh peers) | 🔴 | not implemented | Phase 2 #7 SSE subscriber needs N-stream fan-out. |
 | **Recovery loop** (`verify_and_heal_dispatch` — LLM proposes keystrokes) | ⛔ | `sipag/src/serve/htmx.rs:1577` | Legacy; closes #528 by *deletion* (Phase 2 #11) when attach client owns keystrokes. |
 
-### Record — what gemma4 derives from the event stream
+### Derive — what gemma4 lens-workers derive from the corpus
 
-(Was "iterate." Renamed 2026-05-17 — Claude is the iterator; sipag records.)
+(Was "iterate" → "record" → now "derive." Claude is the iterator; sipag observes and derives. The full lens-worker abstraction sits here.)
 
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
-| **Internal recording API** (`note_progress`, `flag_blocker`, `propose_task`, `suggest_stance`, `ask_human`) | 🔴 | not implemented | Phase 1 #3 (reframed). Sipag-internal Rust functions — **NOT exposed externally**; gemma4 dispatches into them. |
-| **Gemma4 bridge dispatcher** (sliding window → structured JSON → recording-API call) | 🔴 | not implemented | Phase 1 #3 (reframed). The translation layer from Claude's free-form output to sipag's structured world. |
-| **`RecordedAction` value object** | 🔴 | not implemented | What gemma4 emitted + the source-event-window reference. Append-only into pub/sub. |
-| **Background workers** (expand, research, scheduler) | 🟡 | `sipag/src/serve/workers/{expand,research,scheduler}.rs` | Already running; likely consume the recording API rather than feed into it. Triage individually once the API exists. |
-| **Categorize loop** (gemma sorts board items) | 🟡 | `sipag/src/serve/categorize.rs` | Works; same gemma-bridge shape as the recording bridge. Folds into `observe` per modules.md §8. |
-| **Refine raw ideas → tickets** (the old kanban pipeline) | ⛔ | `sipag-core/src/{feature,refine}.rs` | Deprecated in PR #536 — replaced by the spike-observe-record model itself. |
-| ~~`IteratePolicy` plug~~ | 🚫 | n/a | Removed from roadmap 2026-05-17. Claude is the iterator; sipag doesn't iterate. |
-| ~~Conclude an experiment~~ | 🚫 | n/a | Removed — there's no per-experiment state to "conclude." When the human flips KR stance to `done`, the experiment is done. |
+| **Corpus** (local vector DB, append-only forever, tagged + timestamped, sibling to diwa) | 🔴 | not implemented | Phase 1 #3. Embedded via ollama (local, free, fits strict-layer-coupling). One giant store; tags + timestamps + semantic search are the slicing. |
+| **`LensWorker` runtime** (lens text + trigger policy + query strategy + write protocol) | 🔴 | not implemented | Phase 1 #3 core. Every Steering entry spawns a worker; plus project-meta + ad-hoc workers. The bridge is the first instance. |
+| **Bridge lens-worker** (reactive on katulong `claude/<uuid>` events; sliding window of 200) | 🔴 | not implemented | Phase 1 #3. Replaces the polling observer planned earlier. |
+| **`corpus.search` + `corpus.expand` tools** (sipag-internal MCP-shape) | 🔴 | not implemented | Phase 1 #3. Gemma calls mid-prompt for multi-step retrieval. |
+| **Four verbs**: `observe(text, tags?)` + `suggest_stance` + `ask_human` + `propose_task` | 🔴 | not implemented | Phase 1 #3. Free-form `observe` is the workhorse; three structural verbs for typed UI affordances. |
+| **Project-meta lenses** (pattern-spotter, meta-cognitive, strategic-cross-cutting) | 🔴 | not implemented | Phase 1 #3. Don't hang off a Steering entry; cross-cutting derivation. |
+| **Ad-hoc / hypothesis lenses** (UI-created, short-lived, promote-or-expire) | 🔴 | not implemented | Phase 1 #3 + web UI for "Lenses" panel. |
+| **Background workers** (expand, research, scheduler) | 🟡 | `sipag/src/serve/workers/{expand,research,scheduler}.rs` | Already running; likely become **lens-worker scheduler infrastructure**. Triage individually once the abstraction lands. |
+| **Pre-dispatch classifier (gate)** | 🟡 | `sipag-core/src/gate.rs` (346 LOC) | **Early lens-worker prototype** — gemma reads pane + statuses, derives classification. Folds in as a worker with a "dispatch-readiness" lens. |
+| **Post-dispatch observer (nudge)** | 🟡 | `sipag-core/src/nudge.rs` (417 LOC) | **Early lens-worker prototype** — same shape. Folds in as a worker with a "post-dispatch progress" lens. |
+| **Categorize loop** (gemma sorts board items) | 🟡 | `sipag/src/serve/categorize.rs` (199 LOC) | **Early lens-worker prototype** — folds in as a "board-item categorization" lens. |
+| **Refine raw ideas → tickets** (the old kanban pipeline) | ⛔ | `sipag-core/src/{feature,refine}.rs` | Deprecated in PR #536 — replaced by the spike-observe-derive model itself. |
+| ~~`IteratePolicy` plug~~ | 🚫 | n/a | Removed 2026-05-17. Claude is the iterator. |
+| ~~Conclude an experiment~~ | 🚫 | n/a | Removed — no per-experiment state. KR stance flipping to `done` is the signal. |
+| ~~Per-classification recording verbs~~ (`note_progress`, `flag_blocker`, `record_decision`, ...) | 🚫 | n/a | Removed 2026-05-17 (lens-worker reframe). Collapsed into free-form `observe(text, tags?)`. Classification happens at *query time* via tag filters + semantic search, not at write time. |
 
 ---
 
@@ -212,3 +221,4 @@ Each absence is a feature. Don't accidentally build these.
 - 2026-05-17 — added UI-first surface priority. CLI rows that previously flagged "CLI surface absent" as a gap re-framed as ⏳ deferred. See memory `feedback-sipag-ui-first`.
 - 2026-05-17 — §2 Experimentation reframed. State-machine vocabulary (`Trial`, `IteratePolicy`, `Conclude an experiment`) struck through and marked 🚫 (removed from roadmap). Added "Record" sub-section (was "Iterate") with internal recording API, gemma4 bridge dispatcher, and `RecordedAction` rows. §3 Topology gained an explicit Demeter-violation row for the existing Claude-transcript-proxy reach. §9 NOT-in-scope grew three rows: sipag-as-MCP-server-to-Claude (Demeter), sipag-parsing-Claude-transcripts-directly (Demeter, in reverse), state-machine trial tracking (kanban-shaped). See memories `feedback-strict-layer-coupling`, `project-sipag-work-model-experimentation`.
 - 2026-05-17 — review-fix round 1 on PR #538 — corrected stale "Experimentation `iterate` policies" reference in §1 KR-acceptance row to point at the gemma4-bridge recording API; fixed `worktree_command` line number (513→523); tightened "How to use" rubric with explicit doc-rot anti-pattern + carve-out for retired-concept tombstones. (Companion: modules.md §1 now forward-links here.)
+- 2026-05-17 — **§1 + §2 reframed for the lens-worker abstraction** (third pass on Experimentation; see modules.md §3 reframe). §1 Steering gained a "dual role" note — every Steering entry IS also a lens definition. §2 Experimentation's "Record" sub-section renamed to "Derive" (Claude is the iterator; sipag derives). Rows: corpus, LensWorker runtime, bridge as first worker, corpus-search tools, four verbs (observe + 3 structural), project-meta lenses, ad-hoc lenses, plus reframed gate/nudge/categorize as early lens-worker prototypes. Added 🚫 row for the per-classification recording verbs (collapsed into free-form `observe`).
