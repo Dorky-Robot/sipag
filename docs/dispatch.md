@@ -2,6 +2,14 @@
 
 > *Companion to [`narrative.md`](narrative.md): that doc is the product story; this one is the mechanics — what happens between you clicking "Dispatch" in the web UI and an agent running in a katulong session. Read [`modules.md`](modules.md) §3 + §4 for the architectural context (Experimentation and Topology contexts).*
 
+> **⚠ Snapshot dated 2026-05-18. Out of date in places after PR #547.**
+>
+> This doc was written before the `sipag-dispatch` workspace crate landed. References to `htmx.rs::dispatch_via_attach_client` (and its helpers `finish_v2`, `v2_step_reason`, `paste_echo_regex`, `tui_ready_re`, `claude_processing_re`) all moved — the v2 attach flow is now `sipag_dispatch::dispatch` in [`sipag-dispatch/src/lib.rs`](../sipag-dispatch/src/lib.rs). Line numbers in `serve/htmx.rs` for the dispatch handler + the legacy `verify_and_heal_dispatch` are accurate as of the snapshot date but have shifted.
+>
+> What's still accurate: the *flow* (HTTP `POST /sessions` → gate → branch on `SIPAG_DISPATCH_V2` → v2 attach flow or legacy nudge), the failure-mode table, the gate's silent-fail risk, the modules.md §9 Phase 2 #11 retirement plan. What's not: function locations and the per-LOC line numbers.
+>
+> Until this doc gets a refresh, treat it as a navigable map of the *conceptual* flow; for current code locations, read the `sipag-dispatch` crate's module docs directly.
+
 This is the **current implementation** (May 2026). Many concepts here (the gate, the legacy nudge loop) are being refactored into the lens-worker abstraction per [`modules.md`](modules.md) §9 Phase 1 #3 and Phase 2 #11.
 
 ---

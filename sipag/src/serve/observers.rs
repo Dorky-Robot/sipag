@@ -74,24 +74,17 @@ async fn scan_all_hosts(state: &AppState) -> Result<()> {
 
 /// Single-host scan. Returns the number of live sessions seen.
 async fn scan_host(state: &AppState, host: &Host) -> Result<usize> {
-    let url = format!("{}/sessions", host.base_url());
-    let resp = state
-        .http
-        .get(&url)
-        .bearer_auth(&host.api_key)
-        .header("accept", "application/json")
-        .send()
+    let url = sipag_core::katulong::sessions_url(host.base_url());
+    // Body-capped GET /sessions via the async client (sipag #527).
+    // Polls on interval across every configured host, so unbounded
+    // upstream JSON here was the worst-case #527 vector — repeated
+    // triggers, attacker-controlled host. Now bounded at
+    // DEFAULT_BODY_CAP (1 MiB).
+    let body: Vec<KatulongSession> = state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::DEFAULT_BODY_CAP)
         .await
         .with_context(|| format!("GET {url}"))?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("{} returned HTTP {}", url, resp.status());
-    }
-
-    let body: Vec<KatulongSession> = resp
-        .json()
-        .await
-        .context("parse katulong /sessions response")?;
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let live_ids: HashSet<String> = body

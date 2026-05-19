@@ -262,17 +262,15 @@ async fn fetch_recent_transcript(
     uuid: &str,
     limit: u32,
 ) -> Vec<FeedEntry> {
-    let url = format!(
-        "{}/api/claude-transcript/{}?limit={}",
-        host.base_url(),
-        uuid,
-        limit
-    );
-    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
-    };
-    let body: TranscriptResponse = match resp.json().await {
+    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), uuid, limit);
+    // Drop-on-error: this feed is best-effort. 10 MiB cap is right
+    // for transcript JSONL (sipag #527 — defense against a
+    // misbehaving katulong streaming an unbounded body).
+    let body: TranscriptResponse = match state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::TRANSCRIPT_BODY_CAP)
+        .await
+    {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };
@@ -464,17 +462,22 @@ fn load_objectives_blocking(
 }
 
 async fn fetch_sessions_full(state: &AppState, host: &Host) -> anyhow::Result<Vec<RemoteSession>> {
-    let url = format!("{}/sessions", host.base_url());
-    let resp = state
-        .http
-        .get(&url)
-        .bearer_auth(&host.api_key)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Ok(Vec::new());
-    }
-    Ok(resp.json().await.unwrap_or_default())
+    // Body-capped GET /sessions via the async client (sipag #527).
+    // `list_sessions` returns the strongly-typed `TmuxSession` shape;
+    // we project just the fields this board view cares about via the
+    // `RemoteSession` local struct. Drop-on-error semantics preserved
+    // — a misbehaving katulong returning oversized JSON now fails
+    // closed (Vec::new) instead of OOM'ing the process.
+    let url = sipag_core::katulong::sessions_url(host.base_url());
+    let body: Vec<RemoteSession> = match state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::DEFAULT_BODY_CAP)
+        .await
+    {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(body)
 }
 
 /// Subset of katulong's `/sessions` row that the board cares about.

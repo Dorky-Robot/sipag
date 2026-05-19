@@ -1454,6 +1454,7 @@ dependencies = [
  "clap",
  "futures-util",
  "regex",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",
@@ -2785,6 +2786,7 @@ dependencies = [
  "chrono",
  "clap",
  "futures",
+ "katulong-client",
  "maud",
  "notify",
  "predicates",
@@ -2794,6 +2796,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "sipag-core",
+ "sipag-dispatch",
+ "sipag-pubsub",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2820,6 +2824,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-pubsub",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
@@ -2829,6 +2834,30 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-rs",
+]
+
+[[package]]
+name = "sipag-dispatch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "katulong-client",
+ "regex",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sipag-pubsub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

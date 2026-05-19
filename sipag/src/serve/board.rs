@@ -448,46 +448,30 @@ async fn dispatch_task_handler(
     let agent_cmd = format!("{} -p {}", role_command, title_quoted);
     let session = session_name(&project_name, &task.role);
 
-    let session_id = match super::katulong_proxy::create_or_find_session(
-        &state.http,
-        host.base_url(),
-        &host.api_key,
-        &host.id,
-        &session,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err((st, body)) => return (st, body).into_response(),
-    };
+    // Async katulong client: one instance bound to this host. Used
+    // for both session create (idempotent — 409 fallback in-method)
+    // and the exec call below. Body cap applies to every method.
+    let katulong = state.katulong_for(host);
 
-    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
-    let exec_resp = match state
-        .http
-        .post(&exec_url)
-        .bearer_auth(&host.api_key)
-        .json(&serde_json::json!({ "input": agent_cmd }))
-        .send()
-        .await
-    {
-        Ok(r) => r,
+    let session_id = match katulong.create_session(&session).await {
+        Ok(s) => s.id,
         Err(e) => {
-            warn!(host = %host.id, error = %e, "POST exec failed");
+            warn!(host = %host.id, error = %e, "create_session failed");
+            let body = super::upstream::sanitize_upstream_body(&e.to_string());
             return (
                 StatusCode::BAD_GATEWAY,
-                format!("exec on {}: network error", host.id),
+                format!("create session on {}: {body}", host.id),
             )
                 .into_response();
         }
     };
-    if !exec_resp.status().is_success() {
-        let st = exec_resp.status();
-        let raw = exec_resp.text().await.unwrap_or_default();
-        warn!(host = %host.id, status = %st, body = %raw, "POST exec returned non-2xx");
-        let body = super::katulong_proxy::sanitize_upstream_body(&raw);
+
+    if let Err(e) = katulong.exec_session(&session_id, &agent_cmd).await {
+        warn!(host = %host.id, error = %e, "exec_session failed");
+        let body = super::upstream::sanitize_upstream_body(&e.to_string());
         return (
             StatusCode::BAD_GATEWAY,
-            format!("exec on {}: HTTP {st}: {body}", host.id),
+            format!("exec on {}: {body}", host.id),
         )
             .into_response();
     }
@@ -555,7 +539,7 @@ async fn proxy_session_status(
 /// Forward a GET request to a katulong host. Caller has already
 /// resolved `host` and built the URL via the `sipag_core::katulong`
 /// helpers, so this function holds no wire-format knowledge — only
-/// the auth + body-streaming + error-handling shape.
+/// the auth + body-cap + error-handling shape.
 ///
 /// **Transparent passthrough — exempt from `sanitize_upstream_body`.**
 /// The success path here streams katulong's bytes verbatim to sipag's
@@ -563,28 +547,29 @@ async fn proxy_session_status(
 /// `/api/hosts/:id/sessions` (etc.) want the raw katulong JSON. The
 /// sanitization rule introduced in #525 governs sipag-composed
 /// response bodies (error strings); transparent passthroughs are a
-/// distinct category. Body-size capping for this path is tracked in
-/// #527.
+/// distinct category. Body-size capping now happens at
+/// [`katulong_client::KatulongAsyncClient::get_bytes_capped`] — sipag
+/// #527 closed.
 async fn proxy_get(state: &AppState, host: &sipag_core::hosts::Host, url: &str) -> Response {
-    match state.http.get(url).bearer_auth(&host.api_key).send().await {
-        Ok(resp) => {
-            let status = resp.status();
+    match state
+        .katulong_for(host)
+        .get_bytes_capped(url, katulong_client::DEFAULT_BODY_CAP)
+        .await
+    {
+        Ok((status, content_type, body)) => {
             let mut headers = HeaderMap::new();
-            if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE).cloned() {
+            if let Some(ct) = content_type.and_then(|s| s.parse().ok()) {
                 headers.insert(axum::http::header::CONTENT_TYPE, ct);
             }
-            let body = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(host = %host.id, error = %e, "read body failed");
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        format!("failed to read {} response", host.id),
-                    )
-                        .into_response();
-                }
-            };
             (status, headers, body).into_response()
+        }
+        Err(katulong_client::KatulongAsyncError::BodyTooLarge { cap }) => {
+            warn!(host = %host.id, cap, url = %url, "proxy: upstream body exceeded cap (sipag #527 defense)");
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("upstream response too large from {}", host.id),
+            )
+                .into_response()
         }
         Err(e) => {
             // `error = %e` already includes the request URL via reqwest's
