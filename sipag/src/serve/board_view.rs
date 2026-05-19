@@ -262,17 +262,15 @@ async fn fetch_recent_transcript(
     uuid: &str,
     limit: u32,
 ) -> Vec<FeedEntry> {
-    let url = format!(
-        "{}/api/claude-transcript/{}?limit={}",
-        host.base_url(),
-        uuid,
-        limit
-    );
-    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
-    };
-    let body: TranscriptResponse = match resp.json().await {
+    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), uuid, limit);
+    // Drop-on-error: this feed is best-effort. 10 MiB cap is right
+    // for transcript JSONL (sipag #527 — defense against a
+    // misbehaving katulong streaming an unbounded body).
+    let body: TranscriptResponse = match state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::TRANSCRIPT_BODY_CAP)
+        .await
+    {
         Ok(b) => b,
         Err(_) => return Vec::new(),
     };

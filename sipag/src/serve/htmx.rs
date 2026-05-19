@@ -592,17 +592,21 @@ async fn dispatch_task_handler(
     // that came from pinning `{project}--{role}` names.
     let session = sipag_core::katulong::generate_dispatch_session_name();
 
-    let session_id = match super::katulong_proxy::create_or_find_session(
-        &state.http,
-        host.base_url(),
-        &host.api_key,
-        &host.id,
-        &session,
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err((st, body)) => return err_response(st, body),
+    // Idempotent create-or-find via the async client. The client's
+    // `create_session` handles the 409 fallback internally (mirroring
+    // the sync sibling), so callers see one method regardless of
+    // first-creator vs already-existed. Response body is body-capped
+    // (sipag #527).
+    let session_id = match state.katulong_for(host).create_session(&session).await {
+        Ok(s) => s.id,
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "create_session failed");
+            let body = super::upstream::sanitize_upstream_body(&e.to_string());
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("create session on {}: {body}", host.id),
+            );
+        }
     };
 
     // Pin the dispatch to this task so the board's "running on" badge
@@ -659,32 +663,20 @@ async fn dispatch_task_handler(
     }
 
     if !use_v2 {
-        let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
-        let exec_resp = match state
-            .http
-            .post(&exec_url)
-            .bearer_auth(&host.api_key)
-            .json(&serde_json::json!({ "input": launch_cmd }))
-            .send()
+        // Legacy v1 launch keystroke via HTTP /exec. The v2 path owns
+        // its launch keystroke through the WS attach; this branch
+        // stays until `verify_and_heal_dispatch` retires (modules.md
+        // §9 #11). Body cap applies via the async client.
+        if let Err(e) = state
+            .katulong_for(host)
+            .exec_session(&session_id, &launch_cmd)
             .await
         {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(host = %host.id, error = %e, "POST exec failed");
-                return err_response(
-                    StatusCode::BAD_GATEWAY,
-                    format!("exec on {}: network error", host.id),
-                );
-            }
-        };
-        if !exec_resp.status().is_success() {
-            let st = exec_resp.status();
-            let raw = exec_resp.text().await.unwrap_or_default();
-            warn!(host = %host.id, status = %st, body = %raw, "POST exec returned non-2xx");
-            let txt = super::katulong_proxy::sanitize_upstream_body(&raw);
+            warn!(host = %host.id, error = %e, "v1 exec_session failed");
+            let txt = super::upstream::sanitize_upstream_body(&e.to_string());
             return err_response(
                 StatusCode::BAD_GATEWAY,
-                format!("exec on {}: HTTP {st}: {txt}", host.id),
+                format!("exec on {}: {txt}", host.id),
             );
         }
     }
@@ -948,40 +940,40 @@ async fn observation_transcript_handler(
         });
     }
     let url = sipag_core::katulong::claude_transcript_url(host.base_url(), &obs.claude_uuid, 500);
-    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            // `e.to_string()` would render reqwest::Error::Display, which
-            // embeds the request URL — leaking the tunnel hostname into
-            // the HTML fragment served to the browser. Keep detail in the
-            // log; show a generic message in the UI.
-            warn!(host = %obs.host, error = %e, "GET /api/claude-transcript failed");
+    // 10 MiB cap (TRANSCRIPT_BODY_CAP) accommodates long Claude
+    // sessions while still bounding worst-case memory under a
+    // misbehaving katulong (sipag #527). Tighter than the default 1
+    // MiB because transcript JSONL legitimately grows.
+    let parsed: serde_json::Value = match state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::TRANSCRIPT_BODY_CAP)
+        .await
+    {
+        Ok(v) => v,
+        Err(katulong_client::KatulongAsyncError::Http { status, body }) => {
+            // Operator detail to the log; user gets a clean status.
+            warn!(host = %obs.host, status = %status, body = %body, "transcript fetch returned non-2xx");
             return html_response(maud::html! {
                 div.transcript-empty.subtle {
-                    "transcript fetch failed: network error"
+                    "transcript not available (HTTP " (status.as_u16()) ")"
                 }
             });
         }
-    };
-    if !resp.status().is_success() {
-        let status = resp.status();
-        // Don't render the response body inline — even with maud's
-        // HTML auto-escaping, an attacker-controlled body could
-        // disrupt layout or pad the fragment with garbage. Operator
-        // detail goes to the warn log; the user gets a clean status.
-        let raw_body = resp.text().await.unwrap_or_default();
-        warn!(host = %obs.host, status = status.as_u16(), body = %raw_body, "transcript fetch returned non-2xx");
-        return html_response(maud::html! {
-            div.transcript-empty.subtle {
-                "transcript not available (HTTP " (status.as_u16()) ")"
-            }
-        });
-    }
-    let parsed: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => {
+        Err(katulong_client::KatulongAsyncError::BodyTooLarge { cap }) => {
+            warn!(host = %obs.host, cap, "transcript body exceeded cap (sipag #527 defense)");
             return html_response(maud::html! {
-                div.transcript-empty.subtle { "transcript response was malformed" }
+                div.transcript-empty.subtle { "transcript too large to render" }
+            });
+        }
+        Err(e) => {
+            // Transport / JSON / id-validation errors. Detail in log;
+            // generic message in UI (e.to_string() can carry the
+            // tunnel hostname for transport errors).
+            warn!(host = %obs.host, error = %e, "transcript fetch failed");
+            return html_response(maud::html! {
+                div.transcript-empty.subtle {
+                    "transcript fetch failed"
+                }
             });
         }
     };
@@ -1075,7 +1067,7 @@ async fn claude_respond_handler(
         let st = resp.status();
         let raw = resp.text().await.unwrap_or_default();
         warn!(host = %host.id, status = %st, body = %raw, "POST /api/claude/respond returned non-2xx");
-        let txt = super::katulong_proxy::sanitize_upstream_body(&raw);
+        let txt = super::upstream::sanitize_upstream_body(&raw);
         return err_response(
             StatusCode::BAD_GATEWAY,
             format!("respond on {}: HTTP {st}: {txt}", host.id),
@@ -1542,7 +1534,7 @@ fn v2_step_reason(step: &str, err: AttachError) -> String {
         AttachError::Server(msg) => format!("{step}: katulong: {msg}"),
         other => format!("{step}: {other}"),
     };
-    super::katulong_proxy::sanitize_upstream_body(&raw)
+    super::upstream::sanitize_upstream_body(&raw)
 }
 
 /// Pattern matching Claude Code's "ready for input" signal. We
@@ -1985,19 +1977,14 @@ async fn fetch_pane_scrollback(
     host: &sipag_core::hosts::Host,
     session_id: &str,
 ) -> String {
-    let url = sipag_core::katulong::output_lines_url(host.base_url(), session_id, 80);
-    let resp = match state.http.get(&url).bearer_auth(&host.api_key).send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => return String::new(),
-    };
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return String::new(),
-    };
-    body.get("data")
-        .and_then(|d| d.as_str())
-        .unwrap_or("")
-        .to_string()
+    // Drop-on-error semantics preserved from the original — the gate
+    // treats "no signal" as a conservative fallback (parks the
+    // dispatch). The async client adds a 1 MiB body cap on the way.
+    state
+        .katulong_for(host)
+        .session_output_lines(session_id, 80)
+        .await
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]

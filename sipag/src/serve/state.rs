@@ -1,6 +1,7 @@
 use crate::serve::categorize::ProposalState;
+use katulong_client::KatulongAsyncClient;
 use sipag_core::auth::{AuthStore, WebAuthnService};
-use sipag_core::hosts::HostsConfig;
+use sipag_core::hosts::{Host, HostsConfig};
 use sipag_core::pubsub::Broker;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,4 +38,20 @@ pub struct AppState {
     /// render time when the underlying summary hash changes; never
     /// persisted (proposals are advisory render-time hints).
     pub kr_proposals: Arc<RwLock<HashMap<String, ProposalState>>>,
+}
+
+impl AppState {
+    /// Materialize a [`KatulongAsyncClient`] bound to `host`, sharing
+    /// the AppState's reqwest::Client (so connection pool + UA +
+    /// timeout configuration are uniform across all outbound HTTP).
+    ///
+    /// Cheap to call per request — `reqwest::Client` is Arc-internal,
+    /// so `clone()` is a refcount bump.
+    pub fn katulong_for(&self, host: &Host) -> KatulongAsyncClient {
+        KatulongAsyncClient::with_client(
+            self.http.clone(),
+            host.base_url().to_string(),
+            host.api_key.clone(),
+        )
+    }
 }

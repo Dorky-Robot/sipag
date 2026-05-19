@@ -16,11 +16,11 @@ mod devices;
 mod error;
 mod htmx;
 mod insights;
-mod katulong_proxy;
 mod login;
 mod observers;
 mod state;
 mod tokens;
+mod upstream;
 mod workers;
 mod ws;
 
