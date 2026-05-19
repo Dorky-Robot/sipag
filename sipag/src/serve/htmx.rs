@@ -965,10 +965,21 @@ async fn observation_transcript_handler(
                 div.transcript-empty.subtle { "transcript too large to render" }
             });
         }
+        Err(katulong_client::KatulongAsyncError::BadSessionId(id)) => {
+            // Trust-boundary violation: katulong returned an id that
+            // didn't pass the validation gate. Log loud — this is
+            // exactly the kind of thing operator alerting wants to
+            // pick up (a compromised or misbehaving katulong is
+            // attempting injection via the id field).
+            warn!(host = %obs.host, bad_id = %id, "trust-boundary: katulong returned invalid session id during transcript fetch");
+            return html_response(maud::html! {
+                div.transcript-empty.subtle { "transcript fetch rejected: invalid identifier from upstream" }
+            });
+        }
         Err(e) => {
-            // Transport / JSON / id-validation errors. Detail in log;
-            // generic message in UI (e.to_string() can carry the
-            // tunnel hostname for transport errors).
+            // Transport / JSON errors. Detail in log; generic message
+            // in UI (e.to_string() can carry the tunnel hostname for
+            // transport errors).
             warn!(host = %obs.host, error = %e, "transcript fetch failed");
             return html_response(maud::html! {
                 div.transcript-empty.subtle {
@@ -1046,6 +1057,11 @@ async fn claude_respond_handler(
         return err_response(StatusCode::BAD_REQUEST, "invalid uuid");
     }
     let url = sipag_core::katulong::claude_respond_url(host.base_url(), &uuid);
+    // Direct reqwest POST (claude-respond doesn't have a method on
+    // `KatulongAsyncClient` because modules.md §9 #7 retires this
+    // endpoint entirely). What this rewrite adds: a body cap on BOTH
+    // the success and error paths via `bytes_capped`. Previously the
+    // error path's `resp.text()` was unbounded — sipag #527 leak.
     let resp = match state
         .http
         .post(&url)
@@ -1063,9 +1079,26 @@ async fn claude_respond_handler(
             );
         }
     };
-    if !resp.status().is_success() {
-        let st = resp.status();
-        let raw = resp.text().await.unwrap_or_default();
+    let st = resp.status();
+    let bytes = match katulong_client::bytes_capped(resp, katulong_client::DEFAULT_BODY_CAP).await {
+        Ok(b) => b,
+        Err(katulong_client::KatulongAsyncError::BodyTooLarge { cap }) => {
+            warn!(host = %host.id, cap, "POST /api/claude/respond: body exceeded cap (sipag #527 defense)");
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("respond on {}: upstream response too large", host.id),
+            );
+        }
+        Err(e) => {
+            warn!(host = %host.id, error = %e, "POST /api/claude/respond: read body failed");
+            return err_response(
+                StatusCode::BAD_GATEWAY,
+                format!("respond on {}: read body failed", host.id),
+            );
+        }
+    };
+    if !st.is_success() {
+        let raw = String::from_utf8_lossy(&bytes);
         warn!(host = %host.id, status = %st, body = %raw, "POST /api/claude/respond returned non-2xx");
         let txt = super::upstream::sanitize_upstream_body(&raw);
         return err_response(
@@ -1587,7 +1620,6 @@ async fn verify_and_heal_dispatch(
     const ITERATION_INTERVAL: Duration = Duration::from_secs(3);
     const MAX_GEMMA_FAILURES: u8 = 3;
 
-    let exec_url = sipag_core::katulong::exec_url(host.base_url(), &session_id);
     let dir = load_dir();
 
     // Load project so gemma sees the full status menu (each with its
@@ -1703,13 +1735,25 @@ async fn verify_and_heal_dispatch(
                     bytes = keys.len(),
                     "nudge loop: sending keystrokes"
                 );
-                let _ = state
-                    .http
-                    .post(&exec_url)
-                    .bearer_auth(&host.api_key)
-                    .json(&serde_json::json!({ "input": keys }))
-                    .send()
-                    .await;
+                // Body-capped exec via the async client (sipag #527).
+                // Previously this was raw reqwest with no cap and
+                // discarded result — meaning a misbehaving katulong's
+                // response was invisible to operators AND the response
+                // body was unbounded. Now we log failures and the body
+                // is capped at DEFAULT_BODY_CAP.
+                if let Err(e) = state
+                    .katulong_for(&host)
+                    .exec_session(&session_id, keys)
+                    .await
+                {
+                    warn!(
+                        host = %host.id,
+                        session_id = %session_id,
+                        iteration,
+                        error = %e,
+                        "nudge loop: exec_session failed"
+                    );
+                }
             }
         }
 

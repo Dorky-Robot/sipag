@@ -462,17 +462,22 @@ fn load_objectives_blocking(
 }
 
 async fn fetch_sessions_full(state: &AppState, host: &Host) -> anyhow::Result<Vec<RemoteSession>> {
-    let url = format!("{}/sessions", host.base_url());
-    let resp = state
-        .http
-        .get(&url)
-        .bearer_auth(&host.api_key)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Ok(Vec::new());
-    }
-    Ok(resp.json().await.unwrap_or_default())
+    // Body-capped GET /sessions via the async client (sipag #527).
+    // `list_sessions` returns the strongly-typed `TmuxSession` shape;
+    // we project just the fields this board view cares about via the
+    // `RemoteSession` local struct. Drop-on-error semantics preserved
+    // — a misbehaving katulong returning oversized JSON now fails
+    // closed (Vec::new) instead of OOM'ing the process.
+    let url = sipag_core::katulong::sessions_url(host.base_url());
+    let body: Vec<RemoteSession> = match state
+        .katulong_for(host)
+        .get_capped(&url, katulong_client::DEFAULT_BODY_CAP)
+        .await
+    {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
+    Ok(body)
 }
 
 /// Subset of katulong's `/sessions` row that the board cares about.

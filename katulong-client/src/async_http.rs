@@ -160,17 +160,20 @@ impl KatulongAsyncClient {
             .await?;
         let status = resp.status();
         let bytes = bytes_capped(resp, DEFAULT_BODY_CAP).await?;
-        match status.as_u16() {
-            200 | 201 => {
-                let session: TmuxSession = serde_json::from_slice(&bytes)?;
-                session
-                    .validate_id()
-                    .map_err(|e| KatulongAsyncError::BadSessionId(e.to_string()))?;
-                Ok(session)
-            }
+        // Pick the session by HTTP code, then validate the id in ONE
+        // place at the bottom — same shape as the sync sibling
+        // `crate::http::KatulongClient::create_session`. Earlier this
+        // method only validated inside the 200/201 arm, which let the
+        // 409 fallback (list-and-find) accept upstream-supplied ids
+        // without checking them — a compromised katulong could then
+        // steer URL formatting in subsequent calls via
+        // `exec_url(host, id)` etc.
+        let session = match status.as_u16() {
+            200 | 201 => serde_json::from_slice::<TmuxSession>(&bytes)?,
             409 => {
-                // Already exists — fall back to list-and-find. Same
-                // recovery path as the sync sibling.
+                // Already exists — fall back to list-and-find. The
+                // returned session goes through the same validate_id
+                // gate below.
                 self.list_sessions()
                     .await?
                     .into_iter()
@@ -178,13 +181,19 @@ impl KatulongAsyncClient {
                     .ok_or_else(|| KatulongAsyncError::Http {
                         status: StatusCode::CONFLICT,
                         body: format!("session '{name}' returned 409 but list lookup missed it"),
-                    })
+                    })?
             }
-            _ => Err(KatulongAsyncError::Http {
-                status,
-                body: String::from_utf8_lossy(&bytes).trim().to_string(),
-            }),
-        }
+            _ => {
+                return Err(KatulongAsyncError::Http {
+                    status,
+                    body: String::from_utf8_lossy(&bytes).trim().to_string(),
+                });
+            }
+        };
+        session
+            .validate_id()
+            .map_err(|e| KatulongAsyncError::BadSessionId(e.to_string()))?;
+        Ok(session)
     }
 
     /// Create a fresh session with an opaque dispatch-shaped name.
@@ -480,5 +489,125 @@ mod tests {
         let c =
             KatulongAsyncClient::new("https://example.com/".to_string(), "k".to_string()).unwrap();
         assert_eq!(c.url(), "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn create_session_409_fallback_recovers_via_list() {
+        // Simulate "session already exists": POST /sessions → 409,
+        // GET /sessions → list with the same name. Pins the
+        // idempotent recovery path that the deleted katulong_proxy.rs
+        // used to implement separately. Validates the same shape as
+        // the sync sibling.
+        use axum::{routing::post, Json};
+        use serde_json::json;
+        let app = Router::new().route(
+            "/sessions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({ "error": "name exists" })),
+                )
+            })
+            .get(|| async {
+                Json(json!([
+                    { "id": "s_abc123", "name": "dispatch-1" }
+                ]))
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+
+        let client =
+            KatulongAsyncClient::new(format!("http://{addr}"), "test-key".to_string()).unwrap();
+        let session = client.create_session("dispatch-1").await.unwrap();
+        assert_eq!(session.id, "s_abc123");
+        assert_eq!(session.name, "dispatch-1");
+    }
+
+    #[tokio::test]
+    async fn create_session_409_fallback_rejects_bad_session_id() {
+        // Trust-boundary check: a compromised katulong returning an
+        // unsafe id via the 409 fallback path must NOT propagate that
+        // id back to the caller. The original implementation regressed
+        // this — it only validated ids on the 200/201 arm — which let
+        // path-traversal ids like "../etc/passwd" through. This test
+        // pins the fix.
+        use axum::{routing::post, Json};
+        use serde_json::json;
+        let app = Router::new().route(
+            "/sessions",
+            post(|| async {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(json!({ "error": "name exists" })),
+                )
+            })
+            .get(|| async {
+                Json(json!([
+                    { "id": "../evil", "name": "dispatch-1" }
+                ]))
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+
+        let client =
+            KatulongAsyncClient::new(format!("http://{addr}"), "test-key".to_string()).unwrap();
+        let err = client.create_session("dispatch-1").await.unwrap_err();
+        match err {
+            KatulongAsyncError::BadSessionId(id) => {
+                assert!(
+                    id.contains("../evil"),
+                    "BadSessionId should preserve offending id; got: {id}"
+                );
+            }
+            other => panic!("expected BadSessionId, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_bytes_capped_returns_status_content_type_and_bytes() {
+        // Transparent-passthrough path used by sipag's `proxy_get`.
+        // Verify: (a) returns upstream status verbatim, (b) extracts
+        // Content-Type, (c) returns the raw bytes (not deserialized).
+        let app = Router::new().route(
+            "/passthrough",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    r#"{"foo":"bar"}"#,
+                )
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+
+        let client =
+            KatulongAsyncClient::new(format!("http://{addr}"), "test-key".to_string()).unwrap();
+        let (status, content_type, bytes) = client
+            .get_bytes_capped(&format!("http://{addr}/passthrough"), DEFAULT_BODY_CAP)
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+        assert_eq!(&bytes[..], br#"{"foo":"bar"}"#);
+    }
+
+    #[tokio::test]
+    async fn get_bytes_capped_rejects_oversized_body() {
+        // Same #527 invariant on the bytes-passthrough path: a
+        // misbehaving upstream returning a too-large body must
+        // surface as BodyTooLarge, NOT silently truncate or OOM.
+        let body = vec![0u8; 2048];
+        let app = Router::new().route("/big", get(move || async move { body.clone() }));
+        let addr = spawn_test_server(app).await;
+
+        let client =
+            KatulongAsyncClient::new(format!("http://{addr}"), "test-key".to_string()).unwrap();
+        let err = client
+            .get_bytes_capped(&format!("http://{addr}/big"), 1024)
+            .await
+            .unwrap_err();
+        match err {
+            KatulongAsyncError::BodyTooLarge { cap } => assert_eq!(cap, 1024),
+            other => panic!("expected BodyTooLarge, got {other:?}"),
+        }
     }
 }
