@@ -115,6 +115,15 @@ pub struct WorktreeSpec {
     /// shell happened to land in after `setup_command` returned.
     /// Typically `katulong_client::worktree_path(project, task_id)`.
     ///
+    /// **Input contract:** `path` is interpolated into a POSIX shell
+    /// command (`cd <path> && ...`) without quoting. The caller is
+    /// responsible for passing a shell-safe path — same contract as
+    /// `setup_command`. `katulong_client::worktree_path` produces
+    /// `/work/<project>/.worktrees/task-<id>`, all alphanumeric +
+    /// hyphens + slashes, no quoting needed. A path containing
+    /// spaces, single quotes, or shell metacharacters would silently
+    /// break the launch.
+    ///
     /// (Pre-extraction, the agent's launch command was a one-shot
     /// `cd <path> && <role_command> -p '<prompt>'` via HTTP `/exec`;
     /// the new flow runs the setup over HTTP and launches the agent
@@ -131,7 +140,6 @@ pub struct WorktreeSpec {
 /// Steps fire in source-order; a failure short-circuits the rest.
 /// [`WaitEcho`](DispatchStep::WaitEcho) is best-effort — its
 /// failure is logged but does not abort the flow.
-///
 ///
 /// Session creation is the caller's responsibility — the gate +
 /// state-pinning logic in the web UI needs to run after the session
