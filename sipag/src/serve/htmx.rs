@@ -1320,9 +1320,21 @@ async fn run_sipag_dispatch(
     let worktree = if role_worktree {
         Some(WorktreeSpec {
             setup_command: sipag_core::katulong::worktree_command(&project_name, task_id),
+            path: sipag_core::katulong::worktree_path(&project_name, task_id),
         })
     } else {
         None
+    };
+
+    // Initialize `last_step` to the first step the dispatch will
+    // attempt — that way a failure *before* any callback fires (e.g.
+    // `KatulongAsyncClient::new` returning a `ClientSetup` error on
+    // the worktree branch) gets attributed to the right step rather
+    // than to `Attach`.
+    let mut last_step = if worktree.is_some() {
+        DispatchStep::WorktreeSetup
+    } else {
+        DispatchStep::Attach
     };
 
     let input = DispatchInput {
@@ -1338,7 +1350,6 @@ async fn run_sipag_dispatch(
     // the right index. `WaitEcho` is best-effort and is never the
     // final step on failure — but we still observe it transitioning
     // through.
-    let mut last_step = DispatchStep::Attach;
     let result = sipag_dispatch::dispatch(remote, &session, input, |step| {
         last_step = step;
     })
@@ -1914,5 +1925,52 @@ mod dispatch_helpers_tests {
             std::env::remove_var("SIPAG_DISPATCH_V2");
         }
         assert!(!dispatch_v2_enabled());
+    }
+
+    #[test]
+    fn step_to_legacy_idx_matches_pre_extraction_wire_shape() {
+        // Pre-extraction the v2 dispatch published step indices 0-4
+        // on the `dispatch.outcome` broker topic. The post-extraction
+        // `DispatchStep` enum is richer (WorktreeSetup is new; Attach
+        // and Launch are split), but operator tooling keys on the
+        // 0-4 numbering — preserve it.
+        //
+        // This test ALSO serves as the canary for the planned
+        // retirement: when modules.md §9 #11 lands and operators
+        // switch to a typed step discriminator, this whole mapping
+        // can disappear. A regression in the table while it's still
+        // load-bearing would silently shift every dispatch event.
+        assert_eq!(step_to_legacy_idx(DispatchStep::WorktreeSetup), 0);
+        assert_eq!(step_to_legacy_idx(DispatchStep::Attach), 0);
+        assert_eq!(step_to_legacy_idx(DispatchStep::Launch), 0);
+        assert_eq!(step_to_legacy_idx(DispatchStep::WaitTuiReady), 1);
+        assert_eq!(step_to_legacy_idx(DispatchStep::PastePrompt), 2);
+        assert_eq!(step_to_legacy_idx(DispatchStep::WaitEcho), 2);
+        assert_eq!(step_to_legacy_idx(DispatchStep::Submit), 3);
+        assert_eq!(step_to_legacy_idx(DispatchStep::WaitProcessing), 4);
+    }
+
+    #[test]
+    fn step_to_legacy_name_covers_all_variants() {
+        // Operator-facing reason strings. A label edit would shift
+        // grep-driven operator tooling; pin them. Same retirement
+        // schedule as `step_to_legacy_idx_matches_pre_extraction_wire_shape`.
+        assert_eq!(
+            step_to_legacy_name(DispatchStep::WorktreeSetup),
+            "worktree setup"
+        );
+        assert_eq!(step_to_legacy_name(DispatchStep::Attach), "attach open");
+        assert_eq!(step_to_legacy_name(DispatchStep::Launch), "launch input");
+        assert_eq!(
+            step_to_legacy_name(DispatchStep::WaitTuiReady),
+            "TUI ready wait"
+        );
+        assert_eq!(step_to_legacy_name(DispatchStep::PastePrompt), "paste");
+        assert_eq!(step_to_legacy_name(DispatchStep::WaitEcho), "echo wait");
+        assert_eq!(step_to_legacy_name(DispatchStep::Submit), "submit");
+        assert_eq!(
+            step_to_legacy_name(DispatchStep::WaitProcessing),
+            "processing wait"
+        );
     }
 }

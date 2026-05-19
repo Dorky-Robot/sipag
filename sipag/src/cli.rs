@@ -287,6 +287,7 @@ fn run_dispatch_task(
     let worktree = if role.worktree {
         Some(sipag_dispatch::WorktreeSpec {
             setup_command: katulong::worktree_command(&project_name, task_id),
+            path: katulong::worktree_path(&project_name, task_id),
         })
     } else {
         None

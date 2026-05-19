@@ -99,8 +99,9 @@ pub struct DispatchInput {
 
 /// Spec for the optional worktree setup step. Pulled into its own
 /// type so callers can construct it from
-/// `katulong_client::worktree_command(project, task_id)` or a custom
-/// shell snippet of their choice.
+/// `katulong_client::worktree_command(project, task_id)` +
+/// `katulong_client::worktree_path(project, task_id)` or a custom
+/// shell snippet + path pair of their choice.
 #[derive(Debug, Clone)]
 pub struct WorktreeSpec {
     /// Shell command run via HTTP `/exec`. Example:
@@ -108,6 +109,19 @@ pub struct WorktreeSpec {
     /// The command is run inside the katulong-managed shell, so it
     /// inherits whatever cwd / env the session started with.
     pub setup_command: String,
+    /// Working directory the agent should run in. Used to prepend
+    /// `cd <path> && ` to the launch keystroke so the agent starts
+    /// inside the freshly-created worktree, not in whatever cwd the
+    /// shell happened to land in after `setup_command` returned.
+    /// Typically `katulong_client::worktree_path(project, task_id)`.
+    ///
+    /// (Pre-extraction, the agent's launch command was a one-shot
+    /// `cd <path> && <role_command> -p '<prompt>'` via HTTP `/exec`;
+    /// the new flow runs the setup over HTTP and launches the agent
+    /// over WS attach, so the cd has to be threaded through
+    /// explicitly. Forgetting it lets the agent run at the project
+    /// root, which silently breaks worktree isolation.)
+    pub path: String,
 }
 
 /// One observable step in the dispatch flow. Surfaced to the caller
@@ -266,9 +280,18 @@ async fn run_attach_flow<F: FnMut(DispatchStep)>(
     // `WaitFrom::FromOffset`.
     let pre_launch_offset = attach.stripped_offset().await;
 
-    // Step 4: launch.
+    // Step 4: launch. When a worktree spec is set, prepend
+    // `cd <path> && ` so the agent starts inside the worktree, not
+    // wherever the session's shell landed after the setup command.
+    // (The setup command itself only creates the worktree dir; it
+    // doesn't necessarily cd into it. Forgetting this prepend
+    // silently regresses worktree isolation — the agent edits the
+    // wrong tree.)
     on_step(DispatchStep::Launch);
-    let launch = format!("{}\r", input.role_command);
+    let launch = match input.worktree.as_ref() {
+        Some(wt) => format!("cd {} && {}\r", wt.path, input.role_command),
+        None => format!("{}\r", input.role_command),
+    };
     attach.input(&launch).await.map_err(DispatchError::Launch)?;
 
     // Step 5: wait for TUI to render.
@@ -410,7 +433,11 @@ mod tests {
         // A very long title shouldn't anchor on the whole thing;
         // 20 chars is enough to be distinctive but short enough to
         // round-trip through the agent's input box quickly.
-        let title = "Some really really really really really long title that goes on";
+        // Asserts both the structural cap AND the behavioral
+        // semantics — the first 20 chars match, but the suffix does
+        // NOT, so a refactor that silently changes `take(20)` to
+        // `take(0)` or `take(100)` is caught.
+        let title = "abcdefghijklmnopqrstuvwxyz"; // 26 chars
         let re = paste_echo_regex(title).expect("compiles");
         let pattern = re.as_str();
         // The pattern is a regex-escaped prefix; the source prefix
@@ -420,6 +447,19 @@ mod tests {
             pattern.len() <= 40,
             "pattern unexpectedly long: {} chars: {pattern}",
             pattern.len()
+        );
+        // First 20 chars match.
+        assert!(
+            re.is_match("...abcdefghijklmnopqrst..."),
+            "expected match on first-20 prefix: {pattern}"
+        );
+        // The trailing suffix `uvwxyz` does NOT match on its own —
+        // pins the cap (a refactor changing 20→0 would silently
+        // produce a vacuous regex; one changing 20→100 would
+        // anchor on the full title).
+        assert!(
+            !re.is_match("uvwxyz"),
+            "expected no match on trailing suffix: {pattern}"
         );
     }
 
@@ -466,6 +506,7 @@ mod tests {
     fn worktree_spec_is_clone() {
         let w = WorktreeSpec {
             setup_command: "cd /tmp && true".into(),
+            path: "/tmp".into(),
         };
         let _clone = w.clone();
     }
