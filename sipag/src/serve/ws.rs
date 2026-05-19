@@ -33,7 +33,7 @@ use axum::{
     Router,
 };
 use serde::Deserialize;
-use sipag_core::pubsub::{Broker, Envelope};
+use sipag_pubsub::{Broker, Envelope};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;

@@ -338,6 +338,8 @@ DDD principle: when two contexts have different words for the same shape, the bo
 
 ## 9. Extraction queue — three phases (structural language → bug-fix-driven → cleanup)
 
+> See [`extraction-plan.md`](extraction-plan.md) for the **crate-shaped view** of this same work — which lego blocks come out, in what order, and what each one owns. This section keeps the capability sequencing; that doc keeps the module boundaries.
+
 **Sequencing principle.** When a refactor combines vocabulary changes with behavior changes, the structural language lands *first*. Every behavior PR that ships in the old vocabulary entrenches it and inflates the eventual rename. Language-first means subsequent bug-fix and extraction PRs naturally write the new vocabulary, so the codebase migrates organically instead of needing a Big Bang rewrite.
 
 The trade-off: Phase 1 PRs don't close open bugs. They earn their keep by making Phase 2 PRs smaller and self-consistent.

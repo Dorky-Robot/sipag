@@ -2794,6 +2794,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sipag-core",
+ "sipag-pubsub",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -2820,6 +2821,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-pubsub",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
@@ -2829,6 +2831,18 @@ dependencies = [
  "url",
  "uuid",
  "webauthn-rs",
+]
+
+[[package]]
+name = "sipag-pubsub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
