@@ -62,10 +62,10 @@ The spike → observe → derive loop per [`project-sipag-work-model-experimenta
 
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
-| **Dispatch a task to a katulong session** | ✅ | `sipag/src/cli.rs::run_dispatch_task`, `sipag/src/serve/htmx.rs` (web path) | Sync CLI path works; web path is the 🔴 #527 surface (closes in Phase 2 #6). |
-| **Auto-create worktree** for the dispatched task | ✅ | `katulong-client/src/http.rs:523` (`worktree_command`) | Wired via role's `worktree = true`. Helper currently in the wire crate; lifted to `act` sub-module in Phase 2 #12. |
+| **Dispatch a task to a katulong session** | ✅ | `sipag-dispatch/src/lib.rs::dispatch` (callers: `sipag/src/cli.rs::run_dispatch_task` and `sipag/src/serve/htmx.rs::run_sipag_dispatch`) | One unified async function for both CLI and web paths. Closed Phase 2 #12 in PR #547. Body cap on every HTTP leg via `katulong_client::KatulongAsyncClient` (closed Phase 2 #6 / sipag #527 in PR #546). |
+| **Auto-create worktree** for the dispatched task | ✅ | `sipag-dispatch/src/lib.rs::WorktreeSpec` (uses `katulong-client::worktree_command` helper) | Wired via role's `worktree = true`. Web UI v2 path used to skip this — fixed by Phase 2 #12 (PR #547). |
 | **Generate unique dispatch session name** (`sipag-d-<hex>`) | ✅ | `katulong-client/src/http.rs:494` | Per-dispatch tile so the auto-summarizer can rename without breaking back-pointers. |
-| **Build agent launch command** (`cd <wt> && <role-cmd> -p '…'`) with shell-quote-escape | ✅ | `katulong-client/src/http.rs:533` | Single-quote escape verified by 3 unit tests. |
+| **Build agent launch command** (`cd <wt> && <role-cmd> -p '…'`) with shell-quote-escape | ✅ | `katulong-client/src/http.rs:533` | Single-quote escape verified by 3 unit tests. Still used by the TUI; CLI + web paths went through `sipag-dispatch` instead and paste the prompt over WS attach. |
 | **Spin up persistent role tiles** (`sipag up`) | ✅ | `sipag/src/cli.rs::run_up` | Project-level "warm the sessions" command. |
 | ~~Trial lifecycle tracking~~ | 🚫 | n/a | Removed from roadmap 2026-05-17. State-machine framing was wrong (kanban-shaped despite the rename). The event log + recorded actions replace per-trial state tracking. See `[[feedback-strict-layer-coupling]]` and §3 reframe in modules.md. |
 
@@ -82,7 +82,7 @@ The spike → observe → derive loop per [`project-sipag-work-model-experimenta
 | **Detect "stuck"** (silence timeout) | 🔴 | not implemented | Subscriber-side derived signal (threshold is consumer policy); lands with Phase 2 #10. |
 | **Typed `RecordedAction` value object** for what gemma4 derived | 🔴 | not implemented | Phase 1 #3 (reframed). Replaces the previous `Outcome` row — `Outcome` was the state-machine framing. `RecordedAction` is just "what gemma4 emitted + source-event-window reference," append-only. |
 | **Cross-host observation** (subscribe to all mesh peers) | 🔴 | not implemented | Phase 2 #7 SSE subscriber needs N-stream fan-out. |
-| **Recovery loop** (`verify_and_heal_dispatch` — LLM proposes keystrokes) | ⛔ | `sipag/src/serve/htmx.rs:1577` | Legacy; closes #528 by *deletion* (Phase 2 #11) when attach client owns keystrokes. |
+| **Recovery loop** (`verify_and_heal_dispatch` — LLM proposes keystrokes) | ⛔ | `sipag/src/serve/htmx.rs::verify_and_heal_dispatch` | Legacy; closes #528 by *deletion* (Phase 2 #11) when attach client owns keystrokes. The `sipag-dispatch` extraction (PR #547) moved the v2 attach-driven dispatch action out of htmx.rs into its own crate — this legacy fallback is the last remaining LLM→PTY seam, awaiting retirement. |
 
 ### Derive — what gemma4 lens-workers derive from the corpus
 
@@ -119,13 +119,13 @@ The mesh of katulong instances and ollama hosts sipag talks to.
 | **Per-host API key** (server-side only, never sent to browser) | ✅ | `sipag-core/src/hosts.rs` | |
 | **katulong WS attach** (full duplex, browser-equivalent) | ✅ | `katulong-client/src/attach.rs` | Typed errors, RAII close, redacted Debug — well-formed SDK. See modules.md §1 "wire clients." |
 | **katulong HTTP** (sync, curl-shell-out) | 🟡 | `katulong-client/src/http.rs::KatulongClient` | CLI/TUI use this. Async sibling needed for web path (Phase 2 #6). |
-| **katulong HTTP** (async, reqwest, body-cap) | 🔴 | not implemented | **Phase 2 #6 — closes sipag #527**. |
+| **katulong HTTP** (async, reqwest, body-cap) | ✅ | `katulong-client/src/async_http.rs::KatulongAsyncClient` | Landed in PR #546. Per-call streaming body cap (`DEFAULT_BODY_CAP=1MiB`, `TRANSCRIPT_BODY_CAP=10MiB`) aborts before the full body buffers. Used by sipag's serve layer + `sipag-dispatch`. |
 | **katulong SSE subscription** | 🔴 | only `sub_url()` URL builder exists | **Phase 2 #7**. Built against today's `claude/<uuid>`; gains `sessions/<id>/*` when upstream issues land. |
 | **Cross-host federation of pub/sub** | 🔴 | each katulong is its own broker | Per upstream research (modules.md §3): sipag fans out N SSE subscriptions. |
-| **Ollama HTTP client** | 🟡 | `sipag-core/src/llm.rs` (300 LOC) | Promote to `ollama-client` crate with typed responses (Phase 2 #8 — sets up #528 closure). |
+| **LLM access via ollama-bridge** (queue+auth daemon) | 🟡 | `sipag-core/src/llm.rs` (300 LOC) talks to ollama directly today | **Phase 2 #8** wraps the existing [`dorky-robot/ollama-bridge`](https://github.com/Dorky-Robot/ollama-bridge) (Elixir queue+auth daemon) in a new `ollama-bridge-client` Rust crate. Enqueue + poll wire shape (not sync chat), bearer auth, sha256-based 60s dedup. Sipag never talks to ollama directly. See `[[reference-ollama-bridge]]`. |
 | **Claude subprocess client** | 🟧 | inline in deprecated `sipag-core/src/refine.rs:181-516` | If Experimentation's `act` needs to spawn claude, lift the stream-json parser deliberately. |
 | ~~Claude transcript proxy~~ | 🔴 | `sipag/src/serve/htmx.rs::observation_transcript_handler` + `katulong-client::http::claude_transcript_url` | **Demeter violation** — sipag parses Claude JSONL through katulong proxy. Retires when SSE subscriber (Phase 2 #7) lets sipag consume katulong's `claude/<uuid>` topic events instead. See `[[feedback-strict-layer-coupling]]`. |
-| **Response-size cap** at wire boundary (DoS defense) | 🔴 | absent | The #527 vector. Lands at wire-client level in Phase 2 #6. |
+| **Response-size cap** at wire boundary (DoS defense) | ✅ | `katulong-client/src/async_http.rs::bytes_capped` | Closed sipag #527 in PR #546. Streaming cap aborts before the full body is buffered; upper memory bound is `cap + max_chunk_size`. |
 
 ---
 
@@ -166,7 +166,7 @@ How a human (or agent) actually drives sipag.
 | Concern | Status | Notes |
 |---|---|---|
 | **File-backed durable state** at `~/.sipag/` | ✅ | TOML for board, JSONL for pub/sub log, markdown+frontmatter for the deprecated feature store. |
-| **Internal pub/sub broker** | ✅ | `sipag-core/src/pubsub.rs` — 16+ publish sites in `serve/`. Load-bearing. Future decision: keep in-process or route into katulong's broker (modules.md §10). |
+| **Internal pub/sub broker** | ✅ | `sipag-pubsub` workspace crate (extracted from `sipag-core/src/pubsub.rs` in PR #545) — 16+ publish sites in `serve/`. Load-bearing. Future decision: keep in-process or route into katulong's broker (modules.md §10). |
 | **Tracing / logging** | ✅ | `tracing` crate; not in scope to change. |
 | **Error type strategy** | 🟡 | Mix of typed (`thiserror` in attach + auth) and `anyhow` (sipag-side glue). Standardize "typed at boundaries" per modules.md §7. |
 | **Pre-commit + pre-push hooks** | ✅ | gitleaks, typos, cargo deny, cargo build --release, fmt, clippy, shellcheck (pre-commit); cargo test --workspace, cargo machete (pre-push). |
@@ -226,3 +226,5 @@ Each absence is a feature. Don't accidentally build these.
 - 2026-05-17 — review-fix round 1 on PR #538 — corrected stale "Experimentation `iterate` policies" reference in §1 KR-acceptance row to point at the gemma4-bridge recording API; fixed `worktree_command` line number (513→523); tightened "How to use" rubric with explicit doc-rot anti-pattern + carve-out for retired-concept tombstones. (Companion: modules.md §1 now forward-links here.)
 - 2026-05-17 — **§1 + §2 reframed for the lens-worker abstraction** (third pass on Experimentation; see modules.md §3 reframe). §1 Steering gained a "dual role" note — every Steering entry IS also a lens definition. §2 Experimentation's "Record" sub-section renamed to "Derive" (Claude is the iterator; sipag derives). Rows: corpus, LensWorker runtime, bridge as first worker, corpus-search tools, four verbs (observe + 3 structural), project-meta lenses, ad-hoc lenses, plus reframed gate/nudge/categorize as early lens-worker prototypes. Added 🚫 row for the per-classification recording verbs (collapsed into free-form `observe`).
 - 2026-05-18 — added **per-lens model selection** row to §2 Derive. Driven by the practical observation (running the live serve with gemma4:31b for everything) that high-frequency lens-workers want a fast model and derivation workers can afford a strong one. The `LensWorker` runtime row updated to include `ModelChoice` as part of the spec. See modules.md §3 + §9 #3 + #8 for full details.
+- 2026-05-18 — §3 Topology rows for body-cap + async HTTP flipped to ✅ (PR #546 closed sipag #527). §6 internal pub/sub broker row updated to reflect the `sipag-pubsub` extraction (PR #545).
+- 2026-05-19 — §2 Experimentation `Act` rows updated for the `sipag-dispatch` extraction (PR #547 — Phase 2 #12). Dispatch action now lives in its own workspace crate; web UI + CLI both call the same function. Worktree setup parity restored on the web UI path. §3 Topology row for ollama renamed from "Ollama HTTP client" to "LLM access via ollama-bridge" — the integration point is the [`dorky-robot/ollama-bridge`](https://github.com/Dorky-Robot/ollama-bridge) Elixir daemon (queue+auth), not direct ollama HTTP. See `[[reference-ollama-bridge]]`.
