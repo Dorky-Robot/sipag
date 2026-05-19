@@ -27,6 +27,7 @@
 //! The submodules (`http`, `attach`, `protocol`) remain accessible
 //! for callers that need the lower-level types.
 
+pub mod async_http;
 pub mod attach;
 pub mod http;
 pub mod protocol;
@@ -51,4 +52,12 @@ pub use http::{
 // reach into `attach::` for the happy path.
 pub use attach::{
     AttachError, AttachResult, KatulongAttach, KatulongAttachClient, KeyName, RegexMatch, WaitFrom,
+};
+
+// Re-export the async HTTP client at the crate root. Sibling of
+// `KatulongClient` (sync) and `KatulongAttachClient` (WS); pair them
+// based on what the caller needs (see async_http.rs module docs).
+pub use async_http::{
+    bytes_capped, AsyncResult, KatulongAsyncClient, KatulongAsyncError, DEFAULT_BODY_CAP,
+    TRANSCRIPT_BODY_CAP,
 };

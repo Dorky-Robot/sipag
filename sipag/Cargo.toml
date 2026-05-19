@@ -15,6 +15,11 @@ sipag-core = { path = "../sipag-core" }
 # re-exports it at the old `sipag_core::pubsub::…` path for back-compat,
 # but new code in the binary imports from `sipag_pubsub` directly.
 sipag-pubsub = { path = "../sipag-pubsub" }
+# Direct dependency on katulong-client — sipag-core re-exports it at
+# `sipag_core::katulong::…` for back-compat, but new code in the
+# binary imports `katulong_client::…` directly. Used for the async
+# HTTP client (`KatulongAsyncClient`) introduced for #527.
+katulong-client = { path = "../katulong-client", default-features = false }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
