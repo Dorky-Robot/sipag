@@ -7,7 +7,7 @@
 use crate::serve::workers::{publish_progress, ItemKind, Worker, WorkerCtx, WorkerItem};
 use anyhow::Result;
 use sipag_core::llm::{chat, env_host, ChatMessage, ChatOptions};
-use sipag_core::pubsub::Envelope;
+use sipag_pubsub::Envelope;
 
 const WORKER_NAME: &str = "expand";
 

@@ -136,6 +136,7 @@ Now that you have the narrative spine, here's where each supporting doc fits:
 | [`narrative.md`](narrative.md) | **You are here.** The product story; the spine everything else hangs on. |
 | [`../VISION.md`](../VISION.md) | The strategic principles — why this shape, what we refuse to be |
 | [`modules.md`](modules.md) | The architecture — DDD bounded contexts, lens-worker abstraction, phase queue |
+| [`extraction-plan.md`](extraction-plan.md) | The crate-shaped view of the same work — which lego blocks come out, in what order |
 | [`feature-matrix.md`](feature-matrix.md) | The capability scorecard — what's shipped, what's gapped, what's deliberately not in scope |
 | [`getting-started.md`](getting-started.md) | The tactical how-to — install, register a project, dispatch a task |
 | [`cli-reference.md`](cli-reference.md) | Every command + flag |

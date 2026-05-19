@@ -31,7 +31,7 @@ use axum::Router;
 use sipag_core::auth::{auth_state_path, AuthStore, WebAuthnService};
 use sipag_core::config::default_sipag_dir;
 use sipag_core::hosts::{default_hosts_path, HostsConfig};
-use sipag_core::pubsub::Broker;
+use sipag_pubsub::Broker;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;

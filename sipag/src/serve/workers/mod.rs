@@ -20,7 +20,7 @@ pub mod scheduler;
 
 use crate::serve::state::AppState;
 use anyhow::Result;
-use sipag_core::pubsub::Broker;
+use sipag_pubsub::Broker;
 use std::sync::Arc;
 
 /// Identifies an in-flight item so the scheduler doesn't dispatch the

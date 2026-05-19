@@ -1,7 +1,7 @@
 use crate::serve::categorize::ProposalState;
 use sipag_core::auth::{AuthStore, WebAuthnService};
 use sipag_core::hosts::HostsConfig;
-use sipag_core::pubsub::Broker;
+use sipag_pubsub::Broker;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
