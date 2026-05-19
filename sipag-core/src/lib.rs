@@ -30,7 +30,12 @@ pub mod hosts;
 pub use katulong_client as katulong;
 pub mod llm;
 pub mod nudge;
-pub mod pubsub;
+/// File-backed durable pub/sub broker. Extracted into its own workspace
+/// crate (`sipag-pubsub`) so it can be developed and tested in
+/// isolation. Re-exported here so existing `sipag_core::pubsub::…`
+/// imports keep compiling during the transition. Direct
+/// `sipag_pubsub::…` imports are preferred for new code.
+pub use sipag_pubsub as pubsub;
 /// ⛔ Deprecated 2026-05-17. Companion to [`feature`] — the batch
 /// refiner that turns raw features into actionable tickets via a
 /// `claude` subprocess. Replaced by the Experimentation context. Source

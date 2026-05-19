@@ -11,6 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 sipag-core = { path = "../sipag-core" }
+# Direct dependency on the extracted pubsub crate. sipag-core still
+# re-exports it at the old `sipag_core::pubsub::…` path for back-compat,
+# but new code in the binary imports from `sipag_pubsub` directly.
+sipag-pubsub = { path = "../sipag-pubsub" }
 # Direct dependency on katulong-client — sipag-core re-exports it at
 # `sipag_core::katulong::…` for back-compat, but new code in the
 # binary imports `katulong_client::…` directly. Used for the async
