@@ -243,9 +243,13 @@ fn run_dispatch_task(
     })?;
     let dispatchable_name = dispatchable.name.clone();
 
-    // Connect to katulong.
-    let client = katulong::KatulongClient::from_remote_json()
+    // Connect to katulong. Load the remote config once — used to
+    // build the sync client (for gate output read + session create)
+    // AND passed to `sipag_dispatch::dispatch` (which builds its own
+    // async clients internally — see `sipag-dispatch` crate docs).
+    let remote = katulong::RemoteConfig::load()
         .context("Cannot connect to katulong — is ~/.katulong/remote.json configured?")?;
+    let client = katulong::KatulongClient::new(remote.url.clone(), remote.api_key.clone());
 
     let session_name = katulong::session_name(&project_name, role_name);
 
@@ -271,23 +275,32 @@ fn run_dispatch_task(
         return Ok(());
     }
 
-    // 3. If role uses worktrees, set one up for this task.
-    if role.worktree {
-        let wt_cmd = katulong::worktree_command(&project_name, task_id);
-        println!("Creating worktree for task #{task_id}...");
-        client.exec_session(&session.id, &wt_cmd)?;
-    }
-
-    // 4. Exec the agent command.
-    let agent_cmd = katulong::agent_command(
-        &project_name,
+    // 3 + 4. Run the dispatch action via the sipag-dispatch crate.
+    //    The crate handles worktree setup (HTTP `/exec`) and the WS
+    //    attach + launch + paste + submit + processing-wait flow.
+    //    Wrapped in a one-shot tokio runtime — same pattern as
+    //    `gate_classify` — so the CLI stays sync-shaped at the top
+    //    level. The CLI gets the same WS-attach orchestration the
+    //    web UI uses; previously this path was raw HTTP `/exec` and
+    //    couldn't see when the agent's TUI was actually ready.
+    let prompt = format!("Work on task #{task_id}: {}", task.title);
+    let worktree = if role.worktree {
+        Some(sipag_dispatch::WorktreeSpec {
+            setup_command: katulong::worktree_command(&project_name, task_id),
+        })
+    } else {
+        None
+    };
+    let input = sipag_dispatch::DispatchInput {
         task_id,
-        &task.title,
-        &role.command,
-        role.worktree,
-    );
+        project_name: project_name.clone(),
+        task_title: task.title.clone(),
+        role_command: role.command.clone(),
+        prompt,
+        worktree,
+    };
     println!("Launching agent for task #{task_id}: {}", task.title);
-    client.exec_session(&session.id, &agent_cmd)?;
+    run_sipag_dispatch_cli(remote, session.clone(), input)?;
 
     // 5. Move task to in-progress, clearing any prior reason /
     //    human_action (e.g. from a previous parked dispatch that the
@@ -309,6 +322,44 @@ fn run_dispatch_task(
     println!();
     println!("Monitor at: {} (session: {session_name})", client.url());
 
+    Ok(())
+}
+
+/// Run `sipag_dispatch::dispatch` inside a one-shot tokio runtime.
+/// Same pattern as [`gate_classify`] — the rest of the CLI is sync;
+/// only the WS attach flow needs async. Building a current-thread
+/// runtime per dispatch is cheap relative to the agent launch latency
+/// and keeps the rest of the codepath synchronous.
+fn run_sipag_dispatch_cli(
+    remote: katulong::RemoteConfig,
+    session: katulong::TmuxSession,
+    input: sipag_dispatch::DispatchInput,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for sipag-dispatch")?;
+    rt.block_on(async {
+        sipag_dispatch::dispatch(remote, &session, input, |step| {
+            // CLI step observer: a single line per phase transition
+            // so the user sees forward progress. Matches the spirit
+            // of the previous CLI's "Creating worktree..." /
+            // "Launching agent..." prints.
+            let label: &str = match step {
+                sipag_dispatch::DispatchStep::WorktreeSetup => "Creating worktree",
+                sipag_dispatch::DispatchStep::Attach => "Attaching to session",
+                sipag_dispatch::DispatchStep::Launch => "Launching agent",
+                sipag_dispatch::DispatchStep::WaitTuiReady => "Waiting for TUI",
+                sipag_dispatch::DispatchStep::PastePrompt => "Pasting prompt",
+                sipag_dispatch::DispatchStep::WaitEcho => "Confirming paste",
+                sipag_dispatch::DispatchStep::Submit => "Submitting",
+                sipag_dispatch::DispatchStep::WaitProcessing => "Waiting for response",
+            };
+            println!("  ▸ {label}...");
+        })
+        .await
+    })
+    .context("dispatch action failed")?;
     Ok(())
 }
 
