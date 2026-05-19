@@ -1,0 +1,21 @@
+[package]
+license = "MIT OR Apache-2.0"
+name = "sipag-dispatch"
+version = "0.1.0"
+edition = "2021"
+description = "The dispatch action for sipag — create katulong session, optionally set up a worktree, WS attach, launch agent, paste prompt, submit. One function, observable via step callback."
+
+[dependencies]
+# Wire client. Provides KatulongAsyncClient (HTTP) for session create
+# + worktree setup, and KatulongAttachClient (WS) for the agent
+# launch + paste + submit flow. The `serve` feature (default) is
+# disabled here — we're a library, not the notebook UI.
+katulong-client = { path = "../katulong-client", default-features = false }
+anyhow = "1"
+regex = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
