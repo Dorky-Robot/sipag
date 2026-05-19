@@ -20,6 +20,11 @@ sipag-pubsub = { path = "../sipag-pubsub" }
 # binary imports `katulong_client::…` directly. Used for the async
 # HTTP client (`KatulongAsyncClient`) introduced for #527.
 katulong-client = { path = "../katulong-client", default-features = false }
+# The dispatch action. Encapsulates the WS-attach + paste + submit
+# flow that used to live in `serve/htmx.rs::dispatch_via_attach_client`.
+# The web UI and the CLI both call `sipag_dispatch::dispatch` for
+# the agent launch.
+sipag-dispatch = { path = "../sipag-dispatch" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

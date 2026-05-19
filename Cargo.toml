@@ -1,3 +1,10 @@
 [workspace]
-members = ["katulong-client", "sipag-core", "sipag-pubsub", "sipag", "tui"]
+members = [
+    "katulong-client",
+    "sipag-core",
+    "sipag-dispatch",
+    "sipag-pubsub",
+    "sipag",
+    "tui",
+]
 resolver = "2"
