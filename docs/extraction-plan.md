@@ -30,27 +30,30 @@ This plan is incremental, reversible, and preserves history. It is not a rewrite
 
 ```
 sipag/
-├── katulong-client/   ✅ extracted (PR #535); + async HTTP client + body caps (PR #546)
-├── sipag-pubsub/      ✅ extracted (PR #545)
-├── sipag-dispatch/    ✅ extracted (PR #547)
+├── katulong-client/      ✅ extracted (PR #535); + async HTTP client + body caps (PR #546)
+├── ollama-bridge-client/ ✅ extracted (PR #549) — wire client for the bridge daemon
+├── sipag-auth/           ✅ extracted (PR #554) — webauthn / passkeys / sessions
+├── sipag-board/          ✅ extracted (PR #553) — OKR / Task / Role / Project / Observation
+├── sipag-corpus/         ✅ extracted (PR #550) — vector store + Embedder trait
+├── sipag-dispatch/       ✅ extracted (PR #547) — the dispatch action
+├── sipag-lens/           ✅ extracted (PR #551) — Lens / LensWorker / 4 verbs / ModelChoice
+├── sipag-mesh/           ✅ extracted (PR #552) — hosts.toml + multi-host topology
+├── sipag-pubsub/         ✅ extracted (PR #545) — file-backed durable broker
 ├── sipag-core/
 │   └── src/
-│       ├── auth/           ← extract candidate (Identity context)
-│       ├── board/          ← extract candidate (Steering domain)
 │       ├── config.rs       ← stays (cross-cutting; tiny)
 │       ├── feature.rs      ⛔ deprecated
 │       ├── refine.rs       ⛔ deprecated
 │       ├── gate.rs         ⛕ retiring (Phase 2 #9 + #11)
 │       ├── nudge.rs        ⛕ retiring (Phase 2 #9 + #11)
-│       ├── hosts.rs        ← extract candidate (Topology config)
-│       ├── llm.rs          ← retiring (callers migrate to `ollama-bridge-client` per Phase 2 #8)
-│       └── (re-exports of katulong-client + sipag-pubsub)
+│       ├── llm.rs          ⛕ retiring (callers migrate to `ollama-bridge-client`)
+│       └── lib.rs          (thin re-exports of katulong-client / pubsub / mesh / board / auth)
 ├── sipag/             (binary: CLI + serve/)
-│   └── src/serve/htmx.rs   ~1730 LOC — down from 2169 after #527 + #547 cleanups; the remaining mess is route plumbing + the gate + the legacy nudge loop
+│   └── src/serve/htmx.rs   ~1730 LOC — the remaining mess is route plumbing + the gate + the legacy nudge loop
 └── tui/               (binary: ratatui board)
 ```
 
-Five crates and two binaries. `htmx.rs` shrank by ~440 LOC when `sipag-dispatch` lifted the WS attach + paste + submit + processing-wait flow out. The remaining handler logic is the gate (retires next), the legacy `verify_and_heal_dispatch` nudge loop (retires per §9 #11), and the route plumbing.
+**All 8 planned extractions complete.** Eleven workspace crates plus two binaries. `sipag-core` is now a thin compatibility shim around the extracted crates plus a handful of retiring modules (gate, nudge, llm — all scheduled to retire with the lens-worker scheduler landing, per modules.md §9 #9-#11).
 
 External dependencies sipag relies on (not in this repo, but called out so the structure-only readers know what's outside the boundary):
 
@@ -59,25 +62,9 @@ External dependencies sipag relies on (not in this repo, but called out so the s
 
 ## 2. Target
 
-```
-sipag/
-├── katulong-client/      ✅ wire to katulong (HTTP + WS attach + SSE soon)
-├── sipag-pubsub/         ✅ file-backed durable broker
-├── sipag-dispatch/       ✅ the dispatch action (act sub-module, Phase 2 #12)
-├── ollama-bridge-client/ 🆕 wire to dorky-robot/ollama-bridge (enqueue + poll; Phase 2 #8)
-├── sipag-board/          🆕 OKR + Task + Role + Project domain + TOML
-├── sipag-mesh/           🆕 hosts.toml + multi-host topology
-├── sipag-auth/           🆕 webauthn / passkeys / sessions (Phase 3 #15)
-├── sipag-corpus/         🆕 local vector DB for observations (Phase 1 #3)
-├── sipag-lens/           🆕 Lens + LensWorker + verbs (Phase 1 #3)
-├── sipag-core/           shrinks to: config + thin re-exports + cross-cutting types
-├── sipag/                shrinks to: CLI + serve/ HTTP handlers + view helpers
-└── tui/                  unchanged shape; switches imports to the new crates
-```
+**Target reached.** Nine planned workspace crates + sipag-core (shim) + sipag (binary) + tui (binary). The target tree from earlier drafts is now the current state — see §1 above.
 
-Nine workspace crates plus binaries. Each crate has one responsibility, an internal-only API surface, and its own test suite. The binary becomes a composition layer.
-
-Three of the nine have already landed (✅). Six remain (🆕). The first three were the proof-of-pattern + the biggest sources of accidental complexity — the rest are domain extractions plus the two net-new crates (`sipag-corpus`, `sipag-lens`) that unlock the Phase 1 #3 lens-worker abstraction.
+The remaining work isn't more extraction; it's the **post-extraction cleanup**: retire `sipag-core/src/gate.rs` + `nudge.rs` + `llm.rs` (callers migrate to the lens-worker abstraction), let `sipag-core` shrink to just `config.rs` + the re-export shims, and then eventually consider dissolving sipag-core itself once the shims have aged out. That's all in modules.md §9 Phase 2 + Phase 3, not in this doc.
 
 ---
 
@@ -101,7 +88,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
   Loaders + prompt composition stayed outside the crate; the gate + `verify_and_heal_dispatch` stayed in `htmx.rs` (retire separately per §9 #11). Pre-created session is an input (not a side effect) so the gate can inspect before dispatching.
 - **TUI not yet migrated:** `tui/src/board_app.rs` still uses sync HTTP `/exec` via `agent_command`. Follow-up PR.
 
-### `ollama-bridge-client` — wire to the bridge daemon
+### `ollama-bridge-client` — wire to the bridge daemon ✅ done (PR #549)
 
 - **Owns:** Rust client for [`dorky-robot/ollama-bridge`](https://github.com/Dorky-Robot/ollama-bridge) — `POST /enqueue` + `GET /jobs/:hash` poll + the pass-through probe endpoints (`/api/tags`, `/api/show`, `/api/ps`) + a `submit_and_wait(endpoint, body, timeout)` convenience that hides the polling. Bearer auth on every call. See [memory: `reference-ollama-bridge`](../.claude/memory/reference_ollama_bridge.md) for the bridge's wire shape.
 - **Source today:** **does not exist.** Net-new (parallels `katulong-client`).
@@ -112,7 +99,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 - **Unblocks:** modules.md §9 #3 (lens-workers — they enqueue chat/generate jobs through this client), #8 (this extraction IS that item, reframed), corpus embedding (jobs at `/api/embed`).
 - **Replaces in plan:** the previous "`ollama-client` with `LlmClient` trait + per-model construction" slot. That design was drafted before this session surfaced the bridge as the actual integration point. The dedup window (60s, sha256 of `{endpoint, body}`) is a free win for lens-workers that hit similar prompts.
 
-### `sipag-corpus` — local vector store
+### `sipag-corpus` — local vector store ✅ done (PR #550)
 
 - **Owns:** append-only `CorpusItem` log, embeddings (via `ollama-bridge-client` → bridge → `/api/embed`), similarity search, `corpus.search` / `corpus.expand` MCP-shape tools.
 - **Source today:** **does not exist.** This is net-new (modules.md §9 #3).
@@ -121,7 +108,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 - **Deferred:** cross-corpus retrieval (sipag ↔ diwa per modules.md §10), corpus compaction, lens-citation graph.
 - **Depends on:** `ollama-bridge-client` for embeddings.
 
-### `sipag-lens` — lens-worker primitive
+### `sipag-lens` — lens-worker primitive ✅ done (PR #551)
 
 - **Owns:** `Lens`, `LensWorker`, the four verbs (`observe` + `suggest_stance` + `ask_human` + `propose_task`), trigger policy, `ModelChoice` → concrete-model resolution.
 - **Source today:** **does not exist.** This is net-new (modules.md §9 #3).
@@ -130,7 +117,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 - **Deferred:** lens governance / sprawl ranking (modules.md §10), meta-cognitive guardrails (§10), ad-hoc lens expiry (§10).
 - **Depends on:** `sipag-corpus`, `ollama-bridge-client`, `sipag-board` (for `KrStance` writes).
 
-### `sipag-board` — OKR + Task domain
+### `sipag-board` — OKR + Task domain ✅ done (PR #553)
 
 - **Owns:** `Objective`, `KeyResult`, `Task`, `Role`, `Project`, `Observation`, TOML persistence under `~/.sipag/`.
 - **Source today:** `sipag-core/src/board/` (well-organized — already 7 files with `mod.rs`).
@@ -139,7 +126,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 - **Deferred:** the `Status` rename pass (modules.md §6 / §9 Phase 1 #2) lands separately as language-first work.
 - **Depends on:** `sipag-pubsub` (it publishes change events on save).
 
-### `sipag-mesh` — host topology
+### `sipag-mesh` — host topology ✅ done (PR #552)
 
 - **Owns:** `Host`, `hosts.toml` reader, multi-host resolution.
 - **Source today:** `sipag-core/src/hosts.rs` (117 LOC).
@@ -147,7 +134,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 - **In scope v1:** mechanical move.
 - **Deferred:** the §10 `hosts.rs` vs `mesh.json` reconciliation (one source of truth or two?).
 
-### `sipag-auth` — identity
+### `sipag-auth` — identity ✅ done (PR #554)
 
 - **Owns:** webauthn, passkeys, sessions, devices, tokens.
 - **Source today:** `sipag-core/src/auth/` (multiple files, already crate-shaped internally).
@@ -162,14 +149,16 @@ The order matters because each extraction either (a) unblocks a downstream queue
 
 ```
 1. sipag-pubsub          ✅ done — PR #545 (template-prover)
-2. sipag-dispatch        ✅ done — PR #547 (biggest htmx.rs cleanup; enables modules.md §9 #11)
-3. ollama-bridge-client  required by §9 #8 + sipag-corpus + sipag-lens  ← next
-4. sipag-corpus          required by sipag-lens
-5. sipag-lens            the Phase 1 #3 lego block; unlocks the product capability
-6. sipag-board           mechanical; safe to do anytime after the renames in §9 Phase 1 #2 land
-7. sipag-mesh            mechanical; anytime
-8. sipag-auth            lowest urgency; defer until auth surface stabilizes
+2. sipag-dispatch        ✅ done — PR #547 (biggest htmx.rs cleanup; enabled modules.md §9 #11)
+3. ollama-bridge-client  ✅ done — PR #549 (closed §9 #8, reframed)
+4. sipag-corpus          ✅ done — PR #550 (storage half of Phase 1 #3)
+5. sipag-lens            ✅ done — PR #551 (runtime half of Phase 1 #3)
+6. sipag-board           ✅ done — PR #553 (mechanical move out of sipag-core)
+7. sipag-mesh            ✅ done — PR #552 (mechanical move out of sipag-core)
+8. sipag-auth            ✅ done — PR #554 (mechanical move; closes §9 #15)
 ```
+
+**All eight planned extractions complete (2026-05-20).** The plan is done.
 
 **Dependency direction.** Drawn as edges (`X → Y` means X depends on Y):
 
@@ -187,24 +176,17 @@ katulong-client        → (extracted; leaf)
 
 No cycles. Every leaf is extractable in isolation. The binary depends on all of them.
 
-Two of the first three are done. The remaining six split cleanly:
+**Interleaving with modules.md §9.** All landed:
 
-- **3-5** are the lens-worker stack (the Phase 1 #3 capability). `ollama-bridge-client` is the wire shim, `sipag-corpus` is the storage, `sipag-lens` is the runtime + verbs. All three need to land before lens-workers become real.
-- **6-8** are mechanical domain extractions (`sipag-board`, `sipag-mesh`, `sipag-auth`). They don't unlock new capability — they tighten boundaries and make domain testing cleaner. Defer until they're easy to do without conflict.
-
-**Interleaving with modules.md §9.** Roughly:
-
-| Extraction | Enables / pairs with §9 item |
+| Extraction | §9 item closed/reframed |
 |---|---|
-| `sipag-pubsub` ✅ | none — pure infrastructure win |
-| `sipag-dispatch` ✅ | **= #12** (lift dispatch policy out of the wire crate). Unblocks #11 (`verify_and_heal_dispatch` deletion) and #13 (htmx.rs split). |
-| `ollama-bridge-client` | **= #8** in the queue; this IS that item, reframed to target the bridge daemon. |
-| `sipag-corpus` + `sipag-lens` | **= part of #3** in the queue (the foundation half). |
-| `sipag-board` | enables clean #2 renames per-crate instead of one giant cross-cutting PR. |
-| `sipag-auth` | **= #15** in the queue. |
-| `sipag-mesh` | folds into the §10 hosts/mesh reconciliation question. |
-
-So this plan is not adding work to the queue — it's giving the queue items a structural shape so each one ships as a clean crate-sized PR instead of a sprawling cross-cutting one.
+| `sipag-pubsub` ✅ PR #545 | none — pure infrastructure win |
+| `sipag-dispatch` ✅ PR #547 | **#12** (lift dispatch policy out of the wire crate). Unblocked #11 (`verify_and_heal_dispatch` deletion) and #13 (htmx.rs split). |
+| `ollama-bridge-client` ✅ PR #549 | **#8** in the queue; reframed from "promote llm.rs" to "wrap the bridge daemon." |
+| `sipag-corpus` + `sipag-lens` ✅ PRs #550 + #551 | **part of #3** — the storage + runtime halves of the lens-worker abstraction. |
+| `sipag-board` ✅ PR #553 | enables clean #2 renames per-crate instead of one giant cross-cutting PR. |
+| `sipag-auth` ✅ PR #554 | **#15** in the queue. |
+| `sipag-mesh` ✅ PR #552 | feeds the §10 hosts/mesh reconciliation question. |
 
 ---
 
@@ -253,3 +235,13 @@ A crate is "fully migrated" (re-export can be deleted) when zero `use sipag_core
 - **2026-05-18** — **katulong-client async HTTP client + body caps** (PR #546) closed sipag #527. Not an extraction (extends the already-extracted `katulong-client`), but landed in the same series and is the prerequisite for the dispatch extraction below — without an async HTTP client in `katulong-client`, `sipag-dispatch` would have needed a `spawn_blocking` shim around the sync curl path.
 - **2026-05-19** — **`sipag-dispatch` extracted** (PR #547). Implements modules.md §9 Phase 2 #12. Pulled the dispatch action (~240 LOC) out of `sipag/src/serve/htmx.rs::dispatch_via_attach_client` and the overlapping logic in `sipag/src/cli.rs::run_dispatch_task` into a single async `dispatch(remote, &session, input, on_step) -> Result<(), DispatchError>` function. `htmx.rs` shrank by ~440 LOC. Two real behavior unifications shipped: web UI v2 now does worktree setup (previously skipped), CLI now uses WS-attach orchestration (previously raw HTTP `/exec`). Loaders and prompt composition stayed outside the crate; the gate + `verify_and_heal_dispatch` stayed in `htmx.rs` per §9 #11. TUI dispatch still uses sync HTTP `/exec` — follow-up PR.
 - **2026-05-19** — **`ollama-client` slot renamed to `ollama-bridge-client`** + entry rewritten. Earlier draft assumed sipag would talk to ollama directly with an `LlmClient` trait + per-model construction; that design was drafted before this session surfaced the existing [`dorky-robot/ollama-bridge`](https://github.com/Dorky-Robot/ollama-bridge) (Elixir queue+auth daemon) as the actual integration point. The bridge's wire shape is enqueue + poll, not synchronous chat. Updated §1 (external deps callout), §2 (crate list), §3 (full entry rewrite), §4 (sequencing), §5 (no sipag-llm wrapper); modules.md §9 #8 updated separately in this PR.
+- **2026-05-20** — **all six remaining extractions landed in one autonomous push** (PRs #549-554). The user gave a "just keep going, don't ask between PRs, report when done" directive; the rest of the plan executed in sequence:
+  - `ollama-bridge-client` (PR #549) — wire client for the bridge daemon. 29 behavioral tests covering wire contract (enqueue/poll/probes), polling contract (queue/run/done/error/timeout/dedup-cached/null-result-defensive), security (bearer auth on every method, body cap with sipag #527 invariant, token Debug-redaction, hash validation symmetric on send + receive).
+  - `sipag-corpus` (PR #550) — local vector store. 17 behavioral tests covering persistence (add + reopen + malformed-line tolerance + source_refs round-trip), search (cosine ranking + top_k + tag/timestamp/generation filters + empty whitelist + dimension mismatch), embedder integration (BridgeEmbedder behind default cargo feature; FakeEmbedder for tests + error propagation).
+  - `sipag-lens` (PR #551) — lens-worker primitive. 17 behavioral tests covering resolver (defaults match modules.md §10, named pass-through, models.toml override + missing-file fallback + malformed-file error), parser (clean JSON + chatty-prose extraction + no-JSON rejection + all four verbs round-trip), LensWorker (writes Observe to corpus + returns all actions, resolves Profile to concrete model on chat call, propagates backend failure, auto-adds lens-tag without duplication), wire-format round-trips for TriggerPolicy + LensSource.
+  - `sipag-mesh` (PR #552) — host topology. Mechanical move of sipag-core/src/hosts.rs (117 LOC) via `git mv`. Inlined a small private `default_sipag_dir()` helper so the crate is a true leaf with no dep on sipag-core.
+  - `sipag-board` (PR #553) — OKR + Task + Project + Observation domain. Mechanical move of sipag-core/src/board/ (7 files). One internal `crate::board::…` → `crate::…` fix.
+  - `sipag-auth` (PR #554) — identity subsystem. Mechanical move of sipag-core/src/auth/ (9 files). Bulk `crate::auth::…` → `crate::…` fix (20+ references).
+  - This docs PR closes the loop: §1 (current state) + §2 (target reached) + §3 (every entry ✅ done with PR link) + §4 (sequencing all done) updated.
+
+**The plan is complete.** Future work — retire `sipag-core/src/{gate,nudge,llm}.rs` as the lens-worker scheduler lands, then dissolve `sipag-core` itself once its shims have aged out — lives in modules.md §9, not here.
