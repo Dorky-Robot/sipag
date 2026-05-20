@@ -1,0 +1,28 @@
+[package]
+license = "MIT OR Apache-2.0"
+name = "sipag-corpus"
+version = "0.1.0"
+edition = "2021"
+description = "Local vector store for sipag — append-only JSONL log of CorpusItems with embeddings, tag + timestamp filtering, cosine-similarity k-NN search. The storage layer underneath lens-workers."
+
+[dependencies]
+# Wire client for ollama-bridge. Provides the concrete Embedder
+# impl that calls /api/embed. Optional behind the `bridge` feature
+# so callers (tests, alternate embedders) don't pay the dep cost.
+ollama-bridge-client = { path = "../ollama-bridge-client", optional = true }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["fs", "io-util", "macros"] }
+
+[features]
+default = ["bridge"]
+bridge = ["dep:ollama-bridge-client"]
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
