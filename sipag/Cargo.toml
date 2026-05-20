@@ -25,6 +25,10 @@ katulong-client = { path = "../katulong-client", default-features = false }
 # The web UI and the CLI both call `sipag_dispatch::dispatch` for
 # the agent launch.
 sipag-dispatch = { path = "../sipag-dispatch" }
+# Host topology config. sipag-core re-exports at the old
+# `sipag_core::hosts::…` path; new code imports `sipag_mesh::…`
+# directly.
+sipag-mesh = { path = "../sipag-mesh" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

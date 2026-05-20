@@ -14,7 +14,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use sipag_core::board::{
     list_project_names, list_tasks, load_project, KeyResult, Project, ProjectKind, Task, TaskStatus,
 };
-use sipag_core::hosts::Host;
+use sipag_mesh::Host;
 use std::collections::{BTreeMap, HashMap};
 
 // ── public data shape ────────────────────────────────────────────────

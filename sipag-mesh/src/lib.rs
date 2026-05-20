@@ -16,7 +16,19 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::config::default_sipag_dir;
+/// Resolve the sipag state directory. Inlined here (was in
+/// `sipag-core::config`) so this crate can be a true leaf — no
+/// dep on sipag-core. Resolution order:
+/// `SIPAG_DIR` env var > `$HOME/.sipag` > `./.sipag`.
+fn default_sipag_dir() -> PathBuf {
+    std::env::var("SIPAG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".sipag"))
+                .unwrap_or_else(|_| PathBuf::from(".sipag"))
+        })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {

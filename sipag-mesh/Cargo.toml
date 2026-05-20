@@ -1,0 +1,14 @@
+[package]
+license = "MIT OR Apache-2.0"
+name = "sipag-mesh"
+version = "0.1.0"
+edition = "2021"
+description = "Host topology config for sipag — the katulong instances the agent-manager mesh is allowed to talk to."
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
