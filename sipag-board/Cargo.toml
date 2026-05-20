@@ -1,0 +1,17 @@
+[package]
+license = "MIT OR Apache-2.0"
+name = "sipag-board"
+version = "0.1.0"
+edition = "2021"
+description = "OKR + Task + Role + Project + Observation domain types and TOML persistence for sipag's board state."
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
