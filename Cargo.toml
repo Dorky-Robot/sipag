@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "katulong-client",
+    "ollama-bridge-client",
     "sipag-core",
     "sipag-dispatch",
     "sipag-pubsub",
