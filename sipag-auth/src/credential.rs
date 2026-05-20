@@ -14,7 +14,7 @@ pub struct Credential {
     pub public_key: Vec<u8>,
     pub name: Option<String>,
     pub counter: u32,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub created_at: SystemTime,
     /// Link back to the setup token that paired this device, if any. Lets
     /// the UI show tokens as "unused" vs "paired device <name>" and cascade

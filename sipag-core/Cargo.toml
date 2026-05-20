@@ -26,6 +26,9 @@ sipag-mesh = { path = "../sipag-mesh" }
 # OKR + Task + Role + Project + Observation domain. Extracted into
 # its own crate; re-exported at `sipag_core::board::…` for back-compat.
 sipag-board = { path = "../sipag-board" }
+# Identity / auth subsystem. Extracted into its own crate;
+# re-exported at `sipag_core::auth::…` for back-compat.
+sipag-auth = { path = "../sipag-auth" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 log = "0.4"

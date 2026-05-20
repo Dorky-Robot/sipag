@@ -17,8 +17,8 @@
 //! from a different origin: the operator sets the public origin at
 //! startup, and that's what every ceremony binds to.
 
-use crate::auth::random::random_hex;
-use crate::auth::{AuthError, Credential, Result};
+use crate::random::random_hex;
+use crate::{AuthError, Credential, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::collections::HashMap;
 use std::sync::Mutex;

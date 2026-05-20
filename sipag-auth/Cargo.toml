@@ -1,0 +1,37 @@
+[package]
+license = "MIT OR Apache-2.0"
+name = "sipag-auth"
+version = "0.1.0"
+edition = "2021"
+description = "Identity / auth subsystem for sipag — webauthn, passkeys, sessions, devices, tokens. Single auth.json state file + katulong-shaped first-device-localhost / pair-by-setup-token flow."
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["sync", "fs", "macros"] }
+tracing = "0.1"
+scrypt = { version = "0.11", default-features = false, features = ["simple"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+subtle = { version = "2", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+base64 = "0.22"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+# SAFETY: the `danger-allow-state-serialisation` feature enables Serde derives
+# on `PasskeyRegistration` / `PasskeyAuthentication` so they can live inside
+# the `Mutex<HashMap<...>>` challenge stores in `webauthn.rs`. That in-memory
+# use is safe. Persisting those types to disk or sending them over the wire
+# would open a ceremony-replay vector — upstream named the flag `danger-*` for
+# exactly that reason. The flag is ALSO required to serialize finished
+# `Passkey` blobs into `Credential.public_key`, which IS long-lived on-disk
+# state — that's fine because the completed passkey is what the spec expects
+# us to store. Do NOT extend the flag's reach to persist pending ceremony
+# state without a security review.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

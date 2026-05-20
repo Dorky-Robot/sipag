@@ -1,4 +1,9 @@
-pub mod auth;
+/// Identity / auth subsystem (webauthn, passkeys, sessions). Extracted
+/// into its own workspace crate (`sipag-auth`). Re-exported here so
+/// existing `sipag_core::auth::…` imports keep compiling during the
+/// transition. Direct `sipag_auth::…` imports are preferred for new
+/// code.
+pub use sipag_auth as auth;
 /// OKR + Task + Role + Project + Observation domain types. Extracted
 /// into its own workspace crate (`sipag-board`). Re-exported here so
 /// existing `sipag_core::board::…` imports keep compiling during the
