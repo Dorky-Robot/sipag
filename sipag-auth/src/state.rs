@@ -1,5 +1,5 @@
-use crate::auth::session::hash_session_token;
-use crate::auth::{Credential, Session, SetupToken};
+use crate::session::hash_session_token;
+use crate::{Credential, Session, SetupToken};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use subtle::ConstantTimeEq;

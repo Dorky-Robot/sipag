@@ -1,5 +1,5 @@
-use crate::auth::random::random_hex;
-use crate::auth::{AuthError, Result};
+use crate::random::random_hex;
+use crate::{AuthError, Result};
 use rand_core::OsRng;
 use scrypt::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use scrypt::{Params, Scrypt};
@@ -21,11 +21,11 @@ pub struct SetupToken {
     pub id: String,
     pub hash: String,
     pub name: Option<String>,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub created_at: SystemTime,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub expires_at: SystemTime,
-    #[serde(default, with = "crate::auth::state::systime_opt")]
+    #[serde(default, with = "crate::state::systime_opt")]
     pub used_at: Option<SystemTime>,
     #[serde(default)]
     pub credential_id: Option<String>,

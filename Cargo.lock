@@ -2812,6 +2812,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-auth",
  "sipag-board",
  "sipag-core",
  "sipag-dispatch",
@@ -2825,6 +2826,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "sipag-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "rand_core 0.6.4",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "webauthn-rs",
 ]
 
 [[package]]
@@ -2855,6 +2877,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-auth",
  "sipag-board",
  "sipag-mesh",
  "sipag-pubsub",

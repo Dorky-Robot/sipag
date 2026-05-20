@@ -1,4 +1,4 @@
-use crate::auth::{state::SCHEMA_VERSION, AuthError, AuthState, Result};
+use crate::{state::SCHEMA_VERSION, AuthError, AuthState, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
@@ -131,7 +131,7 @@ async fn persist_atomic(path: &Path, state: &AuthState) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{Credential, Session};
+    use crate::{Credential, Session};
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
@@ -148,7 +148,7 @@ mod tests {
 
     fn sess(plaintext_token: &str, cred_id: &str) -> Session {
         Session {
-            token_hash: crate::auth::session::hash_session_token(plaintext_token),
+            token_hash: crate::session::hash_session_token(plaintext_token),
             credential_id: cred_id.into(),
             csrf_token: "csrf".into(),
             created_at: SystemTime::UNIX_EPOCH,

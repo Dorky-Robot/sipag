@@ -1,4 +1,4 @@
-use crate::auth::random::random_hex;
+use crate::random::random_hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -37,11 +37,11 @@ pub struct Session {
     pub token_hash: String,
     pub credential_id: String,
     pub csrf_token: String,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub created_at: SystemTime,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub expires_at: SystemTime,
-    #[serde(with = "crate::auth::state::systime")]
+    #[serde(with = "crate::state::systime")]
     pub last_activity_at: SystemTime,
 }
 

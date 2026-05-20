@@ -10,7 +10,7 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use serde_json::json;
-use sipag_core::auth::AuthError;
+use sipag_auth::AuthError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
