@@ -2882,6 +2882,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sipag-lens"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "ollama-bridge-client",
+ "serde",
+ "serde_json",
+ "sipag-corpus",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "sipag-pubsub"
 version = "0.1.0"
 dependencies = [

@@ -5,6 +5,7 @@ members = [
     "sipag-core",
     "sipag-corpus",
     "sipag-dispatch",
+    "sipag-lens",
     "sipag-pubsub",
     "sipag",
     "tui",
