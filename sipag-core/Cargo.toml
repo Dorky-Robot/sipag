@@ -18,6 +18,11 @@ katulong-client = { path = "../katulong-client", default-features = false }
 # `sipag_core::pubsub` path for back-compat with existing call sites.
 # Prefer `sipag_pubsub::…` for new code.
 sipag-pubsub = { path = "../sipag-pubsub" }
+# Host topology config. Extracted into its own crate so it can be
+# developed and tested in isolation; re-exported below at the old
+# `sipag_core::hosts::…` path for back-compat. Prefer `sipag_mesh::…`
+# for new code.
+sipag-mesh = { path = "../sipag-mesh" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 log = "0.4"

@@ -1,7 +1,7 @@
 use crate::serve::categorize::ProposalState;
 use katulong_client::KatulongAsyncClient;
 use sipag_core::auth::{AuthStore, WebAuthnService};
-use sipag_core::hosts::{Host, HostsConfig};
+use sipag_mesh::{Host, HostsConfig};
 use sipag_pubsub::Broker;
 use std::collections::HashMap;
 use std::path::PathBuf;

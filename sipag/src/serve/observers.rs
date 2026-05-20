@@ -22,7 +22,7 @@ use crate::serve::state::AppState;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sipag_core::board::Observation;
-use sipag_core::hosts::Host;
+use sipag_mesh::Host;
 use std::collections::HashSet;
 use std::time::Duration;
 

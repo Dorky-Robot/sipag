@@ -20,7 +20,6 @@ pub mod config;
 /// fire from `#[deprecated]` returns).
 pub mod feature;
 pub mod gate;
-pub mod hosts;
 /// Katulong wire protocol + HTTP/WS client. Extracted into its own
 /// workspace crate (`katulong-client`) so it can be developed and
 /// tested in isolation from sipag-the-task-manager. Re-exported here
@@ -28,6 +27,13 @@ pub mod hosts;
 /// during the transition. Direct `katulong_client::…` imports are
 /// preferred for new code.
 pub use katulong_client as katulong;
+/// Host topology config (`~/.sipag/hosts.toml`). Extracted into its
+/// own workspace crate (`sipag-mesh`) so it can be developed and
+/// tested in isolation. Re-exported here so existing
+/// `sipag_core::hosts::…` imports keep compiling during the
+/// transition. Direct `sipag_mesh::…` imports are preferred for
+/// new code.
+pub use sipag_mesh as hosts;
 pub mod llm;
 pub mod nudge;
 /// File-backed durable pub/sub broker. Extracted into its own workspace
