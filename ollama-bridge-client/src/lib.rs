@@ -363,7 +363,7 @@ impl OllamaBridgeClient {
         if !status.is_success() {
             return Err(BridgeError::Http {
                 status,
-                body: String::from_utf8_lossy(&bytes).trim().to_string(),
+                body: sanitize_error_body(&bytes),
             });
         }
         let parsed: EnqueueResponse = serde_json::from_slice(&bytes)?;
@@ -392,7 +392,7 @@ impl OllamaBridgeClient {
         if !status.is_success() {
             return Err(BridgeError::Http {
                 status,
-                body: String::from_utf8_lossy(&bytes).trim().to_string(),
+                body: sanitize_error_body(&bytes),
             });
         }
         let view: JobView = serde_json::from_slice(&bytes)?;
@@ -492,7 +492,7 @@ impl OllamaBridgeClient {
         if !status.is_success() {
             return Err(BridgeError::Http {
                 status,
-                body: String::from_utf8_lossy(&bytes).trim().to_string(),
+                body: sanitize_error_body(&bytes),
             });
         }
         Ok(serde_json::from_slice(&bytes)?)
@@ -513,6 +513,24 @@ pub async fn bytes_capped(resp: Response, cap: usize) -> BridgeResult<Vec<u8>> {
         acc.extend_from_slice(&chunk);
     }
     Ok(acc)
+}
+
+/// Sanitize an upstream error body before storing it in
+/// `BridgeError::Http { body }`. Filters ASCII control characters
+/// (anything but `\n` and `\t`) and truncates at 1024 chars so a
+/// compromised or misbehaving bridge can't smuggle ANSI escape
+/// sequences into operator log/terminal output via `BridgeError`'s
+/// `Display` impl. Matches the spirit of
+/// `sipag/src/serve/upstream.rs::sanitize_upstream_body` (closer
+/// to home), but keeps the helper local so this crate has no
+/// dependency on sipag.
+fn sanitize_error_body(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    s.trim()
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .take(1024)
+        .collect()
 }
 
 /// Best-effort parse of `Retry-After` (either the HTTP header or the
@@ -1073,6 +1091,205 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn poll_surfaces_404_as_http_error() {
+        // Bridge contract: `GET /jobs/:hash` returns 404 if the hash
+        // is well-formed but no job exists with that hash (typically
+        // because the janitor pruned the finished job past TTL).
+        // Callers retrying a stale hash after a restart will see
+        // this — must surface as `Http { status: 404, body }` so
+        // operators can distinguish "transient bridge down" from
+        // "job gone."
+        let hash = dummy_hash().to_string();
+        let app = Router::new().route(
+            "/jobs/:hash",
+            get(|| async {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(json!({"error": "not_found"})),
+                )
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+        let client = OllamaBridgeClient::new(format!("http://{addr}"), "k".into()).unwrap();
+        let err = client.poll(&hash).await.unwrap_err();
+        match err {
+            BridgeError::Http { status, body } => {
+                assert_eq!(status.as_u16(), 404);
+                assert!(body.contains("not_found"), "got: {body}");
+            }
+            other => panic!("expected Http(404), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_includes_bearer_auth_header() {
+        // Same contract as enqueue: every request must carry the
+        // bearer token. Polls are the most-frequent call site by
+        // far (every 500ms inside submit_and_wait); a regression
+        // here would silently 401-flood the bridge.
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cap_clone = captured.clone();
+        let hash = dummy_hash().to_string();
+        let h = hash.clone();
+        let app = Router::new().route(
+            "/jobs/:hash",
+            get(move |headers: axum::http::HeaderMap| {
+                let cap = cap_clone.clone();
+                let h = h.clone();
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    *cap.lock().await = auth;
+                    Json(json!({"hash": h, "status": "queued"}))
+                }
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+        let client = OllamaBridgeClient::new(format!("http://{addr}"), "the-token".into()).unwrap();
+        client.poll(&hash).await.unwrap();
+        let auth = captured.lock().await.clone();
+        assert_eq!(auth.as_deref(), Some("Bearer the-token"));
+    }
+
+    #[tokio::test]
+    async fn probes_include_bearer_auth_header() {
+        // tags() / show() / ps() all route through get_capped; one
+        // test on tags() pins the contract that probes carry the
+        // bearer token too (covers the third of three auth-bearing
+        // call sites: enqueue, poll, and the get_capped family).
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cap_clone = captured.clone();
+        let app = Router::new().route(
+            "/api/tags",
+            get(move |headers: axum::http::HeaderMap| {
+                let cap = cap_clone.clone();
+                async move {
+                    let auth = headers
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    *cap.lock().await = auth;
+                    Json(json!({"models": []}))
+                }
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+        let client = OllamaBridgeClient::new(format!("http://{addr}"), "the-token".into()).unwrap();
+        client.tags().await.unwrap();
+        let auth = captured.lock().await.clone();
+        assert_eq!(auth.as_deref(), Some("Bearer the-token"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_submit_and_wait_does_not_interfere() {
+        // Bridge use case: a lens-worker fleet fans out N
+        // concurrent jobs on one client (Clone-able, shares one
+        // reqwest::Client). Each submit_and_wait tracks its own
+        // local `hash` — two concurrent calls must NOT cross
+        // results. This pins the no-shared-state invariant; a
+        // regression introducing a shared `Mutex<last_hash>` (etc.)
+        // would manifest as one call returning the other's result.
+        //
+        // The mock server returns different results based on which
+        // distinct hash the GET hits, so a result-swap would surface
+        // as a wrong-value assertion.
+        let hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        // Track which hash each call enqueued for routing.
+        let next_hash: Arc<Mutex<Vec<String>>> =
+            Arc::new(Mutex::new(vec![hash_a.clone(), hash_b.clone()]));
+        let nh = next_hash.clone();
+        let app = Router::new()
+            .route(
+                "/enqueue",
+                post(move || {
+                    let nh = nh.clone();
+                    async move {
+                        // Hand out queued hashes in order.
+                        let h = nh.lock().await.remove(0);
+                        Json(json!({"hash": h, "status": "queued"}))
+                    }
+                }),
+            )
+            .route(
+                "/jobs/:hash",
+                get(
+                    |axum::extract::Path(hash): axum::extract::Path<String>| async move {
+                        // Result encodes the hash so a swap shows up.
+                        Json(json!({
+                            "hash": hash.clone(),
+                            "status": "done",
+                            "result": { "for_hash": hash }
+                        }))
+                    },
+                ),
+            );
+        let addr = spawn_test_server(app).await;
+        let client = OllamaBridgeClient::new(format!("http://{addr}"), "k".into()).unwrap();
+        let c1 = client.clone();
+        let c2 = client.clone();
+        let (r1, r2) = tokio::join!(
+            c1.submit_and_wait(JobEndpoint::Chat, json!({"x": 1}), Duration::from_secs(5)),
+            c2.submit_and_wait(JobEndpoint::Chat, json!({"x": 2}), Duration::from_secs(5)),
+        );
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+        // Each call should see the result the bridge dispatched for
+        // its enqueued hash — never the OTHER call's.
+        let h1 = r1["for_hash"].as_str().unwrap().to_string();
+        let h2 = r2["for_hash"].as_str().unwrap().to_string();
+        // Both hashes should have been observed exactly once across
+        // the two calls. The race makes which hash lands in r1 vs r2
+        // nondeterministic, but they must be distinct.
+        assert_ne!(h1, h2, "concurrent calls received the same hash");
+        let mut seen = vec![h1, h2];
+        seen.sort();
+        assert_eq!(seen, vec![hash_a, hash_b]);
+    }
+
+    #[tokio::test]
+    async fn http_error_body_strips_control_characters() {
+        // A misbehaving or compromised bridge could embed ANSI
+        // escape sequences or other control characters in an error
+        // body; if callers later log `BridgeError::Http`'s `Display`
+        // impl to a terminal or structured log, those bytes would
+        // pass through and disrupt rendering / inject fake log
+        // lines. The client sanitizes before storing.
+        let app = Router::new().route(
+            "/enqueue",
+            post(|| async {
+                // Bytes: BEL, ESC[31m (red), text, ESC[0m, NUL, valid text.
+                let evil = b"\x07\x1b[31mfake-error\x1b[0m\x00real-error".to_vec();
+                (
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                    evil,
+                )
+            }),
+        );
+        let addr = spawn_test_server(app).await;
+        let client = OllamaBridgeClient::new(format!("http://{addr}"), "k".into()).unwrap();
+        let err = client
+            .enqueue(JobEndpoint::Chat, json!({}))
+            .await
+            .unwrap_err();
+        match err {
+            BridgeError::Http { body, .. } => {
+                assert!(!body.contains('\x07'), "BEL leaked: {body:?}");
+                assert!(!body.contains('\x1b'), "ESC leaked: {body:?}");
+                assert!(!body.contains('\x00'), "NUL leaked: {body:?}");
+                // The legible payload survives (filter strips the
+                // control bytes, not the surrounding text).
+                assert!(body.contains("fake-error"), "got: {body:?}");
+                assert!(body.contains("real-error"), "got: {body:?}");
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
     }
 
     #[tokio::test]
