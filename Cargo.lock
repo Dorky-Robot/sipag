@@ -2812,6 +2812,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-board",
  "sipag-core",
  "sipag-dispatch",
  "sipag-mesh",
@@ -2824,6 +2825,18 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "sipag-board"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -2842,6 +2855,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sipag-board",
  "sipag-mesh",
  "sipag-pubsub",
  "subtle",

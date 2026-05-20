@@ -204,7 +204,7 @@ impl KeyResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{create_project, projects_dir};
+    use crate::{create_project, projects_dir};
     use tempfile::TempDir;
 
     fn setup() -> TempDir {

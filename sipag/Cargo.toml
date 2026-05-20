@@ -29,6 +29,10 @@ sipag-dispatch = { path = "../sipag-dispatch" }
 # `sipag_core::hosts::…` path; new code imports `sipag_mesh::…`
 # directly.
 sipag-mesh = { path = "../sipag-mesh" }
+# OKR + Task + Role + Project + Observation domain. sipag-core
+# re-exports at the old `sipag_core::board::…` path; new code
+# imports `sipag_board::…` directly.
+sipag-board = { path = "../sipag-board" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

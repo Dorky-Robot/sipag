@@ -23,6 +23,9 @@ sipag-pubsub = { path = "../sipag-pubsub" }
 # `sipag_core::hosts::…` path for back-compat. Prefer `sipag_mesh::…`
 # for new code.
 sipag-mesh = { path = "../sipag-mesh" }
+# OKR + Task + Role + Project + Observation domain. Extracted into
+# its own crate; re-exported at `sipag_core::board::…` for back-compat.
+sipag-board = { path = "../sipag-board" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 log = "0.4"

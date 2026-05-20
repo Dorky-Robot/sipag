@@ -1,5 +1,10 @@
 pub mod auth;
-pub mod board;
+/// OKR + Task + Role + Project + Observation domain types. Extracted
+/// into its own workspace crate (`sipag-board`). Re-exported here so
+/// existing `sipag_core::board::…` imports keep compiling during the
+/// transition. Direct `sipag_board::…` imports are preferred for new
+/// code.
+pub use sipag_board as board;
 pub mod config;
 /// ⛔ Deprecated 2026-05-17. Kanban-shaped refinement pipeline (raw
 /// idea → grouped → refined → ticket) — replaced by the Experimentation

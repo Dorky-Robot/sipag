@@ -2,6 +2,7 @@
 members = [
     "katulong-client",
     "ollama-bridge-client",
+    "sipag-board",
     "sipag-core",
     "sipag-corpus",
     "sipag-dispatch",

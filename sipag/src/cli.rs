@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use sipag_core::{board, config::default_sipag_dir, gate, katulong};
+use sipag_board as board;
+use sipag_core::{config::default_sipag_dir, gate, katulong};
 use std::io::{BufRead, BufReader};
 use std::process::Command;
 
