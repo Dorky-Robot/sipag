@@ -3,6 +3,7 @@ members = [
     "katulong-client",
     "ollama-bridge-client",
     "sipag-core",
+    "sipag-corpus",
     "sipag-dispatch",
     "sipag-pubsub",
     "sipag",
