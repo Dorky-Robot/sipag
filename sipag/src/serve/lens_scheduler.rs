@@ -26,6 +26,32 @@
 //! per-lens fires (with proper in-flight tracking) when telemetry
 //! shows lenses overlapping at scale.
 //!
+//! **Corpus mutex contention.** [`spawn`] takes the `Arc<Mutex<Corpus>>`
+//! lock for the duration of an entire `run_one_tick` call (including
+//! gemma round-trips inside `LensWorker::run_with_tools`). Today the
+//! scheduler is the only consumer of the corpus, so contention is
+//! invisible. Future consumers (web UI search endpoints, bridge
+//! worker, …) added to the corpus mutex will block during tick
+//! windows — promote to RwLock or a write-through channel if that
+//! latency becomes operator-visible.
+//!
+//! **Cadence semantic.** `last_fired` is set after the fire RETURNS,
+//! not when it starts. A 60s-interval lens that takes 90s to fire
+//! won't queue up an instant re-fire; the next due window starts
+//! at fire-end, so actual cadence drifts later under load. Fast
+//! lenses see a clean `interval`-spaced cadence.
+//!
+//! **Known v1 limitations (not addressed in the scheduler PR):**
+//! - **Panic safety:** a `LensWorker::run_with_tools` panic (vs Err)
+//!   aborts the spawned scheduler task. Lens-workers shouldn't panic
+//!   in practice (all error paths are `Result`-typed), but a future
+//!   PR should wrap each fire in a `tokio::task::spawn` + `JoinHandle::await`
+//!   supervisor so one bad lens can't kill the whole loop.
+//! - **No cancellation:** the spawned task runs until process exit.
+//!   `shutdown_signal()` in `serve/mod.rs` triggers axum's graceful
+//!   shutdown but doesn't reach the scheduler. Tokio runtime drop
+//!   at process exit aborts cleanly enough for v1.
+//!
 //! ## State (v1)
 //!
 //! `last_fired` lives in memory. A `sipag serve` restart resets the
@@ -92,9 +118,13 @@ pub struct SchedulerTick {
 impl LensScheduler {
     /// Build a scheduler over the supplied (already-loaded) lenses.
     /// Retired lenses are filtered out at construction so the runtime
-    /// loop doesn't need to re-check on every tick.
+    /// loop doesn't need to re-check on every tick. Logs a one-time
+    /// `warn!` per lens whose trigger variant the scheduler can't
+    /// evaluate today — so an operator who drops a Threshold lens
+    /// into `~/.sipag/lenses/` learns at boot that it won't fire
+    /// (rather than waiting for the much-later tick telemetry).
     pub fn new(lenses: Vec<Lens>, resolver: ModelResolver) -> Self {
-        let lenses = lenses
+        let lenses: Vec<RegisteredLens> = lenses
             .into_iter()
             .filter(|l| !l.retired)
             .map(|lens| RegisteredLens {
@@ -102,6 +132,27 @@ impl LensScheduler {
                 last_fired: None,
             })
             .collect();
+        for rl in &lenses {
+            match &rl.lens.trigger {
+                TriggerPolicy::Schedule { .. } => {}
+                TriggerPolicy::Threshold => {
+                    warn!(
+                        lens = %rl.lens.name,
+                        "scheduler: lens has TriggerPolicy::Threshold which the scheduler can't \
+                         evaluate today — will surface in skipped_unsupported telemetry until \
+                         §9 Phase 2 #7 (SSE subscriber) lands a bridge-worker that can drive it"
+                    );
+                }
+                TriggerPolicy::ModelDecide => {
+                    warn!(
+                        lens = %rl.lens.name,
+                        "scheduler: lens has TriggerPolicy::ModelDecide which the scheduler can't \
+                         evaluate today — will surface in skipped_unsupported telemetry until \
+                         the §10 model-decide formalization lands"
+                    );
+                }
+            }
+        }
         Self { lenses, resolver }
     }
 
@@ -121,9 +172,11 @@ impl LensScheduler {
     /// Serial within a tick — see module doc.
     ///
     /// `last_fired` advances **on every fire attempt regardless of
-    /// outcome**. A broken lens that consistently errors will respect
-    /// its `interval` instead of busy-looping; the operator sees the
-    /// error in `summary.errors` once per interval.
+    /// outcome**, and is anchored to the moment the fire RETURNS (not
+    /// when it started). A broken lens that consistently errors will
+    /// respect its `interval` instead of busy-looping; a slow lens
+    /// won't queue up an instant re-fire after a long run. See the
+    /// "Cadence semantic" module-doc note.
     pub async fn run_one_tick<B: ChatBackend>(
         &mut self,
         backend: &B,
@@ -206,16 +259,19 @@ impl LensScheduler {
             )
             .await?;
         // Structural verbs (SuggestStance / AskHuman / ProposeTask)
-        // need dispatching to UI surfaces. v1 just logs them; the
-        // bridge worker + UI affordances land in follow-up PRs.
+        // need dispatching to UI surfaces. v1 doesn't dispatch them —
+        // log at `warn!` so an operator who sees a lens producing
+        // ProposeTask / AskHuman knows the UI surface is missing
+        // (rather than the action being silently dropped under
+        // default `info!` filter levels).
         for a in &actions {
             match a {
                 StructuralAction::Observe { .. } => {}
                 other => {
-                    info!(
+                    warn!(
                         lens = %lens.name,
                         action = ?other,
-                        "scheduler: structural verb produced (not yet dispatched in v1)"
+                        "scheduler: structural verb produced but not yet dispatched (v1) — UI affordance is a follow-up PR"
                     );
                 }
             }
@@ -243,10 +299,27 @@ enum FireDecision {
 /// per-line tolerance. A single bad lens shouldn't take down the
 /// whole registry on boot.
 ///
+/// **Symlink-skip:** entries that resolve via symlink are skipped
+/// with a `warn!`. The lens dir is operator-owned and the trust
+/// boundary is operator-internal, but skipping symlinks avoids
+/// surprising behavior if a future feature lets non-operator
+/// processes drop files into the dir.
+///
+/// **Name-dedup:** lenses are deduplicated by `name`. Later
+/// duplicates are skipped with a `warn!` — operator-visible enough
+/// that an accidental `cp kr-1.toml kr-1-copy.toml` shows up
+/// instead of silently double-firing the lens every interval.
+/// Filesystem `read_dir` order is unspecified, so "later" means
+/// "later in iteration order"; in practice the operator should
+/// rename / delete the duplicate rather than rely on which one wins.
+///
 /// Returns an empty Vec if `dir` doesn't exist (operator hasn't set
 /// up any lenses yet — not an error).
 pub async fn load_lenses_from_dir(dir: &Path) -> Vec<Lens> {
+    use std::collections::HashSet;
+
     let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     let mut entries = match tokio::fs::read_dir(dir).await {
         Ok(e) => e,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -267,6 +340,24 @@ pub async fn load_lenses_from_dir(dir: &Path) -> Vec<Lens> {
         if path.extension().and_then(|e| e.to_str()) != Some("toml") {
             continue;
         }
+        let file_type = match entry.file_type().await {
+            Ok(ft) => ft,
+            Err(err) => {
+                warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "scheduler: failed to stat lens file; skipping"
+                );
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            warn!(
+                path = %path.display(),
+                "scheduler: lens file is a symlink — skipping (operator-owned dir trust boundary)"
+            );
+            continue;
+        }
         let content = match tokio::fs::read_to_string(&path).await {
             Ok(c) => c,
             Err(err) => {
@@ -278,16 +369,26 @@ pub async fn load_lenses_from_dir(dir: &Path) -> Vec<Lens> {
                 continue;
             }
         };
-        match toml::from_str::<Lens>(&content) {
-            Ok(lens) => out.push(lens),
+        let lens: Lens = match toml::from_str(&content) {
+            Ok(l) => l,
             Err(err) => {
                 warn!(
                     path = %path.display(),
                     error = %err,
                     "scheduler: malformed lens TOML; skipping"
                 );
+                continue;
             }
+        };
+        if !seen.insert(lens.name.clone()) {
+            warn!(
+                path = %path.display(),
+                name = %lens.name,
+                "scheduler: lens name already seen in this dir — skipping duplicate"
+            );
+            continue;
         }
+        out.push(lens);
     }
     out
 }
@@ -780,5 +881,191 @@ interval = 60
         // And the scheduler filters it out at registration.
         let scheduler = LensScheduler::new(lenses, ModelResolver::with_defaults());
         assert!(scheduler.is_empty());
+    }
+
+    // ── round-1 review-fix coverage ─────────────────────────────────
+
+    #[tokio::test]
+    async fn load_lenses_dedupes_duplicate_names_with_warn() {
+        // Two files declaring the same lens name should NOT both
+        // register — that would silently double-fire the lens every
+        // interval. Loader keeps the first, warns and skips the
+        // second.
+        let dir = TempDir::new().unwrap();
+        let body = |name: &str| {
+            format!(
+                r#"
+name = "{name}"
+prompt_text = "x"
+retired = false
+
+[source]
+kind = "project_meta"
+name = "m"
+
+[model]
+type = "default"
+
+[trigger]
+kind = "schedule"
+interval = 60
+"#
+            )
+        };
+        tokio::fs::write(dir.path().join("a.toml"), body("dup"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("b.toml"), body("dup"))
+            .await
+            .unwrap();
+        let lenses = load_lenses_from_dir(dir.path()).await;
+        assert_eq!(
+            lenses.len(),
+            1,
+            "duplicate lens names must be deduped at load time so the scheduler doesn't double-fire"
+        );
+        assert_eq!(lenses[0].name, "dup");
+    }
+
+    #[tokio::test]
+    async fn multi_lens_tick_serializes_fires_and_first_failure_does_not_abort_the_rest() {
+        // Three lenses all due on the first tick. First emits garbage
+        // (parse error in run_with_tools); second + third return
+        // valid LensOutput. Pin both the "errored lens doesn't abort"
+        // and the "all due lenses are evaluated this tick" promises.
+        let (_dir, mut corpus) = fresh_corpus().await;
+        let embedder = FakeEmbedder { dim: 4 };
+        let resolver = ModelResolver::with_defaults();
+
+        // CannedBackend serves the SAME reply to every call. To have
+        // mixed outcomes per-lens we need different backends per
+        // fire. Easiest: a backend that errors regardless (the second
+        // and third lenses fire too because the scheduler doesn't
+        // abort on a single Err — they'll all error). We assert the
+        // SCHEDULER kept evaluating, not that mixed outcomes coexist
+        // (mixed outcomes require per-lens backends which the v1
+        // interface doesn't expose).
+        let bad_backend = CannedBackend::new("not json");
+        let lens_a = test_lens(
+            "first",
+            TriggerPolicy::Schedule {
+                interval: Duration::from_secs(60),
+            },
+        );
+        let lens_b = test_lens(
+            "second",
+            TriggerPolicy::Schedule {
+                interval: Duration::from_secs(60),
+            },
+        );
+        let lens_c = test_lens(
+            "third",
+            TriggerPolicy::Schedule {
+                interval: Duration::from_secs(60),
+            },
+        );
+        let mut scheduler = LensScheduler::new(vec![lens_a, lens_b, lens_c], resolver);
+
+        let summary = scheduler
+            .run_one_tick(&bad_backend, &embedder, &mut corpus)
+            .await;
+        // All three should be in `fired` (attempted).
+        assert_eq!(summary.fired.len(), 3);
+        assert_eq!(
+            summary.fired,
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ],
+            "tick must iterate all due lenses in registration order"
+        );
+        // All three errored (same garbage backend reply).
+        assert_eq!(
+            summary.errors.len(),
+            3,
+            "all three lenses should have an error recorded; first error must not have aborted the iteration"
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_with_zero_interval_fires_every_tick() {
+        // Degenerate case: `interval = 0` means "fire every tick"
+        // (no minimum gap). Pin so the duration_since(t) >= interval
+        // comparator's edge behavior is locked in.
+        let (_dir, mut corpus) = fresh_corpus().await;
+        let backend = CannedBackend::new(finished_lens_output());
+        let embedder = FakeEmbedder { dim: 4 };
+        let resolver = ModelResolver::with_defaults();
+        let lens = test_lens(
+            "every-tick",
+            TriggerPolicy::Schedule {
+                interval: Duration::from_secs(0),
+            },
+        );
+        let mut scheduler = LensScheduler::new(vec![lens], resolver);
+
+        // Two back-to-back ticks should both fire.
+        let first = scheduler
+            .run_one_tick(&backend, &embedder, &mut corpus)
+            .await;
+        assert_eq!(first.fired.len(), 1);
+        let second = scheduler
+            .run_one_tick(&backend, &embedder, &mut corpus)
+            .await;
+        assert_eq!(
+            second.fired.len(),
+            1,
+            "interval = 0 must fire every tick (no minimum gap)"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_lenses_skips_symlink_entries() {
+        // The lens dir is operator-owned, but loading symlinks would
+        // surprise an operator who didn't realize TOML files outside
+        // ~/.sipag/lenses/ could end up registered.
+        let dir = TempDir::new().unwrap();
+        let target_dir = TempDir::new().unwrap();
+        let target = target_dir.path().join("target.toml");
+        tokio::fs::write(
+            &target,
+            r#"
+name = "from-symlink"
+prompt_text = "x"
+retired = false
+
+[source]
+kind = "project_meta"
+name = "m"
+
+[model]
+type = "default"
+
+[trigger]
+kind = "schedule"
+interval = 60
+"#,
+        )
+        .await
+        .unwrap();
+        // Create a symlink in the lens dir pointing at the target.
+        let symlink_path = dir.path().join("linked.toml");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&target, &symlink_path).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-unix platforms (we don't ship for these today),
+            // skip the symlink half of the test.
+            let _ = (target, symlink_path);
+            return;
+        }
+        let lenses = load_lenses_from_dir(dir.path()).await;
+        assert!(
+            lenses.is_empty(),
+            "symlinked lens file should be skipped (operator-owned dir trust boundary)"
+        );
     }
 }
