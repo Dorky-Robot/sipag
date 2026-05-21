@@ -34,10 +34,11 @@
 //!   whether to dispatch) is a separate concern and retires
 //!   separately (the gate's load-bearing use case dissolved with the
 //!   per-dispatch session model). See `docs/modules.md` §9 #11.
-//! - **Not the nudge loop.** Post-dispatch observation
-//!   (`verify_and_heal_dispatch`) belongs to the lens-worker
-//!   abstraction (see `docs/modules.md` §9 #3) and retires when that
-//!   lands. See `docs/modules.md` §9 #11.
+//! - **Not the nudge loop.** Post-dispatch observation belongs to
+//!   the lens-worker abstraction (see `docs/modules.md` §9 #3). The
+//!   legacy keystroke-driving recovery loop (`verify_and_heal_dispatch`)
+//!   was deleted entirely with §9 #11 (closes sipag #528 by deletion
+//!   — see also memory `feedback-strict-layer-coupling`).
 //! - **Not session lifecycle policy.** This function expects the
 //!   caller to have created the katulong session already (so the
 //!   gate could inspect it). On dispatch failure the session is

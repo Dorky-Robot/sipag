@@ -2,21 +2,23 @@
 
 > *Companion to [`narrative.md`](narrative.md): that doc is the product story; this one is the mechanics — what happens between you clicking "Dispatch" in the web UI and an agent running in a katulong session. Read [`modules.md`](modules.md) §3 + §4 for the architectural context (Experimentation and Topology contexts).*
 
-> **⚠ Snapshot dated 2026-05-18. Out of date in places after PR #547.**
+> **⚠ Snapshot dated 2026-05-18. Substantially out of date after PR #547 (sipag-dispatch extraction) and §9 #11 (recovery loop deletion).**
 >
-> This doc was written before the `sipag-dispatch` workspace crate landed. References to `htmx.rs::dispatch_via_attach_client` (and its helpers `finish_v2`, `v2_step_reason`, `paste_echo_regex`, `tui_ready_re`, `claude_processing_re`) all moved — the v2 attach flow is now `sipag_dispatch::dispatch` in [`sipag-dispatch/src/lib.rs`](../sipag-dispatch/src/lib.rs). Line numbers in `serve/htmx.rs` for the dispatch handler + the legacy `verify_and_heal_dispatch` are accurate as of the snapshot date but have shifted.
+> Major changes the doc does NOT yet reflect:
+> - The `sipag-dispatch` workspace crate landed in PR #547. The v2 attach flow's helpers (`dispatch_via_attach_client`, `finish_v2`, `v2_step_reason`, `paste_echo_regex`, `tui_ready_re`, `claude_processing_re`) moved out of `htmx.rs`; the canonical entry point is `sipag_dispatch::dispatch` in [`sipag-dispatch/src/lib.rs`](../sipag-dispatch/src/lib.rs).
+> - **The legacy keystroke-driving nudge loop is GONE** (§9 #11, closes sipag #528 by deletion). `verify_and_heal_dispatch`, `sipag-core/src/nudge.rs`, `build_launch_cmd`, the dispatch-time HTTP `/exec` pre-send, the `SIPAG_DISPATCH_V2` env var, and `dispatch_v2_enabled` — all deleted. The WS-attach path is now the ONLY path. Every reference in this doc to "two backend paths," "branch on `SIPAG_DISPATCH_V2`," "legacy nudge loop," or "legacy `/exec`+nudge fallback" is historical, not current.
 >
-> What's still accurate: the *flow* (HTTP `POST /sessions` → gate → branch on `SIPAG_DISPATCH_V2` → v2 attach flow or legacy nudge), the failure-mode table, the gate's silent-fail risk, the modules.md §9 Phase 2 #11 retirement plan. What's not: function locations and the per-LOC line numbers.
+> What's still accurate: the gate's role (gemma classifies pane before dispatch), the per-session naming, the modules.md cross-references to Phase 1 #3 and Phase 2 #10. The end-to-end diagram's first three boxes (browser click → `dispatch_task_handler` → `POST /sessions`) still match; the fork into v1/v2 paths does not.
 >
-> Until this doc gets a refresh, treat it as a navigable map of the *conceptual* flow; for current code locations, read the `sipag-dispatch` crate's module docs directly.
+> Until this doc gets a full refresh, treat it as a navigable map of the *historical* flow; for current code, read the `sipag-dispatch` crate's module docs directly.
 
-This is the **current implementation** (May 2026). Many concepts here (the gate, the legacy nudge loop) are being refactored into the lens-worker abstraction per [`modules.md`](modules.md) §9 Phase 1 #3 and Phase 2 #11.
+This is the **current implementation** (May 2026). The gate still lives in `sipag-core/src/gate.rs`; it folds into the lens-worker abstraction per [`modules.md`](modules.md) §9 Phase 1 #3 / §9 #9.
 
 ---
 
 ## One-line summary
 
-Dispatch turns a `Task` on the sipag board into a **katulong session running an agent with a task-shaped prompt**, fanning the work through one of two backend paths gated by the `SIPAG_DISPATCH_V2` env var.
+Dispatch turns a `Task` on the sipag board into a **katulong session running an agent with a task-shaped prompt** via WS attach (`sipag_dispatch::dispatch` over `KatulongAttachClient`). Historically the work fanned through one of two backend paths gated by `SIPAG_DISPATCH_V2`; the legacy nudge-loop path retired in §9 #11.
 
 ---
 
