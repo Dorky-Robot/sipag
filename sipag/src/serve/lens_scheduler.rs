@@ -886,11 +886,13 @@ interval = 60
     // ── round-1 review-fix coverage ─────────────────────────────────
 
     #[tokio::test]
-    async fn load_lenses_dedupes_duplicate_names_with_warn() {
-        // Two files declaring the same lens name should NOT both
-        // register — that would silently double-fire the lens every
-        // interval. Loader keeps the first, warns and skips the
-        // second.
+    async fn load_lenses_dedupes_by_name_not_by_path() {
+        // Three files: two share `name = "dup"`, one has a unique
+        // `name = "unique"`. The dedup is name-scoped, so the
+        // duplicate is dropped but the differently-named lens loads
+        // alongside the surviving copy of "dup". This pins both
+        // halves of the dedup contract: same-name → drop, different-
+        // name in same dir → both load.
         let dir = TempDir::new().unwrap();
         let body = |name: &str| {
             format!(
@@ -918,13 +920,19 @@ interval = 60
         tokio::fs::write(dir.path().join("b.toml"), body("dup"))
             .await
             .unwrap();
+        tokio::fs::write(dir.path().join("c.toml"), body("unique"))
+            .await
+            .unwrap();
         let lenses = load_lenses_from_dir(dir.path()).await;
         assert_eq!(
             lenses.len(),
-            1,
-            "duplicate lens names must be deduped at load time so the scheduler doesn't double-fire"
+            2,
+            "duplicate names dropped; differently-named lenses keep loading"
         );
-        assert_eq!(lenses[0].name, "dup");
+        let names: std::collections::HashSet<String> =
+            lenses.iter().map(|l| l.name.clone()).collect();
+        assert!(names.contains("dup"));
+        assert!(names.contains("unique"));
     }
 
     #[tokio::test]
@@ -980,11 +988,19 @@ interval = 60
             ],
             "tick must iterate all due lenses in registration order"
         );
-        // All three errored (same garbage backend reply).
+        // All three errored (same garbage backend reply). The error
+        // ORDER should also match registration order — pinned so an
+        // off-by-one that mis-attributes a failure (B's error under
+        // A's name) would surface.
+        let error_names: Vec<String> = summary.errors.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(
-            summary.errors.len(),
-            3,
-            "all three lenses should have an error recorded; first error must not have aborted the iteration"
+            error_names,
+            vec![
+                "first".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ],
+            "errors must be recorded in registration order alongside fired"
         );
     }
 
@@ -1021,17 +1037,18 @@ interval = 60
     }
 
     #[tokio::test]
-    async fn load_lenses_skips_symlink_entries() {
-        // The lens dir is operator-owned, but loading symlinks would
-        // surprise an operator who didn't realize TOML files outside
-        // ~/.sipag/lenses/ could end up registered.
+    async fn load_lenses_skips_symlinks_but_keeps_regular_files() {
+        // Two files: one regular TOML (must still load), one symlink
+        // to a TOML elsewhere (must be skipped). Pins both halves so
+        // a regression that broadened the skip (e.g. accidentally
+        // checking `!is_file()`) would surface here.
         let dir = TempDir::new().unwrap();
         let target_dir = TempDir::new().unwrap();
         let target = target_dir.path().join("target.toml");
-        tokio::fs::write(
-            &target,
-            r#"
-name = "from-symlink"
+        let body = |name: &str| {
+            format!(
+                r#"
+name = "{name}"
 prompt_text = "x"
 retired = false
 
@@ -1045,10 +1062,15 @@ type = "default"
 [trigger]
 kind = "schedule"
 interval = 60
-"#,
-        )
-        .await
-        .unwrap();
+"#
+            )
+        };
+        tokio::fs::write(&target, body("from-symlink"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("regular.toml"), body("regular"))
+            .await
+            .unwrap();
         // Create a symlink in the lens dir pointing at the target.
         let symlink_path = dir.path().join("linked.toml");
         #[cfg(unix)]
@@ -1058,14 +1080,20 @@ interval = 60
         #[cfg(not(unix))]
         {
             // On non-unix platforms (we don't ship for these today),
-            // skip the symlink half of the test.
+            // verify the regular file path still works and skip the
+            // symlink half.
             let _ = (target, symlink_path);
+            let lenses = load_lenses_from_dir(dir.path()).await;
+            assert_eq!(lenses.len(), 1);
+            assert_eq!(lenses[0].name, "regular");
             return;
         }
         let lenses = load_lenses_from_dir(dir.path()).await;
-        assert!(
-            lenses.is_empty(),
-            "symlinked lens file should be skipped (operator-owned dir trust boundary)"
+        assert_eq!(
+            lenses.len(),
+            1,
+            "regular TOML loads; symlinked TOML skipped"
         );
+        assert_eq!(lenses[0].name, "regular");
     }
 }
