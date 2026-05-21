@@ -112,7 +112,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 
 - **Owns:** `Lens`, `LensWorker`, the four verbs (`observe` + `suggest_stance` + `ask_human` + `propose_task`), trigger policy, `ModelChoice` → concrete-model resolution.
 - **Source today:** **does not exist.** This is net-new (modules.md §9 #3).
-- **Why crate-first:** this is the abstraction that's supposed to unify gate + nudge + future observers. If it lives inside `sipag-core` it will accidentally couple to board/auth/etc. The whole point of the abstraction is that it's substrate.
+- **Why crate-first:** this is the abstraction that's supposed to unify the surviving gate prototype + future observers. (Earlier drafts named `nudge.rs` here as a sibling; that module retired in modules.md §9 #11 since the WS-attach path doesn't need post-dispatch keystroke retry.) If it lives inside `sipag-core` it will accidentally couple to board/auth/etc. The whole point of the abstraction is that it's substrate.
 - **In scope v1:** runtime that takes a lens definition + bridge endpoint + corpus handle + trigger policy and produces corpus writes plus typed verb calls. Each worker resolves its `ModelChoice` (default / named / Fast / Strong / CodeAware) via `~/.sipag/models.toml` and includes the concrete model name in the bridge enqueue body. Bridge lens-worker as the first instance.
 - **Deferred:** lens governance / sprawl ranking (modules.md §10), meta-cognitive guardrails (§10), ad-hoc lens expiry (§10).
 - **Depends on:** `sipag-corpus`, `ollama-bridge-client`, `sipag-board` (for `KrStance` writes).
