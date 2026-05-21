@@ -37,7 +37,9 @@ sipag-core/src/                # Library — domain logic + auth + LLM client + 
 ├── feature.rs                 # ⛔ deprecated (kanban refinement pipeline; PR #536)
 ├── refine.rs                  # ⛔ deprecated (companion to feature.rs)
 ├── gate.rs                    # early lens-worker prototype (pre-dispatch classifier)
-├── nudge.rs                   # early lens-worker prototype (post-dispatch observer)
+│                              # (no nudge.rs — deleted in §9 #11; the
+│                              # post-dispatch observer role belongs to
+│                              # the lens-worker abstraction now)
 ├── hosts.rs                   # multi-host mesh config
 │                              # (no katulong.rs file — `lib.rs:30` does
 │                              # `pub use katulong_client as katulong;` as
@@ -137,13 +139,10 @@ Two upstream issues filed (Phase 1 #3 depends on the topics they add):
 
 - `SIPAG_DIR` — overrides `~/.sipag` for board state.
 - `SIPAG_DEV=1` — enables tower-livereload + filesystem watcher in `sipag serve`.
-- `SIPAG_DISPATCH_V2=1` — routes `sipag serve` dispatches through the
-  `KatulongAttachClient` (WS attach + explicit `wait_for` handshake) instead
-  of the legacy `verify_and_heal_dispatch` keystroke loop. **Default OFF**
-  — the legacy path is still the default until Phase 2 #11 in
-  `docs/modules.md` §9 deletes `verify_and_heal_dispatch` outright. See
-  `sipag/src/serve/htmx.rs::dispatch_v2_enabled` for the truthy-value
-  semantics. Set this to `1` in production to ride the v2 attach path.
+
+> `SIPAG_DISPATCH_V2` retired in §9 #11 (closes sipag #528 by
+> deletion). The WS-attach path is now the only path; the legacy
+> keystroke-driving `verify_and_heal_dispatch` nudge loop is gone.
 
 ## Conventions
 
@@ -200,7 +199,7 @@ This matters for Claude sessions specifically: reach for `diwa search` BEFORE `g
 
 - `sipag-core/src/board/` — Objective / KeyResult / Task / Role / Project schema
 - `sipag-core/src/llm.rs` — gemma4 / ollama client (will export `LlmClient` trait per Phase 2 #8)
-- `sipag-core/src/{gate,nudge}.rs` — early lens-worker prototypes; fold into the lens-worker abstraction in Phase 1 #3
+- `sipag-core/src/gate.rs` — early lens-worker prototype (pre-dispatch classifier); folds into the lens-worker abstraction in Phase 1 #3. (Companion `nudge.rs` retired in §9 #11.)
 - `sipag/src/serve/` — the web UI (htmx + maud), where Steering lives today
 - `tui/src/board_app.rs` — interactive board
 - `katulong-client/src/` — wire client; touch when adding HTTP/WS/SSE consumers

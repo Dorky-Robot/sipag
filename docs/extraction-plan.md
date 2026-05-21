@@ -44,16 +44,16 @@ sipag/
 │       ├── config.rs       ← stays (cross-cutting; tiny)
 │       ├── feature.rs      ⛔ deprecated
 │       ├── refine.rs       ⛔ deprecated
-│       ├── gate.rs         ⛕ retiring (Phase 2 #9 + #11)
-│       ├── nudge.rs        ⛕ retiring (Phase 2 #9 + #11)
+│       ├── gate.rs         ⛕ retiring (Phase 2 #9 — folds into lens-worker abstraction)
+│       │                   (nudge.rs deleted in §9 #11; no successor needed)
 │       ├── llm.rs          ⛕ retiring (callers migrate to `ollama-bridge-client`)
 │       └── lib.rs          (thin re-exports of katulong-client / pubsub / mesh / board / auth)
 ├── sipag/             (binary: CLI + serve/)
-│   └── src/serve/htmx.rs   ~1730 LOC — the remaining mess is route plumbing + the gate + the legacy nudge loop
+│   └── src/serve/htmx.rs   ~1620 LOC — remaining mess is route plumbing + the gate (legacy nudge loop deleted in §9 #11)
 └── tui/               (binary: ratatui board)
 ```
 
-**All 8 planned extractions complete.** Eleven workspace crates plus two binaries. `sipag-core` is now a thin compatibility shim around the extracted crates plus a handful of retiring modules (gate, nudge, llm — all scheduled to retire with the lens-worker scheduler landing, per modules.md §9 #9-#11).
+**All 8 planned extractions complete.** Eleven workspace crates plus two binaries. `sipag-core` is now a thin compatibility shim around the extracted crates plus a handful of retiring modules (gate + llm — scheduled to retire with the lens-worker scheduler landing, per modules.md §9 #9). `nudge` already retired in §9 #11 (deleted alongside `verify_and_heal_dispatch`).
 
 External dependencies sipag relies on (not in this repo, but called out so the structure-only readers know what's outside the boundary):
 
@@ -64,7 +64,7 @@ External dependencies sipag relies on (not in this repo, but called out so the s
 
 **Target reached.** Nine planned workspace crates + sipag-core (shim) + sipag (binary) + tui (binary). The target tree from earlier drafts is now the current state — see §1 above.
 
-The remaining work isn't more extraction; it's the **post-extraction cleanup**: retire `sipag-core/src/gate.rs` + `nudge.rs` + `llm.rs` (callers migrate to the lens-worker abstraction), let `sipag-core` shrink to just `config.rs` + the re-export shims, and then eventually consider dissolving sipag-core itself once the shims have aged out. That's all in modules.md §9 Phase 2 + Phase 3, not in this doc.
+The remaining work isn't more extraction; it's the **post-extraction cleanup**: retire `sipag-core/src/gate.rs` + `llm.rs` (callers migrate to the lens-worker abstraction; `nudge.rs` already retired in §9 #11), let `sipag-core` shrink to just `config.rs` + the re-export shims, and then eventually consider dissolving sipag-core itself once the shims have aged out. That's all in modules.md §9 Phase 2 + Phase 3, not in this doc.
 
 ---
 
@@ -112,7 +112,7 @@ Each row: what it owns, why it earns crate status, what's in scope for v1 of the
 
 - **Owns:** `Lens`, `LensWorker`, the four verbs (`observe` + `suggest_stance` + `ask_human` + `propose_task`), trigger policy, `ModelChoice` → concrete-model resolution.
 - **Source today:** **does not exist.** This is net-new (modules.md §9 #3).
-- **Why crate-first:** this is the abstraction that's supposed to unify gate + nudge + future observers. If it lives inside `sipag-core` it will accidentally couple to board/auth/etc. The whole point of the abstraction is that it's substrate.
+- **Why crate-first:** this is the abstraction that's supposed to unify the surviving gate prototype + future observers. (Earlier drafts named `nudge.rs` here as a sibling; that module retired in modules.md §9 #11 since the WS-attach path doesn't need post-dispatch keystroke retry.) If it lives inside `sipag-core` it will accidentally couple to board/auth/etc. The whole point of the abstraction is that it's substrate.
 - **In scope v1:** runtime that takes a lens definition + bridge endpoint + corpus handle + trigger policy and produces corpus writes plus typed verb calls. Each worker resolves its `ModelChoice` (default / named / Fast / Strong / CodeAware) via `~/.sipag/models.toml` and includes the concrete model name in the bridge enqueue body. Bridge lens-worker as the first instance.
 - **Deferred:** lens governance / sprawl ranking (modules.md §10), meta-cognitive guardrails (§10), ad-hoc lens expiry (§10).
 - **Depends on:** `sipag-corpus`, `ollama-bridge-client`, `sipag-board` (for `KrStance` writes).
@@ -244,4 +244,4 @@ A crate is "fully migrated" (re-export can be deleted) when zero `use sipag_core
   - `sipag-auth` (PR #554) — identity subsystem. Mechanical move of sipag-core/src/auth/ (9 files). Bulk `crate::auth::…` → `crate::…` fix (20+ references).
   - This docs PR closes the loop: §1 (current state) + §2 (target reached) + §3 (every entry ✅ done with PR link) + §4 (sequencing all done) updated.
 
-**The plan is complete.** Future work — retire `sipag-core/src/{gate,nudge,llm}.rs` as the lens-worker scheduler lands, then dissolve `sipag-core` itself once its shims have aged out — lives in modules.md §9, not here.
+**The plan is complete.** Future work — retire `sipag-core/src/{gate,llm}.rs` as the lens-worker scheduler lands (`nudge.rs` already retired in §9 #11), then dissolve `sipag-core` itself once its shims have aged out — lives in modules.md §9, not here.

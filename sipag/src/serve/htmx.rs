@@ -29,7 +29,6 @@ use sipag_core::board::{
 };
 use sipag_core::gate::{self, GateInput};
 use sipag_core::katulong::RemoteConfig;
-use sipag_core::nudge::{self, NudgeInput};
 use sipag_dispatch::{DispatchInput, DispatchStep, WorktreeSpec};
 use tracing::{info, warn};
 
@@ -575,21 +574,12 @@ async fn dispatch_task_handler(
     // before writing code, then the actual task. Mirrors how a human
     // would brief Claude when starting a session manually.
     let prompt = build_dispatch_prompt(&dir, &project_name, &task);
-    // Two-step dispatch: sync exec sends just the launch command
-    // (e.g. `claude\r`) so we get fast HTTP feedback if katulong is
-    // unreachable. The background task waits for claude's TUI to be
-    // ready (auto-approving the trust prompt if seen), then pastes
-    // the prompt as one bracketed-paste message — same shape as a
-    // human typing into the TUI, with normal permission prompts left
-    // intact for human approval from the iPad.
-    let launch_cmd = build_launch_cmd(&role_command);
-    // Compute the v2 flag once, here, so both the synchronous HTTP
-    // exec gating and the background spawn use the same value. v2
-    // owns the launch keystroke itself via `attach.input()`, so we
-    // skip the sync HTTP exec entirely when v2 is enabled — sending
-    // the launch over both paths runs the role command twice.
-    let use_v2 = dispatch_v2_enabled();
-    info!(task = id, use_v2, "dispatch: v2 flag resolved");
+    // Dispatch owns the launch keystroke itself via the WS attach
+    // (`sipag_dispatch::dispatch` → `attach.input("<role-cmd>\r")`).
+    // We do NOT pre-send the launch over HTTP `/exec` here — doing
+    // so would run the role command twice. The legacy `/exec`
+    // pre-send + post-launch nudge loop was deleted with
+    // `verify_and_heal_dispatch` in §9 #11 (closes sipag #528).
     // Each dispatch creates a fresh katulong session with an opaque
     // sipag-prefixed name. Katulong's auto-summarizer renames it from
     // session content later; sipag tracks the session by its
@@ -618,8 +608,8 @@ async fn dispatch_task_handler(
     // Pin the dispatch to this task so the board's "running on" badge
     // matches by session id rather than by name. Done as a separate
     // load+save because the task may have prior gate state we want
-    // to preserve (status, reason, etc. — the nudge loop will clear
-    // those on its first persist if appropriate).
+    // to preserve (status, reason, etc. — the inline clear a few lines
+    // below handles wiping it once we know we're firing).
     if let Ok(mut t) = Task::load(&dir, &project_name, id) {
         t.dispatch_session_id = Some(session_id.clone());
         t.dispatch_host_id = Some(host.id.clone());
@@ -668,25 +658,6 @@ async fn dispatch_task_handler(
         Err((st, body)) => return err_response(st, body),
     }
 
-    if !use_v2 {
-        // Legacy v1 launch keystroke via HTTP /exec. The v2 path owns
-        // its launch keystroke through the WS attach; this branch
-        // stays until `verify_and_heal_dispatch` retires (modules.md
-        // §9 #11). Body cap applies via the async client.
-        if let Err(e) = state
-            .katulong_for(host)
-            .exec_session(&session_id, &launch_cmd)
-            .await
-        {
-            warn!(host = %host.id, error = %e, "v1 exec_session failed");
-            let txt = super::upstream::sanitize_upstream_body(&e.to_string());
-            return err_response(
-                StatusCode::BAD_GATEWAY,
-                format!("exec on {}: {txt}", host.id),
-            );
-        }
-    }
-
     if let Err(e) = move_task(&dir, &project_name, id, "in-progress") {
         warn!(
             project = %project_name,
@@ -709,28 +680,20 @@ async fn dispatch_task_handler(
         }
     }
 
-    // Two dispatch back-ends, gated by `SIPAG_DISPATCH_V2`:
+    // Dispatch action: `sipag_dispatch::dispatch` via
+    // `KatulongAttachClient`'s `wait_for` orchestration (TUI-ready
+    // wait, paste echo, processing wait). The action logic lives in
+    // the `sipag-dispatch` workspace crate (modules.md §9 Phase 2
+    // #12); this site is the web-UI entry. The legacy keystroke-
+    // driving `verify_and_heal_dispatch` nudge loop was deleted in
+    // §9 Phase 2 #11 (closes sipag #528 by deletion — see also
+    // memory `feedback-strict-layer-coupling`).
     //
-    //   v2: the canonical path — calls `sipag_dispatch::dispatch`,
-    //   which uses `KatulongAttachClient`'s `wait_for` orchestration
-    //   (TUI-ready wait, paste echo, processing wait). The action
-    //   logic moved out of htmx.rs entirely as part of the
-    //   sipag-dispatch extraction; see modules.md §9 Phase 2 #12.
-    //
-    //   legacy: gemma4 keystroke-driving nudge loop via
-    //   `verify_and_heal_dispatch`. Kept as a fallback while v2
-    //   bakes in production; scheduled for removal per
-    //   `docs/modules.md` §9 Phase 2 #11 (closes sipag #528 by
-    //   deletion — see also memory `feedback-strict-layer-coupling`).
-    //
-    // Enable v2 by setting `SIPAG_DISPATCH_V2=1` in the
-    // LaunchAgent's environment.
-    //
-    // Known issue across both paths (documented, deferred):
-    // concurrent dispatches of the same task ID race — each call
-    // creates its own katulong session, persists its own
-    // `dispatch_session_id` last-writer-wins, and spawns its own
-    // background task. Worth a per-task in-flight set.
+    // Known issue (documented, deferred): concurrent dispatches of
+    // the same task ID race — each call creates its own katulong
+    // session, persists its own `dispatch_session_id` last-writer-
+    // wins, and spawns its own background task. Worth a per-task
+    // in-flight set.
     let sid = session_id.clone();
     let state_bg = state.clone();
     let host_bg = host.clone();
@@ -740,26 +703,19 @@ async fn dispatch_task_handler(
     let prompt_bg = prompt.clone();
     let title_bg = task.title.clone();
     tokio::spawn(async move {
-        if use_v2 {
-            run_sipag_dispatch(
-                state_bg,
-                host_bg,
-                sid,
-                role_bg,
-                prompt_bg,
-                project_bg,
-                id,
-                session_bg,
-                title_bg,
-                role_worktree,
-            )
-            .await;
-        } else {
-            verify_and_heal_dispatch(
-                state_bg, host_bg, sid, role_bg, prompt_bg, project_bg, id, session_bg,
-            )
-            .await;
-        }
+        run_sipag_dispatch(
+            state_bg,
+            host_bg,
+            sid,
+            role_bg,
+            prompt_bg,
+            project_bg,
+            id,
+            session_bg,
+            title_bg,
+            role_worktree,
+        )
+        .await;
     });
 
     let toast_msg = format!("dispatched #{id} on {} · {}", host.id, session);
@@ -1241,23 +1197,7 @@ fn build_dispatch_prompt(sipag_dir: &std::path::Path, project_name: &str, task: 
     out
 }
 
-/// Returns true when `SIPAG_DISPATCH_V2` is truthy. Truthy = any
-/// value not in {"", "0", "false", "no", "off"} (case-insensitive).
-/// Unset is treated as off.
-fn dispatch_v2_enabled() -> bool {
-    match std::env::var("SIPAG_DISPATCH_V2") {
-        Ok(v) => {
-            let s = v.trim();
-            !matches!(
-                s.to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no" | "off"
-            )
-        }
-        Err(_) => false,
-    }
-}
-
-/// Wraps the `sipag-dispatch` crate call for the v2 dispatch path.
+/// Wraps the `sipag-dispatch` crate call for the dispatch path.
 ///
 /// Owns the sipag-side concerns the crate deliberately doesn't:
 ///
@@ -1301,7 +1241,7 @@ async fn run_sipag_dispatch(
         host = %host.id,
         session_id = %session_id,
         worktree = role_worktree,
-        "dispatch v2: driver spawned",
+        "dispatch: driver spawned",
     );
 
     let remote = RemoteConfig {
@@ -1368,7 +1308,7 @@ async fn run_sipag_dispatch(
                 task = task_id,
                 last_step = ?last_step,
                 error = %e,
-                "dispatch v2: failed",
+                "dispatch: failed",
             );
             ("failed", step_to_legacy_idx(last_step), cleaned)
         }
@@ -1415,296 +1355,6 @@ fn step_to_legacy_name(step: DispatchStep) -> &'static str {
         DispatchStep::WaitEcho => "echo wait",
         DispatchStep::Submit => "submit",
         DispatchStep::WaitProcessing => "processing wait",
-    }
-}
-
-/// Post-launch nudge loop driven by [`sipag_core::nudge::next_step`].
-#[allow(clippy::too_many_arguments)]
-async fn verify_and_heal_dispatch(
-    state: AppState,
-    host: sipag_core::hosts::Host,
-    session_id: String,
-    role_command: String,
-    prompt: String,
-    project_name: String,
-    task_id: u64,
-    session_name_str: String,
-) {
-    use std::time::Duration;
-    use tokio::time::sleep;
-
-    // 20 ticks × 3s = 60s hard ceiling per dispatch. Long enough for
-    // a cold gemma + a few back-and-forth nudges, short enough that
-    // a stuck dispatch surfaces as `needs-human` instead of pinning
-    // a worker indefinitely.
-    const MAX_ITERATIONS: u8 = 20;
-    const ITERATION_INTERVAL: Duration = Duration::from_secs(3);
-    const MAX_GEMMA_FAILURES: u8 = 3;
-
-    let dir = load_dir();
-
-    // Load project so gemma sees the full status menu (each with its
-    // description) on every tick. Loading once outside the loop is
-    // fine — project.toml doesn't churn during a dispatch.
-    let project_cfg = match Project::load(&dir, &project_name) {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(
-                project = %project_name,
-                task = task_id,
-                error = %e,
-                "nudge loop: load project failed — cannot drive dispatch"
-            );
-            publish_dispatch_outcome(
-                &state,
-                &host.id,
-                &session_name_str,
-                &project_name,
-                task_id,
-                "failed",
-                0,
-                "nudge: project load failed",
-            );
-            return;
-        }
-    };
-
-    let mut consecutive_gemma_failures: u8 = 0;
-    let mut last_persisted_status: Option<String> = None;
-
-    for iteration in 1..=MAX_ITERATIONS {
-        // Brief settle before the first poll so the launch `claude\r`
-        // has a moment to render; subsequent ticks pace themselves
-        // via the end-of-loop sleep.
-        if iteration == 1 {
-            sleep(Duration::from_secs(1)).await;
-        }
-
-        let pane = fetch_pane_scrollback(&state, &host, &session_id).await;
-        let decision = match nudge::next_step(
-            &state.http,
-            NudgeInput {
-                task_title: &prompt,
-                task_role_cmd: &role_command,
-                intended_prompt: &prompt,
-                statuses: &project_cfg.statuses,
-                session_output: &pane,
-                iteration,
-                max_iterations: MAX_ITERATIONS,
-            },
-        )
-        .await
-        {
-            Ok(d) => {
-                consecutive_gemma_failures = 0;
-                d
-            }
-            Err(e) => {
-                consecutive_gemma_failures += 1;
-                warn!(
-                    iteration,
-                    error = %e,
-                    consecutive_failures = consecutive_gemma_failures,
-                    "nudge loop: gemma4 call failed"
-                );
-                if consecutive_gemma_failures >= MAX_GEMMA_FAILURES {
-                    park_task_with_reason(
-                        &dir,
-                        &project_name,
-                        task_id,
-                        "needs-human",
-                        &format!(
-                            "nudge loop: gemma4 unavailable after {consecutive_gemma_failures} attempts"
-                        ),
-                        Some(
-                            "Check that local ollama is reachable (OLLAMA_HOST) and that the \
-                             configured model is loaded."
-                                .into(),
-                        ),
-                    );
-                    publish_dispatch_outcome(
-                        &state,
-                        &host.id,
-                        &session_name_str,
-                        &project_name,
-                        task_id,
-                        "failed",
-                        iteration,
-                        "nudge: gemma unavailable",
-                    );
-                    return;
-                }
-                sleep(ITERATION_INTERVAL).await;
-                continue;
-            }
-        };
-
-        // Persist status change as soon as gemma reports it — the
-        // board polls every 5s and the operator should see the row
-        // move during the loop, not just at the end.
-        if last_persisted_status.as_deref() != Some(decision.status_name.as_str()) {
-            persist_task_state(&dir, &project_name, task_id, &decision);
-            last_persisted_status = Some(decision.status_name.clone());
-        }
-
-        if let Some(keys) = decision.keystrokes.as_deref() {
-            if !keys.is_empty() {
-                tracing::info!(
-                    iteration,
-                    status = %decision.status_name,
-                    reason = %decision.reason,
-                    bytes = keys.len(),
-                    "nudge loop: sending keystrokes"
-                );
-                // Body-capped exec via the async client (sipag #527).
-                // Previously this was raw reqwest with no cap and
-                // discarded result — meaning a misbehaving katulong's
-                // response was invisible to operators AND the response
-                // body was unbounded. Now we log failures and the body
-                // is capped at DEFAULT_BODY_CAP.
-                if let Err(e) = state
-                    .katulong_for(&host)
-                    .exec_session(&session_id, keys)
-                    .await
-                {
-                    warn!(
-                        host = %host.id,
-                        session_id = %session_id,
-                        iteration,
-                        error = %e,
-                        "nudge loop: exec_session failed"
-                    );
-                }
-            }
-        }
-
-        if decision.done {
-            tracing::info!(
-                iteration,
-                status = %decision.status_name,
-                reason = %decision.reason,
-                "nudge loop: terminal — exiting"
-            );
-            let outcome = if decision.status_name == "needs-human" {
-                "needs-human"
-            } else {
-                "success"
-            };
-            publish_dispatch_outcome(
-                &state,
-                &host.id,
-                &session_name_str,
-                &project_name,
-                task_id,
-                outcome,
-                iteration,
-                &decision.reason,
-            );
-            return;
-        }
-
-        sleep(ITERATION_INTERVAL).await;
-    }
-
-    // Iteration budget exhausted without `done=true`. Park with the
-    // last status gemma reported (most likely something that wasn't
-    // converging) and a fixed reason so the operator can act.
-    park_task_with_reason(
-        &dir,
-        &project_name,
-        task_id,
-        "needs-human",
-        &format!("nudge loop: budget of {MAX_ITERATIONS} iterations exhausted without progress"),
-        Some(
-            "Inspect the katulong session manually — gemma4 was nudging without converging.".into(),
-        ),
-    );
-    publish_dispatch_outcome(
-        &state,
-        &host.id,
-        &session_name_str,
-        &project_name,
-        task_id,
-        "failed",
-        MAX_ITERATIONS,
-        "nudge: budget exhausted",
-    );
-}
-
-/// Persist a nudge decision's status/reason/human_action onto the
-/// task file. Logs and swallows errors — the dispatch outcome event
-/// is the authoritative signal, and a transient task-save failure
-/// shouldn't tear down the loop mid-flight.
-fn persist_task_state(
-    dir: &std::path::Path,
-    project_name: &str,
-    task_id: u64,
-    decision: &sipag_core::nudge::NudgeDecision,
-) {
-    let mut t = match Task::load(dir, project_name, task_id) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(
-                project = %project_name,
-                task = task_id,
-                error = %e,
-                "nudge loop: task reload failed during status persist"
-            );
-            return;
-        }
-    };
-    t.status = TaskStatus::parse(&decision.status_name);
-    t.reason = if decision.reason.trim().is_empty() {
-        None
-    } else {
-        Some(decision.reason.clone())
-    };
-    t.human_action = decision.human_action.clone();
-    t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    if let Err(e) = t.save(dir, project_name) {
-        warn!(
-            project = %project_name,
-            task = task_id,
-            error = %e,
-            "nudge loop: task save failed during status persist"
-        );
-    }
-}
-
-/// Park a task at an arbitrary status with a fixed reason — used by
-/// the nudge loop's terminal failure paths (gemma unavailable, budget
-/// exhausted) where no `NudgeDecision` exists to copy from.
-fn park_task_with_reason(
-    dir: &std::path::Path,
-    project_name: &str,
-    task_id: u64,
-    status_name: &str,
-    reason: &str,
-    human_action: Option<String>,
-) {
-    let mut t = match Task::load(dir, project_name, task_id) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(
-                project = %project_name,
-                task = task_id,
-                error = %e,
-                "nudge loop: task reload failed during park"
-            );
-            return;
-        }
-    };
-    t.status = TaskStatus::parse(status_name);
-    t.reason = Some(reason.to_string());
-    t.human_action = human_action;
-    t.updated = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    if let Err(e) = t.save(dir, project_name) {
-        warn!(
-            project = %project_name,
-            task = task_id,
-            error = %e,
-            "nudge loop: task save failed during park"
-        );
     }
 }
 
@@ -1757,8 +1407,7 @@ async fn run_dispatch_gate(
         .map(|r| r.command)
         .unwrap_or_else(|_| "claude".to_string());
 
-    // Same pane source `verify_and_heal_dispatch` uses for self-heal
-    // — last 80 lines via captureVisiblePane plain text. Empty string
+    // Last 80 lines via captureVisiblePane plain text. Empty string
     // when katulong is unreachable; the gate handles that case (gemma
     // will see no signal and route to needs-human).
     let session_output = fetch_pane_scrollback(state, host, session_id).await;
@@ -1877,55 +1526,17 @@ fn publish_dispatch_outcome(
         .publish("observations/activity", "dispatch.outcome", payload);
 }
 
-/// Build the launch command — just the role command + Enter. The
-/// prompt is sent separately as a bracketed paste once claude's TUI
-/// is ready, so claude can prompt for permissions like a normal
-/// interactive session.
-fn build_launch_cmd(role_command: &str) -> String {
-    format!("{role_command}\r")
-}
-
 #[cfg(test)]
 mod dispatch_helpers_tests {
     use super::*;
 
-    #[test]
-    fn launch_cmd_appends_cr() {
-        assert_eq!(build_launch_cmd("claude"), "claude\r");
-        assert_eq!(build_launch_cmd("claude --resume"), "claude --resume\r");
-    }
-
-    // Note: previously this module also tested `paste_echo_regex`,
-    // `v2_step_reason`, `tui_ready_re`, `claude_processing_re`. Those
-    // helpers moved to the `sipag-dispatch` crate during the Phase 2
-    // #12 extraction; their tests live in
-    // `sipag-dispatch/src/lib.rs` now.
-
-    #[test]
-    fn dispatch_v2_enabled_off_set() {
-        // SAFETY: env vars are process-global. Cargo can parallelize
-        // tests within a binary across threads, but a workspace grep
-        // confirms SIPAG_DISPATCH_V2 is only read here and from the
-        // dispatch HTTP handler — and no other `#[test]` exercises
-        // that handler. As long as that invariant holds, this test
-        // has the env var to itself.
-        for off in ["", "0", "false", "FALSE", "no", "off", "Off"] {
-            unsafe {
-                std::env::set_var("SIPAG_DISPATCH_V2", off);
-            }
-            assert!(!dispatch_v2_enabled(), "{off:?} should be off");
-        }
-        for on in ["1", "true", "yes", "on", "anything-else"] {
-            unsafe {
-                std::env::set_var("SIPAG_DISPATCH_V2", on);
-            }
-            assert!(dispatch_v2_enabled(), "{on:?} should be on");
-        }
-        unsafe {
-            std::env::remove_var("SIPAG_DISPATCH_V2");
-        }
-        assert!(!dispatch_v2_enabled());
-    }
+    // Note: this module previously tested `build_launch_cmd`,
+    // `dispatch_v2_enabled`, `paste_echo_regex`, `v2_step_reason`,
+    // `tui_ready_re`, `claude_processing_re`. The first two retired
+    // with the §9 #11 cleanup (the keystroke loop is gone; the WS
+    // attach owns the launch keystroke). The latter four moved to
+    // the `sipag-dispatch` crate during the §9 Phase 2 #12 extraction;
+    // their tests live in `sipag-dispatch/src/lib.rs` now.
 
     #[test]
     fn step_to_legacy_idx_matches_pre_extraction_wire_shape() {

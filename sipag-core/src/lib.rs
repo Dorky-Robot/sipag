@@ -45,7 +45,6 @@ pub use katulong_client as katulong;
 /// new code.
 pub use sipag_mesh as hosts;
 pub mod llm;
-pub mod nudge;
 /// File-backed durable pub/sub broker. Extracted into its own workspace
 /// crate (`sipag-pubsub`) so it can be developed and tested in
 /// isolation. Re-exported here so existing `sipag_core::pubsub::…`

@@ -74,7 +74,7 @@ The spike → observe → derive loop per [`project-sipag-work-model-experimenta
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
 | **Pre-dispatch state classification** ("is this pane ready?") | 🟡 | `sipag-core/src/gate.rs` | Works via gemma4 / ollama. Folds into `session_classifier` in Phase 2 #9. |
-| **Post-dispatch periodic observation** | 🟡 | `sipag-core/src/nudge.rs` (mid-repositioning per its own module doc) | Today's polling loop. Replaced by event-driven SSE in Phase 2 #10 once Phase 2 #7 (SSE subscriber) lands. |
+| ~~Post-dispatch periodic observation~~ | ✅ | ~~`sipag-core/src/nudge.rs`~~ | Deleted in §9 #11 alongside `verify_and_heal_dispatch` (the only consumer). Event-driven observation via SSE remains the Phase 2 #10 target; the polling loop is gone. |
 | **Event-driven observation** via katulong `claude/<uuid>` pub/sub | 🔴 | n/a — needs SSE subscriber | Phase 2 #7 + #10. Once upstream [katulong#715](https://github.com/Dorky-Robot/katulong/issues/715) / [#716](https://github.com/Dorky-Robot/katulong/issues/716) land, classification shrinks dramatically. |
 | **Detect "session exited"** | 🔴 | not pushed by katulong today | Blocked on upstream [katulong#715](https://github.com/Dorky-Robot/katulong/issues/715). |
 | **Detect "shell prompt returned"** (`hasChildProcesses` transitions) | 🔴 | not pushed by katulong today | Blocked on upstream [katulong#716](https://github.com/Dorky-Robot/katulong/issues/716). |
@@ -82,7 +82,7 @@ The spike → observe → derive loop per [`project-sipag-work-model-experimenta
 | **Detect "stuck"** (silence timeout) | 🔴 | not implemented | Subscriber-side derived signal (threshold is consumer policy); lands with Phase 2 #10. |
 | **Typed `RecordedAction` value object** for what gemma4 derived | 🔴 | not implemented | Phase 1 #3 (reframed). Replaces the previous `Outcome` row — `Outcome` was the state-machine framing. `RecordedAction` is just "what gemma4 emitted + source-event-window reference," append-only. |
 | **Cross-host observation** (subscribe to all mesh peers) | 🔴 | not implemented | Phase 2 #7 SSE subscriber needs N-stream fan-out. |
-| **Recovery loop** (`verify_and_heal_dispatch` — LLM proposes keystrokes) | ⛔ | `sipag/src/serve/htmx.rs::verify_and_heal_dispatch` | Legacy; closes #528 by *deletion* (Phase 2 #11) when attach client owns keystrokes. The `sipag-dispatch` extraction (PR #547) moved the v2 attach-driven dispatch action out of htmx.rs into its own crate — this legacy fallback is the last remaining LLM→PTY seam, awaiting retirement. |
+| ~~Recovery loop~~ (`verify_and_heal_dispatch` — LLM proposes keystrokes) | ✅ | ~~`sipag/src/serve/htmx.rs::verify_and_heal_dispatch`~~ | **Deleted in §9 #11** (closes sipag #528 by deletion). No more LLM-emitted bytes reach a PTY by design. The WS-attach path (`sipag_dispatch::dispatch` via `KatulongAttachClient::wait_for`) is now the only path. `SIPAG_DISPATCH_V2` env var, `build_launch_cmd` HTTP `/exec` pre-send, and `sipag-core/src/nudge.rs` all retired in the same PR. |
 
 ### Derive — what gemma4 lens-workers derive from the corpus
 
@@ -100,7 +100,7 @@ The spike → observe → derive loop per [`project-sipag-work-model-experimenta
 | **Ad-hoc / hypothesis lenses** (UI-created, short-lived, promote-or-expire) | 🔴 | not implemented | Phase 1 #3 + web UI for "Lenses" panel. |
 | **Background workers** (expand, research, scheduler) | 🟡 | `sipag/src/serve/workers/{expand,research,scheduler}.rs` | Already running; likely become **lens-worker scheduler infrastructure**. Triage individually once the abstraction lands. |
 | **Pre-dispatch classifier (gate)** | 🟡 | `sipag-core/src/gate.rs` (346 LOC) | **Early lens-worker prototype** — gemma reads pane + statuses, derives classification. Folds in as a worker with a "dispatch-readiness" lens. |
-| **Post-dispatch observer (nudge)** | 🟡 | `sipag-core/src/nudge.rs` (417 LOC) | **Early lens-worker prototype** — same shape. Folds in as a worker with a "post-dispatch progress" lens. |
+| ~~Post-dispatch observer (nudge)~~ | ✅ | ~~`sipag-core/src/nudge.rs`~~ | Deleted in §9 #11. The "post-dispatch progress" lens lives in the lens-worker abstraction (Phase 1 #3) instead. |
 | **Categorize loop** (gemma sorts board items) | 🟡 | `sipag/src/serve/categorize.rs` (199 LOC) | **Early lens-worker prototype** — folds in as a "board-item categorization" lens. |
 | **Refine raw ideas → tickets** (the old kanban pipeline) | ⛔ | `sipag-core/src/{feature,refine}.rs` | Deprecated in PR #536 — replaced by the spike-observe-derive model itself. |
 | ~~`IteratePolicy` plug~~ | 🚫 | n/a | Removed 2026-05-17. Claude is the iterator. |
