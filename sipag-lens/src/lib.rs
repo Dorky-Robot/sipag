@@ -28,10 +28,21 @@
 //!   caller-supplied path) and resolves `ModelChoice` → concrete
 //!   model name. Ships with built-in defaults that match the
 //!   dorky-robot stack.
-//! - [`LensWorker`] — runtime. One method: `run(input) -> Result<Vec<StructuralAction>>`.
-//!   Composes prompt → calls bridge → parses structured JSON →
-//!   writes any `Observe` actions to the corpus → returns the
-//!   structural verbs for the caller to dispatch.
+//! - [`LensWorker`] — runtime. Two entry points:
+//!   - `run(input, corpus)` — one-shot chat → parse JSON → write
+//!     Observes to the corpus with **empty embeddings** → return.
+//!   - `run_with_tools(input, corpus, embedder, max_iterations)` —
+//!     multi-turn loop that lets gemma call `corpus.search` /
+//!     `corpus.expand` mid-prompt to retrieve prior observations
+//!     before emitting its final structured output. Observes
+//!     written through this path are **embedded** via the supplied
+//!     `embedder`, so subsequent `corpus.search` calls can find
+//!     them.
+//! - [`execute_corpus_search`] / [`execute_corpus_expand`] —
+//!   sipag-internal MCP-shape tool executors. Called by gemma
+//!   mid-prompt via [`LensWorker::run_with_tools`]. NOT exposed to
+//!   Claude (sipag is never an MCP server installed into project
+//!   `.claude/` dirs — see `[[feedback-strict-layer-coupling]]`).
 //!
 //! ## What this crate does NOT own (boundary)
 //!
@@ -41,15 +52,12 @@
 //! - UI dispatch for structural verbs. `LensWorker::run` returns
 //!   `Vec<StructuralAction>`; the caller decides what to do with
 //!   them (publish to broker, render in the web UI, etc.).
-//! - `corpus.search` / `corpus.expand` MCP tool wrappers. The
-//!   underlying primitives live in `sipag-corpus`; the
-//!   MCP-shape gemma-callable wrapper is a follow-up.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ollama_bridge_client::{JobEndpoint, OllamaBridgeClient};
 use serde::{Deserialize, Serialize};
-use sipag_corpus::{Corpus, CorpusError};
+use sipag_corpus::{Corpus, CorpusError, Embedder, SearchFilter};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
@@ -353,6 +361,91 @@ pub struct LensOutput {
     pub actions: Vec<StructuralAction>,
 }
 
+// ── tool-calling protocol ──────────────────────────────────────────
+//
+// Sipag-internal MCP-shape. Lens-workers can call `corpus.search` and
+// `corpus.expand` mid-prompt to retrieve prior observations from the
+// corpus. The shape is a thin JSON envelope so any chat-capable model
+// works — not gated on native tool-call support.
+//
+// NOT exposed to Claude (sipag is never an MCP server installed into
+// project `.claude/` dirs — that would be a Demeter violation per
+// `[[feedback-strict-layer-coupling]]`). These tools are called by
+// gemma on sipag's side, reaching INTO sipag's own corpus.
+
+/// One turn in a multi-turn chat history. Used by [`ChatBackend::chat_messages`]
+/// and by [`LensWorker::run_with_tools`] to maintain context across
+/// tool-call rounds. `role` is one of `"system"`, `"user"`,
+/// `"assistant"`, `"tool"` — the Ollama `/api/chat` vocabulary.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// Wraps a [`ToolCall`] that the model emits as a non-terminal reply.
+/// Parsed out of the model's text response by [`parse_tool_call`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCallEnvelope {
+    pub tool_call: ToolCall,
+}
+
+/// The tool call itself. `name` is the dotted tool name
+/// (`"corpus.search"` / `"corpus.expand"`); `arguments` is the
+/// tool-specific JSON payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// Wraps a [`ToolResult`] that we send back to the model as a `tool`-
+/// role message. Symmetric with [`ToolCallEnvelope`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolResultEnvelope {
+    pub tool_result: ToolResult,
+}
+
+/// The tool result itself. `name` echoes the call's tool name;
+/// `result` is the tool-specific JSON payload (see
+/// [`execute_corpus_search`] / [`execute_corpus_expand`] for shapes).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolResult {
+    pub name: String,
+    pub result: serde_json::Value,
+}
+
+/// Tool-protocol description appended to a lens's system prompt by
+/// [`LensWorker::run_with_tools`]. Tells the model how to call the
+/// two corpus tools and how to emit its terminal output.
+///
+/// Kept terse — Ollama-served local models follow short instructions
+/// better than long ones, and the structured invariants (envelope
+/// shape, terminal vs non-terminal reply) are what matter.
+const TOOL_DOCS: &str = r#"
+
+# Tools available
+
+You have two sipag-internal tools for retrieving prior observations from the corpus:
+
+- corpus.search(query, top_k?, filter_tags?, generation_at_most?, time_window?) — semantic search by cosine similarity. Returns up to top_k items, each with id, content, tags, timestamp, generation, score.
+- corpus.expand(item_id) — fetch one item plus the items it was derived from (via source_refs). Returns { item, sources }.
+
+To call a tool, reply with ONLY this JSON shape:
+{"tool_call": {"name": "corpus.search", "arguments": {"query": "...", "top_k": 5}}}
+
+You'll receive a tool_result and may call more tools or emit the final output.
+
+# Final output
+
+When ready, reply with ONLY this JSON shape:
+{"actions": [...]}
+
+Each action is one of: observe / suggest_stance / ask_human / propose_task.
+
+Always reply with raw JSON — no surrounding prose."#;
+
 // ── errors ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -369,13 +462,19 @@ pub enum LensError {
     #[error("corpus error: {0}")]
     Corpus(#[from] CorpusError),
 
+    #[error("tool call failed: {0}")]
+    ToolCall(String),
+
+    #[error("tool-call iteration cap reached (max={max})")]
+    ToolCallLimit { max: usize },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
 
 pub type LensResult<T> = std::result::Result<T, LensError>;
 
-// ── lens-worker runtime ────────────────────────────────────────────
+// ── chat backend ───────────────────────────────────────────────────
 
 /// The chat backend a [`LensWorker`] talks to. Decoupled from
 /// `OllamaBridgeClient` directly so tests can inject a mock that
@@ -391,6 +490,35 @@ pub trait ChatBackend: Send + Sync {
     /// produces; lens-workers parse it as JSON via
     /// [`LensWorker::parse_output`]).
     async fn chat(&self, model: &str, system: &str, user: &str) -> LensResult<String>;
+
+    /// Multi-turn chat. Used by [`LensWorker::run_with_tools`] so
+    /// tool-call rounds preserve assistant + tool messages across
+    /// iterations. The default impl collapses the message list back
+    /// into one `chat()` call (concatenates system messages; prefixes
+    /// non-system messages with their role) — fine for backends that
+    /// don't support history natively. [`BridgeChatBackend`] overrides
+    /// to pass `messages` straight through to Ollama's `/api/chat`.
+    async fn chat_messages(&self, model: &str, messages: &[ChatMessage]) -> LensResult<String> {
+        let mut system = String::new();
+        let mut user = String::new();
+        for m in messages {
+            match m.role.as_str() {
+                "system" => {
+                    if !system.is_empty() {
+                        system.push_str("\n\n");
+                    }
+                    system.push_str(&m.content);
+                }
+                role => {
+                    if !user.is_empty() {
+                        user.push_str("\n\n");
+                    }
+                    user.push_str(&format!("[{role}] {}", m.content));
+                }
+            }
+        }
+        self.chat(model, &system, &user).await
+    }
 }
 
 /// Production [`ChatBackend`] — calls the bridge.
@@ -417,12 +545,30 @@ impl BridgeChatBackend {
 #[async_trait]
 impl ChatBackend for BridgeChatBackend {
     async fn chat(&self, model: &str, system: &str, user: &str) -> LensResult<String> {
+        self.chat_messages(
+            model,
+            &[
+                ChatMessage {
+                    role: "system".into(),
+                    content: system.to_string(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: user.to_string(),
+                },
+            ],
+        )
+        .await
+    }
+
+    async fn chat_messages(&self, model: &str, messages: &[ChatMessage]) -> LensResult<String> {
+        let json_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
+            .collect();
         let body = serde_json::json!({
             "model": model,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": user },
-            ],
+            "messages": json_messages,
         });
         let result = self
             .client
@@ -441,6 +587,153 @@ impl ChatBackend for BridgeChatBackend {
         Ok(content.to_string())
     }
 }
+
+// ── corpus tool executors ──────────────────────────────────────────
+
+/// Execute a `corpus.search` tool call. Embeds the query via
+/// `embedder`, then runs [`Corpus::search`] with the supplied filter.
+/// Returns a `{ "items": [...] }` JSON payload.
+///
+/// `arguments` shape (only `query` is required):
+/// ```json
+/// {
+///   "query": "...",
+///   "top_k": 5,
+///   "filter_tags": ["lens=foo"],
+///   "generation_at_most": 1,
+///   "time_window": { "after": "<rfc3339>", "before": "<rfc3339>" }
+/// }
+/// ```
+///
+/// Returned item shape: `{ id, content, tags, timestamp, generation, score }`.
+pub async fn execute_corpus_search(
+    arguments: &serde_json::Value,
+    corpus: &Corpus,
+    embedder: &dyn Embedder,
+) -> LensResult<serde_json::Value> {
+    let query = arguments
+        .get("query")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LensError::ToolCall("corpus.search: missing 'query'".into()))?;
+    let top_k = arguments
+        .get("top_k")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .unwrap_or(5);
+
+    let mut filter = SearchFilter::default();
+    if let Some(tags) = arguments.get("filter_tags").and_then(|v| v.as_array()) {
+        filter.tags = Some(
+            tags.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect(),
+        );
+    }
+    if let Some(gen) = arguments.get("generation_at_most").and_then(|v| v.as_u64()) {
+        filter.generation_at_most = Some(gen as u8);
+    }
+    if let Some(window) = arguments.get("time_window") {
+        if let Some(after) = window.get("after").and_then(|v| v.as_str()) {
+            filter.timestamp_after = Some(parse_rfc3339(after, "time_window.after")?);
+        }
+        if let Some(before) = window.get("before").and_then(|v| v.as_str()) {
+            filter.timestamp_before = Some(parse_rfc3339(before, "time_window.before")?);
+        }
+    }
+
+    let query_embedding = embedder
+        .embed(query)
+        .await
+        .map_err(|e| LensError::ToolCall(format!("corpus.search: embed failed: {e}")))?;
+    let results = corpus.search(&query_embedding, &filter, top_k)?;
+    let items: Vec<serde_json::Value> = results
+        .into_iter()
+        .map(|(score, item)| {
+            serde_json::json!({
+                "id": item.id,
+                "content": item.content,
+                "tags": item.tags,
+                "timestamp": item.timestamp.to_rfc3339(),
+                "generation": item.generation,
+                "score": score,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({ "items": items }))
+}
+
+/// Execute a `corpus.expand` tool call. Returns the named item plus
+/// the items it was derived from (one hop via `source_refs`).
+///
+/// `arguments` shape: `{ "item_id": <u64> }`.
+///
+/// Returned shape: `{ "item": { ... }, "sources": [ { ... } ] }`.
+/// Source items missing from the corpus are silently skipped — an
+/// invariant violation (broken derivation chain), but `expand` is a
+/// read tool and not the right place to fail loudly.
+pub fn execute_corpus_expand(
+    arguments: &serde_json::Value,
+    corpus: &Corpus,
+) -> LensResult<serde_json::Value> {
+    let item_id = arguments
+        .get("item_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| LensError::ToolCall("corpus.expand: missing 'item_id'".into()))?;
+    let item = corpus
+        .get(item_id)
+        .ok_or_else(|| LensError::ToolCall(format!("corpus.expand: no item with id {item_id}")))?;
+    let sources: Vec<serde_json::Value> = item
+        .source_refs
+        .iter()
+        .filter_map(|id| corpus.get(*id))
+        .map(|src| {
+            serde_json::json!({
+                "id": src.id,
+                "content": src.content,
+                "tags": src.tags,
+                "timestamp": src.timestamp.to_rfc3339(),
+                "generation": src.generation,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "item": {
+            "id": item.id,
+            "content": item.content,
+            "tags": item.tags,
+            "timestamp": item.timestamp.to_rfc3339(),
+            "generation": item.generation,
+            "source_refs": item.source_refs,
+        },
+        "sources": sources,
+    }))
+}
+
+fn parse_rfc3339(s: &str, field: &str) -> LensResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| LensError::ToolCall(format!("corpus.search: bad '{field}': {e}")))
+}
+
+/// Parse a model reply as a [`ToolCallEnvelope`]. Mirrors
+/// [`LensWorker::parse_output`]'s tolerance — accepts either a clean
+/// JSON object or JSON embedded in chatty prose (largest balanced
+/// `{...}` block). Returns `None` when no parseable envelope is
+/// found; callers fall back to [`LensWorker::parse_output`] or error.
+pub fn parse_tool_call(raw: &str) -> Option<ToolCallEnvelope> {
+    let trimmed = raw.trim();
+    if let Ok(e) = serde_json::from_str::<ToolCallEnvelope>(trimmed) {
+        return Some(e);
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    serde_json::from_str::<ToolCallEnvelope>(&trimmed[start..=end]).ok()
+}
+
+// ── lens-worker runtime ────────────────────────────────────────────
 
 /// One run of a lens. Composes the bridge call, parses the output,
 /// writes any `Observe` actions to the corpus, and returns the
@@ -471,6 +764,11 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
     /// caller. Other structural verbs (`SuggestStance`, `AskHuman`,
     /// `ProposeTask`) are returned but NOT written to the corpus —
     /// the caller dispatches them to UI surfaces.
+    ///
+    /// Observes are written with an EMPTY embedding — this method
+    /// has no embedder. Use [`Self::run_with_tools`] (which takes
+    /// an `&dyn Embedder` for the corpus tools) when you want
+    /// Observes to land in the corpus searchable.
     pub async fn run(&self, input: &str, corpus: &mut Corpus) -> LensResult<Vec<StructuralAction>> {
         let model = self.resolver.resolve(&self.lens.model);
         debug!(lens = %self.lens.name, model = %model, "lens-worker: chat start");
@@ -479,9 +777,127 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
             .chat(&model, &self.lens.prompt_text, input)
             .await?;
         let output = Self::parse_output(&raw)?;
-        // Auto-tag observes with the lens name so search-by-lens
-        // works without callers having to add it. Other verbs flow
-        // through unchanged.
+        self.finalize(output, corpus, None).await
+    }
+
+    /// Run a lens with mid-prompt access to `corpus.search` /
+    /// `corpus.expand`. Loops up to `max_iterations`:
+    ///
+    /// - call the model with the current message history;
+    /// - if the reply parses as a [`LensOutput`], that's terminal
+    ///   — return its actions (Observes written to corpus, this
+    ///   time with proper embeddings via `embedder`);
+    /// - if it parses as a [`ToolCallEnvelope`], execute the
+    ///   corresponding tool, append `assistant` + `tool` messages
+    ///   to history, and loop;
+    /// - if it parses as neither, return [`LensError::OutputParse`].
+    ///
+    /// Returns [`LensError::ToolCallLimit`] if the cap is reached
+    /// without a terminal output. A typical `max_iterations` is
+    /// `5` — enough for search-then-expand-then-answer, low enough
+    /// to catch runaway loops.
+    pub async fn run_with_tools(
+        &self,
+        input: &str,
+        corpus: &mut Corpus,
+        embedder: &dyn Embedder,
+        max_iterations: usize,
+    ) -> LensResult<Vec<StructuralAction>> {
+        let model = self.resolver.resolve(&self.lens.model);
+        debug!(
+            lens = %self.lens.name,
+            model = %model,
+            max_iterations,
+            "lens-worker: tool-calling start"
+        );
+        let system_prompt = format!("{}{TOOL_DOCS}", self.lens.prompt_text);
+        let mut messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: system_prompt,
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: input.to_string(),
+            },
+        ];
+        for iteration in 0..max_iterations {
+            let raw = self.backend.chat_messages(&model, &messages).await?;
+            // Tool call FIRST. LensOutput's `actions` field is
+            // `#[serde(default)]`, so a tool_call envelope happens to
+            // parse as an empty LensOutput — checking tool_call first
+            // disambiguates correctly.
+            if let Some(envelope) = parse_tool_call(&raw) {
+                let tool_name = envelope.tool_call.name.clone();
+                debug!(
+                    lens = %self.lens.name,
+                    iteration,
+                    tool = %tool_name,
+                    "lens-worker: executing tool"
+                );
+                let result_value = match tool_name.as_str() {
+                    "corpus.search" => {
+                        execute_corpus_search(&envelope.tool_call.arguments, corpus, embedder)
+                            .await?
+                    }
+                    "corpus.expand" => {
+                        execute_corpus_expand(&envelope.tool_call.arguments, corpus)?
+                    }
+                    other => {
+                        return Err(LensError::ToolCall(format!("unknown tool: {other}")));
+                    }
+                };
+                let tool_result_json = serde_json::to_string(&ToolResultEnvelope {
+                    tool_result: ToolResult {
+                        name: tool_name,
+                        result: result_value,
+                    },
+                })
+                .map_err(|e| LensError::OutputParse(format!("serialize tool_result: {e}")))?;
+                messages.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: raw,
+                });
+                messages.push(ChatMessage {
+                    role: "tool".into(),
+                    content: tool_result_json,
+                });
+                continue;
+            }
+            // Not a tool call — must be terminal output (or garbage).
+            if let Ok(output) = Self::parse_output(&raw) {
+                debug!(
+                    lens = %self.lens.name,
+                    iterations = iteration + 1,
+                    "lens-worker: terminal output reached"
+                );
+                return self.finalize(output, corpus, Some(embedder)).await;
+            }
+            return Err(LensError::OutputParse(format!(
+                "neither tool_call nor LensOutput in reply: {raw}"
+            )));
+        }
+        Err(LensError::ToolCallLimit {
+            max: max_iterations,
+        })
+    }
+
+    /// Shared post-processing for both [`Self::run`] and
+    /// [`Self::run_with_tools`]:
+    ///
+    /// - auto-tag each `Observe` with `lens=<name>` (idempotent);
+    /// - write Observes to `corpus`; embeds them via `embedder` if
+    ///   one was provided, otherwise writes content-only items
+    ///   (back-compat with [`Self::run`]'s pre-tool-calling
+    ///   contract);
+    /// - return ALL actions to the caller (corpus write is
+    ///   side-effectful but not gating).
+    async fn finalize(
+        &self,
+        output: LensOutput,
+        corpus: &mut Corpus,
+        embedder: Option<&dyn Embedder>,
+    ) -> LensResult<Vec<StructuralAction>> {
         let mut tagged = Vec::with_capacity(output.actions.len());
         for action in output.actions {
             let action = match action {
@@ -496,26 +912,31 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
             };
             tagged.push(action);
         }
-        // Write Observe actions to the corpus immediately. Embedding
-        // is the caller's concern (this crate doesn't know which
-        // embedder model the corpus was populated with).
-        //
-        // The crate writes with an empty embedding vector — callers
-        // that want vector search must use a `LensWorker` variant
-        // that takes an embedder OR re-add the items via
-        // `Corpus::add_text(embedder, ...)`. This split matches the
-        // sipag-corpus design: the storage layer accepts
-        // pre-embedded items; embedder composition is the caller's.
-        //
-        // For v1, write content-only items so the lens-worker
-        // pipeline is end-to-end without requiring embedder
-        // wiring. Vector search over lens outputs is a follow-up.
         for action in &tagged {
             if let StructuralAction::Observe { content, tags } = action {
-                if let Err(e) = corpus
-                    .add(content.clone(), Vec::new(), tags.clone(), Vec::new(), 0)
-                    .await
-                {
+                // Call .embed() directly (rather than corpus.add_text)
+                // because add_text takes `E: Embedder` with implicit
+                // Sized bound; routing through .embed() + .add()
+                // accepts `&dyn Embedder` without forcing sipag-corpus
+                // to relax that signature.
+                let embedding_result = match embedder {
+                    Some(e) => e.embed(content).await.map(Some),
+                    None => Ok(None),
+                };
+                let write_result = match embedding_result {
+                    Ok(Some(embedding)) => {
+                        corpus
+                            .add(content.clone(), embedding, tags.clone(), Vec::new(), 0)
+                            .await
+                    }
+                    Ok(None) => {
+                        corpus
+                            .add(content.clone(), Vec::new(), tags.clone(), Vec::new(), 0)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = write_result {
                     warn!(
                         lens = %self.lens.name,
                         error = %e,
@@ -925,5 +1346,582 @@ code_aware = "starcoder:15b"
             let back: LensSource = serde_json::from_str(&s).unwrap();
             assert_eq!(back, src);
         }
+    }
+
+    // ── tool-calling feature tests ──────────────────────────────────
+    //
+    // These tests pin the wrappers' PROMISE to lens-workers:
+    //
+    // - corpus.search / corpus.expand return well-shaped results that
+    //   gemma can reason against;
+    // - the multi-turn loop preserves history across tool rounds and
+    //   terminates when the model emits a LensOutput;
+    // - the iteration cap catches runaway loops;
+    // - unknown tools and malformed replies surface as errors instead
+    //   of silent no-ops;
+    // - run_with_tools embeds Observes so subsequent corpus.search can
+    //   find them (contrast: plain `run()` writes empty-embedding items,
+    //   intentionally not searchable — pinned below).
+    //
+    // Wire-format details (exact JSON byte layout, role string values)
+    // are NOT asserted directly — implementation tweaks that preserve
+    // the above contract should NOT churn these tests.
+
+    use std::collections::VecDeque;
+
+    /// Replays a scripted list of model replies, capturing the message
+    /// history passed to each call so tests can assert on it. Forces
+    /// callers through `chat_messages` so tool-calling rounds use the
+    /// real multi-turn path.
+    struct ScriptedBackend {
+        replies: Mutex<VecDeque<String>>,
+        captured: Mutex<Vec<Vec<ChatMessage>>>,
+    }
+
+    impl ScriptedBackend {
+        fn new<I, S>(replies: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            Self {
+                replies: Mutex::new(replies.into_iter().map(Into::into).collect()),
+                captured: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn calls(&self) -> usize {
+            self.captured.lock().await.len()
+        }
+
+        async fn nth_history(&self, n: usize) -> Vec<ChatMessage> {
+            self.captured.lock().await[n].clone()
+        }
+    }
+
+    #[async_trait]
+    impl ChatBackend for ScriptedBackend {
+        async fn chat(&self, _: &str, _: &str, _: &str) -> LensResult<String> {
+            // run_with_tools always routes through chat_messages; this
+            // arm is only here to satisfy the trait.
+            Err(LensError::Bridge(
+                "ScriptedBackend doesn't implement single-turn chat".into(),
+            ))
+        }
+
+        async fn chat_messages(
+            &self,
+            _model: &str,
+            messages: &[ChatMessage],
+        ) -> LensResult<String> {
+            self.captured.lock().await.push(messages.to_vec());
+            let mut q = self.replies.lock().await;
+            q.pop_front()
+                .ok_or_else(|| LensError::Bridge("ScriptedBackend ran out of replies".into()))
+        }
+    }
+
+    /// Deterministic hash-derived embedder. Same text → same vector;
+    /// distinct text → distinct vector. Enough to drive search ranking
+    /// without spinning up ollama.
+    struct FakeEmbedder {
+        dim: usize,
+    }
+
+    #[async_trait]
+    impl Embedder for FakeEmbedder {
+        async fn embed(&self, text: &str) -> sipag_corpus::CorpusResult<Vec<f32>> {
+            let bytes = text.as_bytes();
+            let mut out = Vec::with_capacity(self.dim);
+            for i in 0..self.dim {
+                let v = if bytes.is_empty() {
+                    0.0
+                } else {
+                    bytes[i % bytes.len()] as f32 / 255.0
+                };
+                out.push(v);
+            }
+            Ok(out)
+        }
+    }
+
+    fn search_call(query: &str) -> String {
+        serde_json::json!({
+            "tool_call": {
+                "name": "corpus.search",
+                "arguments": { "query": query, "top_k": 3 },
+            }
+        })
+        .to_string()
+    }
+
+    fn expand_call(item_id: u64) -> String {
+        serde_json::json!({
+            "tool_call": {
+                "name": "corpus.expand",
+                "arguments": { "item_id": item_id },
+            }
+        })
+        .to_string()
+    }
+
+    fn lens_output_with_observe(content: &str) -> String {
+        serde_json::json!({
+            "actions": [
+                { "verb": "observe", "content": content, "tags": [] }
+            ]
+        })
+        .to_string()
+    }
+
+    async fn populate_two_items(corpus: &mut Corpus, embedder: &FakeEmbedder) -> (u64, u64) {
+        let a = corpus
+            .add_text(
+                embedder,
+                "alpha — about cats".into(),
+                vec!["topic=cats".into()],
+                vec![],
+                0,
+            )
+            .await
+            .unwrap();
+        let b = corpus
+            .add_text(
+                embedder,
+                "beta — about dogs".into(),
+                vec!["topic=dogs".into()],
+                vec![],
+                0,
+            )
+            .await
+            .unwrap();
+        (a, b)
+    }
+
+    // ── direct executor tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_corpus_search_returns_items_ranked_by_similarity() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        populate_two_items(&mut corpus, &embedder).await;
+        // Query identical to "alpha — about cats" → top result.
+        let args = serde_json::json!({ "query": "alpha — about cats", "top_k": 2 });
+        let result = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap();
+        let items = result.get("items").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("content").and_then(|v| v.as_str()),
+            Some("alpha — about cats"),
+            "exact-match query should be top-ranked"
+        );
+        // Each item carries the documented shape.
+        for item in items {
+            assert!(item.get("id").is_some());
+            assert!(item.get("content").is_some());
+            assert!(item.get("tags").is_some());
+            assert!(item.get("timestamp").is_some());
+            assert!(item.get("generation").is_some());
+            assert!(item.get("score").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_filter_tags_narrow_results() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        populate_two_items(&mut corpus, &embedder).await;
+        let args = serde_json::json!({
+            "query": "anything",
+            "top_k": 5,
+            "filter_tags": ["topic=cats"],
+        });
+        let result = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap();
+        let items = result.get("items").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(items.len(), 1, "filter_tags should exclude non-matching");
+        assert_eq!(
+            items[0].get("content").and_then(|v| v.as_str()),
+            Some("alpha — about cats")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_missing_query_errors() {
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let args = serde_json::json!({ "top_k": 3 });
+        let err = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LensError::ToolCall(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_bad_time_window_errors() {
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let args = serde_json::json!({
+            "query": "x",
+            "time_window": { "after": "not-a-date" },
+        });
+        let err = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCall(msg) => assert!(msg.contains("time_window.after")),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_expand_returns_item_and_sources() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let a = corpus
+            .add_text(&embedder, "source-A".into(), vec![], vec![], 0)
+            .await
+            .unwrap();
+        let b = corpus
+            .add_text(&embedder, "source-B".into(), vec![], vec![], 0)
+            .await
+            .unwrap();
+        let derived = corpus
+            .add_text(&embedder, "derivation X".into(), vec![], vec![a, b], 1)
+            .await
+            .unwrap();
+        let args = serde_json::json!({ "item_id": derived });
+        let result = execute_corpus_expand(&args, &corpus).unwrap();
+        // Item itself.
+        assert_eq!(
+            result
+                .get("item")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_u64()),
+            Some(derived)
+        );
+        // Sources include BOTH parents.
+        let sources = result.get("sources").and_then(|v| v.as_array()).unwrap();
+        let source_ids: Vec<u64> = sources
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|i| i.as_u64()))
+            .collect();
+        assert_eq!(sources.len(), 2);
+        assert!(source_ids.contains(&a));
+        assert!(source_ids.contains(&b));
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_expand_missing_item_id_errors() {
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let args = serde_json::json!({});
+        let err = execute_corpus_expand(&args, &corpus).unwrap_err();
+        assert!(matches!(err, LensError::ToolCall(_)));
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_expand_unknown_item_errors() {
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let args = serde_json::json!({ "item_id": 999 });
+        let err = execute_corpus_expand(&args, &corpus).unwrap_err();
+        assert!(matches!(err, LensError::ToolCall(_)));
+    }
+
+    #[test]
+    fn parse_tool_call_accepts_clean_envelope() {
+        let raw = r#"{"tool_call":{"name":"corpus.search","arguments":{"query":"x"}}}"#;
+        let e = parse_tool_call(raw).expect("should parse clean JSON");
+        assert_eq!(e.tool_call.name, "corpus.search");
+    }
+
+    #[test]
+    fn parse_tool_call_extracts_envelope_from_prose() {
+        let raw = "Sure, calling the tool:\n\n{\"tool_call\":{\"name\":\"corpus.expand\",\"arguments\":{\"item_id\":42}}}\n\nLet me know.";
+        let e = parse_tool_call(raw).expect("should parse JSON embedded in prose");
+        assert_eq!(e.tool_call.name, "corpus.expand");
+    }
+
+    #[test]
+    fn parse_tool_call_returns_none_on_garbage() {
+        assert!(parse_tool_call("I have no idea").is_none());
+    }
+
+    // ── multi-turn run_with_tools tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn run_with_tools_terminates_immediately_on_lens_output() {
+        // Model emits final output on the first reply, skipping any
+        // tool rounds. run_with_tools must return cleanly — the tool
+        // docs appended to the system prompt should not break parsing.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("immediate", "you are a watcher");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([lens_output_with_observe("first-turn answer")]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let actions = worker
+            .run_with_tools("look at this", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(backend.calls().await, 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_executes_search_and_returns_results_to_model() {
+        // Multi-turn proof: model emits a search tool_call on turn 1,
+        // receives results as a `tool` message in the history, and
+        // emits its final output on turn 2.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        populate_two_items(&mut corpus, &embedder).await;
+        let lens = test_lens("searcher", "you are a searcher");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([
+            search_call("alpha — about cats"),
+            lens_output_with_observe("synthesis after search"),
+        ]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let actions = worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(backend.calls().await, 2);
+        // Second turn's history should include the search tool_result.
+        let history = backend.nth_history(1).await;
+        let tool_msg = history
+            .iter()
+            .find(|m| m.role == "tool")
+            .expect("tool turn appended after search");
+        assert!(tool_msg.content.contains("corpus.search"));
+        assert!(tool_msg.content.contains("alpha"));
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_executes_expand_then_emits_output() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let src = corpus
+            .add_text(&embedder, "source".into(), vec![], vec![], 0)
+            .await
+            .unwrap();
+        let derived = corpus
+            .add_text(&embedder, "derived".into(), vec![], vec![src], 1)
+            .await
+            .unwrap();
+        let lens = test_lens("expander", "you are an expander");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([
+            expand_call(derived),
+            lens_output_with_observe("walked the chain"),
+        ]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        assert_eq!(backend.calls().await, 2);
+        let history = backend.nth_history(1).await;
+        let tool_msg = history.iter().find(|m| m.role == "tool").unwrap();
+        assert!(tool_msg.content.contains("\"sources\""));
+        assert!(tool_msg.content.contains("source"));
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_caps_iterations() {
+        // Always returns a tool call — should hit ToolCallLimit.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("loopy", "you are loopy");
+        let resolver = ModelResolver::with_defaults();
+        let replies: Vec<String> = (0..10).map(|_| search_call("x")).collect();
+        let backend = ScriptedBackend::new(replies);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let err = worker
+            .run_with_tools("input", &mut corpus, &embedder, 3)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCallLimit { max } => assert_eq!(max, 3),
+            other => panic!("expected ToolCallLimit, got {other:?}"),
+        }
+        // Confirmed cap stopped at 3 (not 10).
+        assert_eq!(backend.calls().await, 3);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_unknown_tool_errors() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("weird", "");
+        let resolver = ModelResolver::with_defaults();
+        let bogus = serde_json::json!({
+            "tool_call": { "name": "corpus.purge", "arguments": {} }
+        })
+        .to_string();
+        let backend = ScriptedBackend::new([bogus]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let err = worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCall(msg) => assert!(msg.contains("corpus.purge")),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_garbage_reply_errors() {
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("garbage", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new(["I refuse to comply"]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let err = worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LensError::OutputParse(_)));
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_embeds_observes_so_subsequent_search_finds_them() {
+        // The whole reason corpus.search exists: prior Observes should
+        // be retrievable. run_with_tools must embed them — `run()` does
+        // not (see test below).
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("embedder-lens", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([lens_output_with_observe("a brand new observation")]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        let item = corpus.get(1).expect("observe should have been written");
+        assert!(
+            !item.embedding.is_empty(),
+            "run_with_tools should embed Observes via the supplied embedder"
+        );
+        assert_eq!(item.embedding.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn run_without_tools_writes_unembedded_observe_for_back_compat() {
+        // Pin the prior contract of `run()`: writes Observes with empty
+        // embedding. Changing it later should be a conscious decision.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let lens = test_lens("plain", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = CannedChatBackend::new(lens_output_with_observe("plain observe"));
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker.run("input", &mut corpus).await.unwrap();
+        let item = corpus.get(1).unwrap();
+        assert!(item.embedding.is_empty(), "run() must not embed");
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_history_grows_with_assistant_and_tool_turns() {
+        // After K tool rounds, the next history snapshot should contain
+        // system + user + (assistant + tool) * K = 2 + 2K messages.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("counter", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([
+            search_call("q"),
+            search_call("q"),
+            lens_output_with_observe("done"),
+        ]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        // Snapshot 0: system + user → 2 messages.
+        assert_eq!(backend.nth_history(0).await.len(), 2);
+        // Snapshot 1: + (assistant + tool) → 4 messages.
+        assert_eq!(backend.nth_history(1).await.len(), 4);
+        // Snapshot 2: + (assistant + tool) → 6 messages.
+        assert_eq!(backend.nth_history(2).await.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_system_prompt_includes_lens_text_and_tool_docs() {
+        // The lens's prompt_text + the tool protocol description must
+        // both reach the backend as the system message — neither
+        // should silently drop.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("doc-check", "MY LENS PROMPT");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([lens_output_with_observe("done")]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker
+            .run_with_tools("input", &mut corpus, &embedder, 3)
+            .await
+            .unwrap();
+        let history = backend.nth_history(0).await;
+        let sys = history.iter().find(|m| m.role == "system").unwrap();
+        assert!(sys.content.contains("MY LENS PROMPT"));
+        assert!(sys.content.contains("corpus.search"));
+        assert!(sys.content.contains("corpus.expand"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_messages_collapses_to_chat() {
+        // The trait default impl of chat_messages should fall back to
+        // chat() for backends that only implement single-turn. Verify
+        // the collapsed system + user composition.
+        let backend = CannedChatBackend::new("{}");
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "S1".into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "U1".into(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "A1".into(),
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: "T1".into(),
+            },
+        ];
+        backend.chat_messages("any-model", &messages).await.unwrap();
+        let sys = backend.captured_system.lock().await.clone().unwrap();
+        let usr = backend.captured_user.lock().await.clone().unwrap();
+        assert_eq!(sys, "S1");
+        assert!(usr.contains("[user] U1"));
+        assert!(usr.contains("[assistant] A1"));
+        assert!(usr.contains("[tool] T1"));
     }
 }
