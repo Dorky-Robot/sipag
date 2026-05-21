@@ -146,6 +146,15 @@ pub enum Commands {
         /// HTMX CRUD; only the label-driven dispatcher is gated.
         #[arg(long, default_value_t = false)]
         workers: bool,
+
+        /// Enable the lens-worker scheduler (Phase 1 #3). Loads lens
+        /// definitions from `~/.sipag/lenses/*.toml` and fires each
+        /// on its `TriggerPolicy::Schedule` cadence. Requires
+        /// `~/.ollama-bridge/remote.json` for the bridge URL + bearer.
+        /// Default OFF — operator opts in once the lens registry has
+        /// content and the bridge is reachable.
+        #[arg(long, default_value_t = false)]
+        lens_scheduler: bool,
     },
 
     /// Print version
@@ -203,7 +212,8 @@ pub fn run(cli: Cli) -> Result<()> {
             port,
             web_root,
             workers,
-        }) => crate::serve::run(port, web_root, workers),
+            lens_scheduler,
+        }) => crate::serve::run(port, web_root, workers, lens_scheduler),
         Some(Commands::Version) => run_version(),
     }
 }
