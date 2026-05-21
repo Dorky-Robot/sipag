@@ -1,0 +1,95 @@
+# sipag lens definition — drop a copy at ~/.sipag/lenses/<name>.toml
+# (one file per lens) to register it with the lens scheduler.
+#
+# The scheduler walks ~/.sipag/lenses/*.toml at startup when
+# `sipag serve --lens-scheduler` is on, registers every non-retired
+# lens, and fires each on its `[trigger]` cadence via
+# `LensWorker::run_with_tools`. See `docs/modules.md` §3 + §9 #3.
+#
+# Trigger coverage (v1): `schedule` is supported. `threshold` and
+# `model_decide` load cleanly but the scheduler surfaces them as
+# `skipped_unsupported` telemetry until the bridge-worker + SSE
+# subscriber land (§9 Phase 2 #7).
+
+# ── required fields ────────────────────────────────────────────────
+
+# Stable identifier the scheduler keys on. Must be unique across
+# `~/.sipag/lenses/*.toml` — duplicates are deduplicated with a warn.
+# Steering-entry lenses typically use `objective/<id>` or `kr/<id>`.
+name = "pattern-spotter"
+
+# Free-form text. THE load-bearing seam between Steering and
+# Experimentation — this becomes gemma's system prompt on every
+# fire. Editing it changes the worker's behavior.
+prompt_text = """
+You watch for emerging patterns across the project's recent
+observations. Use corpus.search to gather recent items tagged with
+the current project, then synthesize one or two observations that
+identify a pattern (or note "no pattern this cycle" if nothing
+crystallizes).
+"""
+
+# Soft-retired flag. Lens stays on disk for diwa-indexable history
+# but the scheduler skips it.
+retired = false
+
+# ── source ─────────────────────────────────────────────────────────
+# Where the lens came from. Three variants:
+#   steering_entry — tied to an Objective / KR / Standing / Idea
+#   project_meta   — cross-cutting (pattern-spotter, meta-cognitive)
+#   ad_hoc         — user-created via the web UI; promote-or-expire
+
+[source]
+kind = "project_meta"
+name = "pattern-spotter"
+
+# Steering-entry shape (uncomment + delete the project_meta above):
+# [source]
+# kind = "steering_entry"
+# id = "kr/42"
+
+# Ad-hoc shape:
+# [source]
+# kind = "ad_hoc"
+# creator = "felix"
+# created = "2026-05-21T10:00:00Z"
+
+# ── model ──────────────────────────────────────────────────────────
+# Per-lens model selection. Three variants:
+#   default   — fall back to the resolver's global default
+#   named     — pin a specific model name verbatim
+#   profile   — pick a tier (Fast / Strong / CodeAware); the
+#               resolver maps tier → concrete model name via
+#               ~/.sipag/models.toml. See sipag-lens crate docs.
+
+[model]
+type = "default"
+
+# Named-model shape:
+# [model]
+# type = "named"
+# value = "gemma4:31b"
+
+# Profile-tier shape (recommended for portability across machines):
+# [model]
+# type = "profile"
+# value = "fast"
+
+# ── trigger ────────────────────────────────────────────────────────
+# When the lens fires. Three variants:
+#   schedule       — every `interval` seconds (supported in v1)
+#   threshold      — domain-specific signal (skipped in v1)
+#   model_decide   — worker decides whether to re-run (skipped in v1)
+
+[trigger]
+kind = "schedule"
+interval = 3600   # seconds — once per hour for this example
+
+# Threshold shape (loads cleanly, surfaces in skipped_unsupported
+# telemetry; waiting on §9 Phase 2 #7 SSE subscriber):
+# [trigger]
+# kind = "threshold"
+
+# Model-decide shape (open question in modules.md §10):
+# [trigger]
+# kind = "model_decide"

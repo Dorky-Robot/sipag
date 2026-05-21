@@ -16,6 +16,7 @@ mod devices;
 mod error;
 mod htmx;
 mod insights;
+mod lens_scheduler;
 mod login;
 mod observers;
 mod state;
@@ -40,15 +41,30 @@ use tower_http::services::ServeDir;
 use tracing::{info, warn};
 
 /// CLI entry — called from the `Serve` branch.
-pub fn run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Result<()> {
+pub fn run(
+    port: u16,
+    web_root: PathBuf,
+    workers_enabled: bool,
+    lens_scheduler_enabled: bool,
+) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("failed to build tokio runtime")?;
-    runtime.block_on(async_run(port, web_root, workers_enabled))
+    runtime.block_on(async_run(
+        port,
+        web_root,
+        workers_enabled,
+        lens_scheduler_enabled,
+    ))
 }
 
-async fn async_run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Result<()> {
+async fn async_run(
+    port: u16,
+    web_root: PathBuf,
+    workers_enabled: bool,
+    lens_scheduler_enabled: bool,
+) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -103,6 +119,18 @@ async fn async_run(port: u16, web_root: PathBuf, workers_enabled: bool) -> Resul
         info!("workers disabled — pass --workers to enable autonomous dispatch");
     }
 
+    if lens_scheduler_enabled {
+        match spawn_lens_scheduler(&state.sipag_dir).await {
+            Ok(()) => info!("lens scheduler enabled — tick loop spawned"),
+            Err(e) => warn!(
+                error = %e,
+                "lens scheduler enable requested but startup failed — continuing without it"
+            ),
+        }
+    } else {
+        info!("lens scheduler disabled — pass --lens-scheduler to enable Phase 1 #3 lens-workers");
+    }
+
     let app = build_router(state, web_root.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -151,6 +179,66 @@ async fn build_state(
         workers_enabled,
         kr_proposals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     })
+}
+
+/// Wire up the lens-worker scheduler. Loads `~/.ollama-bridge/remote.json`
+/// for the bridge URL + bearer, opens (or creates) `~/.sipag/corpus/`,
+/// walks `~/.sipag/lenses/*.toml` for the registry, then spawns the
+/// scheduler tick loop. Returns Err on configuration problems
+/// (missing bridge config, malformed remote.json) so the caller can
+/// log and continue without the scheduler — sipag serve stays useful
+/// for everything that doesn't depend on lens-workers.
+async fn spawn_lens_scheduler(sipag_dir: &std::path::Path) -> Result<()> {
+    use ollama_bridge_client::{OllamaBridgeClient, RemoteConfig};
+    use sipag_corpus::{BridgeEmbedder, Corpus};
+    use sipag_lens::{BridgeChatBackend, ModelResolver};
+    use tokio::sync::Mutex;
+
+    let bridge_cfg = RemoteConfig::load()
+        .context("load ~/.ollama-bridge/remote.json — required for --lens-scheduler")?;
+    let bridge_http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .user_agent(concat!(
+            "Mozilla/5.0 sipag-lens-scheduler/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .context("failed to build reqwest client for the bridge")?;
+    let bridge = OllamaBridgeClient::with_client(bridge_http, bridge_cfg.url, bridge_cfg.api_key);
+
+    let corpus_dir = sipag_dir.join("corpus");
+    let corpus = Corpus::open(&corpus_dir)
+        .await
+        .with_context(|| format!("open corpus at {}", corpus_dir.display()))?;
+    let corpus = Arc::new(Mutex::new(corpus));
+
+    let lenses = lens_scheduler::load_lenses_from_dir(&sipag_dir.join("lenses")).await;
+    if lenses.is_empty() {
+        info!(
+            "lens scheduler: no lenses registered in {}/lenses/ — tick loop will idle until at least one lands",
+            sipag_dir.display()
+        );
+    } else {
+        info!(
+            "lens scheduler: loaded {} lens(es) from {}/lenses/",
+            lenses.len(),
+            sipag_dir.display()
+        );
+    }
+
+    // Embedder model: `nomic-embed-text` is the standard local embed
+    // model in the dorky-robot stack (small, fast, stable dim). The
+    // lens scheduler doesn't surface this as config today; promote
+    // to `~/.sipag/models.toml` if/when a second embedder model
+    // becomes plausible.
+    let embedder = BridgeEmbedder::new(bridge.clone(), "nomic-embed-text".to_string());
+    let backend = BridgeChatBackend::new(bridge);
+    let resolver =
+        ModelResolver::load().map_err(|e| anyhow::anyhow!("load ~/.sipag/models.toml: {e}"))?;
+
+    let scheduler = lens_scheduler::LensScheduler::new(lenses, resolver);
+    lens_scheduler::spawn(scheduler, backend, embedder, corpus);
+    Ok(())
 }
 
 fn build_webauthn(public_url: &str) -> Result<WebAuthnService> {

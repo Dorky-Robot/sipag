@@ -140,6 +140,11 @@ Two upstream issues filed (Phase 1 #3 depends on the topics they add):
 - `SIPAG_DIR` — overrides `~/.sipag` for board state.
 - `SIPAG_DEV=1` — enables tower-livereload + filesystem watcher in `sipag serve`.
 
+## `sipag serve` flags
+
+- `--workers` — autonomous label-driven dispatcher (research / expand). Off by default.
+- `--lens-scheduler` — lens-worker scheduler (Phase 1 #3). Walks `~/.sipag/lenses/*.toml` and fires each lens on its `TriggerPolicy::Schedule` cadence. Requires `~/.ollama-bridge/remote.json` (URL + bearer for the local ollama bridge). Off by default; flip on once the lens registry has content.
+
 > `SIPAG_DISPATCH_V2` retired in §9 #11 (closes sipag #528 by
 > deletion). The WS-attach path is now the only path; the legacy
 > keystroke-driving `verify_and_heal_dispatch` nudge loop is gone.
