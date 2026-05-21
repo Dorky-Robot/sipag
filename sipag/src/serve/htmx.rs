@@ -608,8 +608,8 @@ async fn dispatch_task_handler(
     // Pin the dispatch to this task so the board's "running on" badge
     // matches by session id rather than by name. Done as a separate
     // load+save because the task may have prior gate state we want
-    // to preserve (status, reason, etc. — the nudge loop will clear
-    // those on its first persist if appropriate).
+    // to preserve (status, reason, etc. — the inline clear a few lines
+    // below handles wiping it once we know we're firing).
     if let Ok(mut t) = Task::load(&dir, &project_name, id) {
         t.dispatch_session_id = Some(session_id.clone());
         t.dispatch_host_id = Some(host.id.clone());
@@ -1241,7 +1241,7 @@ async fn run_sipag_dispatch(
         host = %host.id,
         session_id = %session_id,
         worktree = role_worktree,
-        "dispatch v2: driver spawned",
+        "dispatch: driver spawned",
     );
 
     let remote = RemoteConfig {
@@ -1308,7 +1308,7 @@ async fn run_sipag_dispatch(
                 task = task_id,
                 last_step = ?last_step,
                 error = %e,
-                "dispatch v2: failed",
+                "dispatch: failed",
             );
             ("failed", step_to_legacy_idx(last_step), cleaned)
         }

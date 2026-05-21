@@ -37,7 +37,9 @@ sipag-core/src/                # Library — domain logic + auth + LLM client + 
 ├── feature.rs                 # ⛔ deprecated (kanban refinement pipeline; PR #536)
 ├── refine.rs                  # ⛔ deprecated (companion to feature.rs)
 ├── gate.rs                    # early lens-worker prototype (pre-dispatch classifier)
-├── nudge.rs                   # early lens-worker prototype (post-dispatch observer)
+│                              # (no nudge.rs — deleted in §9 #11; the
+│                              # post-dispatch observer role belongs to
+│                              # the lens-worker abstraction now)
 ├── hosts.rs                   # multi-host mesh config
 │                              # (no katulong.rs file — `lib.rs:30` does
 │                              # `pub use katulong_client as katulong;` as
@@ -197,7 +199,7 @@ This matters for Claude sessions specifically: reach for `diwa search` BEFORE `g
 
 - `sipag-core/src/board/` — Objective / KeyResult / Task / Role / Project schema
 - `sipag-core/src/llm.rs` — gemma4 / ollama client (will export `LlmClient` trait per Phase 2 #8)
-- `sipag-core/src/{gate,nudge}.rs` — early lens-worker prototypes; fold into the lens-worker abstraction in Phase 1 #3
+- `sipag-core/src/gate.rs` — early lens-worker prototype (pre-dispatch classifier); folds into the lens-worker abstraction in Phase 1 #3. (Companion `nudge.rs` retired in §9 #11.)
 - `sipag/src/serve/` — the web UI (htmx + maud), where Steering lives today
 - `tui/src/board_app.rs` — interactive board
 - `katulong-client/src/` — wire client; touch when adding HTTP/WS/SSE consumers
