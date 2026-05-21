@@ -216,7 +216,7 @@ These are the places the implementer will invent a policy on day one if the doc 
 - **Lens registry** — mapping from `Lens` (Steering entry ref / ProjectMeta name / AdHoc id) → live `LensWorker`. Bootstrap: every existing Steering entry on project load. UI: web panel for project-meta + ad-hoc lenses.
 - **LensWorker runtime** — schedules + triggers + executes a lens-worker invocation: query corpus, prompt gemma, parse structured JSON, dispatch to `observe(...)` / structural verbs.
 - **Bridge worker** (the first lens-worker) — subscribes to katulong's `claude/<uuid>` topic, maintains sliding window, fires on threshold-crossing events.
-- **Corpus search tool** (`corpus.search(query, top_k, filter_tags?, time_window?)` + `corpus.expand(item_id)`) — sipag-internal MCP-shape that gemma can call mid-prompt for multi-step retrieval.
+- ~~**Corpus search tool** (`corpus.search(query, top_k, filter_tags?, time_window?)` + `corpus.expand(item_id)`) — sipag-internal MCP-shape that gemma can call mid-prompt for multi-step retrieval.~~ ✅ landed in `sipag-lens` (PR #556 — `execute_corpus_search` / `execute_corpus_expand` + `LensWorker::run_with_tools` multi-turn loop).
 - **Structural verb implementations** (`observe`, `suggest_stance`, `ask_human`, `propose_task`) — Rust functions, sipag-internal, with the dedup invariants from the failure-mode policy section.
 - **NOT needed anymore** (struck from previous plans): `Trial` aggregate, `IteratePolicy` trait, `WorkflowStatus` enum, `Outcome`-as-state-payload, the per-classification recording-API verbs (`note_progress`, `flag_blocker`, etc.). The corpus + tags + lens registry replace state-machine state; free-form `observe(...)` replaces categorical recording verbs.
 

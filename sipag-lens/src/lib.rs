@@ -416,6 +416,17 @@ pub struct ToolResult {
     pub result: serde_json::Value,
 }
 
+/// Recommended `max_iterations` for [`LensWorker::run_with_tools`].
+/// Enough for search-then-expand-then-answer; low enough to catch
+/// runaway loops. Callers may override.
+pub const DEFAULT_TOOL_ITERATIONS: usize = 5;
+
+/// Hard upper bound on `corpus.search`'s `top_k`. A model that asks
+/// for an absurd value (e.g. millions) gets clamped to this. Local
+/// corpora are small (thousands of items at most in v1); 100 is
+/// already more than any sensible lens-worker reasoning needs.
+pub const MAX_SEARCH_TOP_K: usize = 100;
+
 /// Tool-protocol description appended to a lens's system prompt by
 /// [`LensWorker::run_with_tools`]. Tells the model how to call the
 /// two corpus tools and how to emit its terminal output.
@@ -618,26 +629,42 @@ pub async fn execute_corpus_search(
     let top_k = arguments
         .get("top_k")
         .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
+        .map(|n| (n as usize).min(MAX_SEARCH_TOP_K))
         .unwrap_or(5);
 
     let mut filter = SearchFilter::default();
     if let Some(tags) = arguments.get("filter_tags").and_then(|v| v.as_array()) {
-        filter.tags = Some(
-            tags.iter()
-                .filter_map(|t| t.as_str().map(String::from))
-                .collect(),
-        );
+        let tag_vec: Vec<String> = tags
+            .iter()
+            .filter_map(|t| t.as_str().map(String::from))
+            .collect();
+        // Empty list from the model means "no filter intended" rather
+        // than sipag-corpus's "match nothing" (Some([])) semantics. The
+        // model can't easily express the difference; the friendlier
+        // interpretation is to drop the filter entirely.
+        if !tag_vec.is_empty() {
+            filter.tags = Some(tag_vec);
+        }
     }
     if let Some(gen) = arguments.get("generation_at_most").and_then(|v| v.as_u64()) {
-        filter.generation_at_most = Some(gen as u8);
+        let bounded = u8::try_from(gen).map_err(|_| {
+            LensError::ToolCall(format!(
+                "corpus.search: 'generation_at_most' must fit in u8, got {gen}"
+            ))
+        })?;
+        filter.generation_at_most = Some(bounded);
     }
     if let Some(window) = arguments.get("time_window") {
         if let Some(after) = window.get("after").and_then(|v| v.as_str()) {
-            filter.timestamp_after = Some(parse_rfc3339(after, "time_window.after")?);
+            filter.timestamp_after =
+                Some(parse_rfc3339(after, "corpus.search", "time_window.after")?);
         }
         if let Some(before) = window.get("before").and_then(|v| v.as_str()) {
-            filter.timestamp_before = Some(parse_rfc3339(before, "time_window.before")?);
+            filter.timestamp_before = Some(parse_rfc3339(
+                before,
+                "corpus.search",
+                "time_window.before",
+            )?);
         }
     }
 
@@ -709,10 +736,10 @@ pub fn execute_corpus_expand(
     }))
 }
 
-fn parse_rfc3339(s: &str, field: &str) -> LensResult<DateTime<Utc>> {
+fn parse_rfc3339(s: &str, tool_name: &str, field: &str) -> LensResult<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| LensError::ToolCall(format!("corpus.search: bad '{field}': {e}")))
+        .map_err(|e| LensError::ToolCall(format!("{tool_name}: bad '{field}': {e}")))
 }
 
 /// Parse a model reply as a [`ToolCallEnvelope`]. Mirrors
@@ -769,6 +796,14 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
     /// has no embedder. Use [`Self::run_with_tools`] (which takes
     /// an `&dyn Embedder` for the corpus tools) when you want
     /// Observes to land in the corpus searchable.
+    ///
+    /// **Mixed-mode caveat**: a corpus populated only through `run()`
+    /// has stored_dim = 0 (the empty-embedding item dictates the
+    /// per-corpus dimension invariant). Any later `corpus.search` call
+    /// against that corpus will return [`CorpusError::DimensionMismatch`]
+    /// because the embedder produces a non-zero-dim query. Pick one
+    /// mode per corpus, or seed the corpus with a properly-embedded
+    /// item before mixing.
     pub async fn run(&self, input: &str, corpus: &mut Corpus) -> LensResult<Vec<StructuralAction>> {
         let model = self.resolver.resolve(&self.lens.model);
         debug!(lens = %self.lens.name, model = %model, "lens-worker: chat start");
@@ -793,9 +828,17 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
     /// - if it parses as neither, return [`LensError::OutputParse`].
     ///
     /// Returns [`LensError::ToolCallLimit`] if the cap is reached
-    /// without a terminal output. A typical `max_iterations` is
-    /// `5` — enough for search-then-expand-then-answer, low enough
-    /// to catch runaway loops.
+    /// without a terminal output. [`DEFAULT_TOOL_ITERATIONS`] (`5`)
+    /// is a reasonable default for `max_iterations`.
+    ///
+    /// **Tool errors abort the loop, not the tool round.** If
+    /// `corpus.search` returns a `CorpusError::DimensionMismatch`
+    /// (operator-config issue) or `corpus.expand` is called with an
+    /// unknown id, the error bubbles straight out — the model never
+    /// sees a "search failed, retry with different args" path. This
+    /// is deliberate: tool failures here are upstream-config or
+    /// model-confusion bugs, not signals the model can recover from
+    /// without operator intervention.
     pub async fn run_with_tools(
         &self,
         input: &str,
@@ -853,7 +896,7 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
                         result: result_value,
                     },
                 })
-                .map_err(|e| LensError::OutputParse(format!("serialize tool_result: {e}")))?;
+                .map_err(|e| LensError::ToolCall(format!("serialize tool_result: {e}")))?;
                 messages.push(ChatMessage {
                     role: "assistant".into(),
                     content: raw,
@@ -914,29 +957,47 @@ impl<'a, B: ChatBackend> LensWorker<'a, B> {
         }
         for action in &tagged {
             if let StructuralAction::Observe { content, tags } = action {
+                // Loud-warn when an Observe lands with no embedder —
+                // the on-disk item will be persisted with an empty
+                // embedding and therefore invisible to `corpus.search`.
+                // Catches accidental use of plain `run()` for content
+                // the caller intends to search later.
+                if embedder.is_none() {
+                    warn!(
+                        lens = %self.lens.name,
+                        "lens-worker: writing Observe with empty embedding; \
+                         subsequent corpus.search will not find this item. \
+                         Use run_with_tools() with an embedder for searchable Observes."
+                    );
+                }
                 // Call .embed() directly (rather than corpus.add_text)
                 // because add_text takes `E: Embedder` with implicit
                 // Sized bound; routing through .embed() + .add()
                 // accepts `&dyn Embedder` without forcing sipag-corpus
                 // to relax that signature.
-                let embedding_result = match embedder {
-                    Some(e) => e.embed(content).await.map(Some),
-                    None => Ok(None),
+                let embedding = match embedder {
+                    Some(e) => match e.embed(content).await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            // Embed failed — preserve the content with
+                            // an empty embedding rather than dropping
+                            // it. Search won't find it (same as the
+                            // None-embedder path) but the observation
+                            // isn't silently lost.
+                            warn!(
+                                lens = %self.lens.name,
+                                error = %err,
+                                "lens-worker: embedder failed; writing Observe with empty embedding"
+                            );
+                            Vec::new()
+                        }
+                    },
+                    None => Vec::new(),
                 };
-                let write_result = match embedding_result {
-                    Ok(Some(embedding)) => {
-                        corpus
-                            .add(content.clone(), embedding, tags.clone(), Vec::new(), 0)
-                            .await
-                    }
-                    Ok(None) => {
-                        corpus
-                            .add(content.clone(), Vec::new(), tags.clone(), Vec::new(), 0)
-                            .await
-                    }
-                    Err(e) => Err(e),
-                };
-                if let Err(e) = write_result {
+                if let Err(e) = corpus
+                    .add(content.clone(), embedding, tags.clone(), Vec::new(), 0)
+                    .await
+                {
                     warn!(
                         lens = %self.lens.name,
                         error = %e,
@@ -1923,5 +1984,258 @@ code_aware = "starcoder:15b"
         assert!(usr.contains("[user] U1"));
         assert!(usr.contains("[assistant] A1"));
         assert!(usr.contains("[tool] T1"));
+    }
+
+    // ── round-1 review-fix coverage ─────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_corpus_search_generation_at_most_narrows_to_raw_observations() {
+        // Mix generation 0 + generation 1 items; filter to gen=0.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        corpus
+            .add_text(&embedder, "raw observation".into(), vec![], vec![], 0)
+            .await
+            .unwrap();
+        corpus
+            .add_text(&embedder, "derived synthesis".into(), vec![], vec![1], 1)
+            .await
+            .unwrap();
+        let args = serde_json::json!({
+            "query": "anything",
+            "top_k": 5,
+            "generation_at_most": 0,
+        });
+        let result = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap();
+        let items = result.get("items").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "generation_at_most=0 should exclude derived"
+        );
+        assert_eq!(
+            items[0].get("content").and_then(|v| v.as_str()),
+            Some("raw observation")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_generation_at_most_oversized_errors() {
+        // Model passing a value > u8::MAX should error rather than
+        // silently wrap to a wrong filter.
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let args = serde_json::json!({
+            "query": "x",
+            "generation_at_most": 9999,
+        });
+        let err = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCall(msg) => assert!(msg.contains("generation_at_most")),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_top_k_clamped_to_max() {
+        // top_k > MAX_SEARCH_TOP_K should be clamped, not allocate
+        // absurd amounts. Verify via the returned items length (bounded
+        // by both top_k and corpus size).
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        for i in 0..3 {
+            corpus
+                .add_text(&embedder, format!("item-{i}"), vec![], vec![], 0)
+                .await
+                .unwrap();
+        }
+        let args = serde_json::json!({
+            "query": "anything",
+            "top_k": 10_000_000_u64,
+        });
+        let result = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap();
+        let items = result.get("items").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(
+            items.len(),
+            3,
+            "should return all 3 items (clamped top_k still > corpus size)"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_empty_filter_tags_treated_as_no_filter() {
+        // The model passing `"filter_tags": []` is friendlier as
+        // "no filter intended" than sipag-corpus's "match nothing"
+        // semantics. Verify: results returned, not silently zero.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        populate_two_items(&mut corpus, &embedder).await;
+        let args = serde_json::json!({
+            "query": "alpha — about cats",
+            "top_k": 5,
+            "filter_tags": [],
+        });
+        let result = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap();
+        let items = result.get("items").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(items.len(), 2, "empty filter_tags must not match-nothing");
+    }
+
+    #[tokio::test]
+    async fn execute_corpus_search_bad_time_window_before_errors() {
+        let dir = TempDir::new().unwrap();
+        let corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let args = serde_json::json!({
+            "query": "x",
+            "time_window": { "before": "still-not-a-date" },
+        });
+        let err = execute_corpus_search(&args, &corpus, &embedder)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCall(msg) => {
+                assert!(msg.contains("time_window.before"));
+                assert!(msg.contains("corpus.search"));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_call_returns_none_on_braces_without_valid_json() {
+        // The `{ ... }` extraction path must not panic on braces that
+        // wrap garbage. Without this test the prose-with-real-envelope
+        // case alone is the only guard on that branch.
+        assert!(parse_tool_call("{ not json at all }").is_none());
+        assert!(parse_tool_call("{tool_call: missing quotes}").is_none());
+        assert!(parse_tool_call("{{nested braces no json}}").is_none());
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_propagates_tool_executor_error_mid_loop() {
+        // When `corpus.expand` is called with an unknown item_id,
+        // execute_corpus_expand returns LensError::ToolCall; verify
+        // run_with_tools bubbles it out cleanly (does not absorb /
+        // re-wrap / loop on it).
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let lens = test_lens("error-bubble", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([
+            expand_call(9999),
+            lens_output_with_observe("should not be reached"),
+        ]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        let err = worker
+            .run_with_tools("input", &mut corpus, &embedder, 5)
+            .await
+            .unwrap_err();
+        match err {
+            LensError::ToolCall(msg) => assert!(msg.contains("9999")),
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        // Backend should have been called exactly once (the expand
+        // failed before the loop could call again).
+        assert_eq!(backend.calls().await, 1);
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_observe_then_search_round_trips() {
+        // Headline contract: an Observe written via run_with_tools
+        // becomes discoverable through a subsequent corpus.search
+        // tool_call from another run_with_tools invocation. This is
+        // the end-to-end proof that the tool path makes Observes
+        // searchable.
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let embedder = FakeEmbedder { dim: 4 };
+        let resolver = ModelResolver::with_defaults();
+
+        // Run #1 — model emits an Observe directly.
+        let lens_a = test_lens("writer", "you write observations");
+        let backend_a =
+            ScriptedBackend::new([lens_output_with_observe("there are seven cats in the room")]);
+        LensWorker::new(&lens_a, &backend_a, &resolver)
+            .run_with_tools("look around", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+
+        // Run #2 — model searches for the prior observation, then
+        // emits a synthesis Observe referring to it. Verify the search
+        // tool_result contains the prior observation by content.
+        let lens_b = test_lens("synthesizer", "you synthesize observations");
+        let backend_b = ScriptedBackend::new([
+            search_call("there are seven cats in the room"),
+            lens_output_with_observe("counted: seven feline residents"),
+        ]);
+        LensWorker::new(&lens_b, &backend_b, &resolver)
+            .run_with_tools("synthesize", &mut corpus, &embedder, 5)
+            .await
+            .unwrap();
+        // Run #2's second turn should have received the prior Observe.
+        let history = backend_b.nth_history(1).await;
+        let tool_msg = history.iter().find(|m| m.role == "tool").unwrap();
+        assert!(
+            tool_msg
+                .content
+                .contains("there are seven cats in the room"),
+            "search tool_result should include prior Observe content; got: {}",
+            tool_msg.content
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_falls_back_to_empty_embedding_when_embedder_fails() {
+        // FailingEmbedder always errors. run_with_tools should still
+        // PERSIST the Observe (content + tags) with an empty embedding
+        // — not silently drop it. Search won't find it (same as the
+        // None-embedder path), but the observation isn't lost.
+        struct FailingEmbedder;
+        #[async_trait]
+        impl Embedder for FailingEmbedder {
+            async fn embed(&self, _: &str) -> sipag_corpus::CorpusResult<Vec<f32>> {
+                Err(sipag_corpus::CorpusError::Embed("forced failure".into()))
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        let mut corpus = Corpus::open(dir.path()).await.unwrap();
+        let lens = test_lens("fallback", "");
+        let resolver = ModelResolver::with_defaults();
+        let backend = ScriptedBackend::new([lens_output_with_observe("important note")]);
+        let worker = LensWorker::new(&lens, &backend, &resolver);
+        worker
+            .run_with_tools("input", &mut corpus, &FailingEmbedder, 3)
+            .await
+            .unwrap();
+        let item = corpus
+            .get(1)
+            .expect("Observe should be written with empty embedding on embedder failure");
+        assert_eq!(item.content, "important note");
+        assert!(item.embedding.is_empty(), "fallback writes empty embedding");
+    }
+
+    #[test]
+    fn default_tool_iterations_is_recommended_value() {
+        // Pin the recommendation so a future tweak forces a docs sync.
+        assert_eq!(DEFAULT_TOOL_ITERATIONS, 5);
+    }
+
+    #[test]
+    fn max_search_top_k_pinned() {
+        // Pin the cap so changes are deliberate (and visible in tests).
+        assert_eq!(MAX_SEARCH_TOP_K, 100);
     }
 }
