@@ -453,7 +453,7 @@ Until those land, the flow above is what's running.
 | `sipag/src/serve/htmx.rs:529` | `dispatch_task_handler` — HTTP entry point |
 | `sipag/src/serve/htmx.rs:1280+` | v2 path (background task) |
 | `sipag/src/serve/htmx.rs:1577` | `verify_and_heal_dispatch` — legacy nudge loop |
-| `sipag/src/serve/htmx.rs:1877` | `run_dispatch_gate` — wraps `gate::classify` |
+| `sipag/src/serve/htmx.rs::run_dispatch_gate` | wraps `dispatch_gate::classify` (renamed in §9 #9) |
 | `sipag/src/dispatch_gate.rs` | Gate classifier (gemma4 via the ollama bridge — moved out of sipag-core in §9 #9) |
 | `sipag-core/src/llm.rs` | Ollama HTTP client; `OLLAMA_HOST` + `OLLAMA_MODEL` env vars |
 | `sipag-core/src/board/{task,role,project}.rs` | The data model the handler reads/writes |

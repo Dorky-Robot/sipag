@@ -662,7 +662,7 @@ impl ChatBackend for BridgeChatBackend {
         // body (identical to the plain `chat_messages` path).
         let mut options_obj = serde_json::Map::new();
         if let Some(t) = options.temperature {
-            options_obj.insert("temperature".into(), serde_json::Value::from(t as f64));
+            options_obj.insert("temperature".into(), serde_json::Value::from(t));
         }
         if let Some(n) = options.num_predict {
             options_obj.insert("num_predict".into(), serde_json::Value::from(n));
