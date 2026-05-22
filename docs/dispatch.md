@@ -12,7 +12,7 @@
 >
 > Until this doc gets a full refresh, treat it as a navigable map of the *historical* flow; for current code, read the `sipag-dispatch` crate's module docs directly.
 
-This is the **current implementation** (May 2026). The gate still lives in `sipag-core/src/gate.rs`; it folds into the lens-worker abstraction per [`modules.md`](modules.md) §9 Phase 1 #3 / §9 #9.
+This is the **current implementation** (May 2026). The gate moved out of `sipag-core/src/gate.rs` into `sipag/src/dispatch_gate.rs` in §9 #9 and now talks gemma via `sipag_lens::ChatBackend` (bridge-backed) instead of the legacy direct-reqwest `llm::chat` path.
 
 ---
 
@@ -47,7 +47,7 @@ Dispatch turns a `Task` on the sipag board into a **katulong session running an 
 └─────────────────────────┬───────────────────────────────────────────┘
                           ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  Dispatch Gate          sipag-core/src/gate.rs                      │
+│  Dispatch Gate          sipag/src/dispatch_gate.rs                  │
 │  GET /sessions/by-id/:id/output  → pane scrollback                  │
 │  POST {ollama}/api/chat → gemma4 classifies pane against statuses   │
 │                                                                     │
@@ -175,7 +175,7 @@ Sipag persists `task.dispatch_session_id = id` and `task.dispatch_host_id = host
 
 ## Step 3: The dispatch gate (where dispatch often parks)
 
-`sipag-core/src/gate.rs`, called from `htmx.rs:1877::run_dispatch_gate`
+`sipag/src/dispatch_gate.rs` (moved out of sipag-core in §9 #9), called from `htmx.rs::run_dispatch_gate`
 
 ```
                                   ┌─────────────────────────────────┐
@@ -229,7 +229,7 @@ htmx.rs:659    Err((st, body)) => return err_response(st, body),
                }
 ```
 
-**Key fact**: the `Parked` branch returns silently from the server's perspective. The user sees a toast in the web UI ("task #N not dispatched — needs-human") but the only thing in the server log is the handler-entry line. With `RUST_LOG=info,sipag_core::gate=debug` you can see the gate's actual decision (gemma's prompt + response).
+**Key fact**: the `Parked` branch returns silently from the server's perspective. The user sees a toast in the web UI ("task #N not dispatched — needs-human") but the only thing in the server log is the handler-entry line. With `RUST_LOG=info,sipag::dispatch_gate=debug` you can see the gate's actual decision (gemma's prompt + response). (Pre-§9-#9 the tracing target was `sipag_core::gate`; that module is gone.)
 
 ---
 
@@ -375,7 +375,7 @@ htmx.rs:1426 "dispatch v2: submit sent"           ← only on v2
 (legacy path also logs but is being retired; not shown)
 ```
 
-**What "silent" failure looks like**: the dispatch handler logs `handler entry` and `v2 flag resolved`, then nothing else, and the task stays `todo`. That's the Parked outcome of the gate. To diagnose, run with `RUST_LOG=info,sipag_core::gate=debug,sipag::serve::htmx=debug`.
+**What "silent" failure looks like**: the dispatch handler logs `handler entry` and `v2 flag resolved`, then nothing else, and the task stays `todo`. That's the Parked outcome of the gate. To diagnose, run with `RUST_LOG=info,sipag::dispatch_gate=debug,sipag::serve::htmx=debug`. (Pre-§9-#9 the tracing target was `sipag_core::gate`; that module is gone.)
 
 ---
 
@@ -454,7 +454,7 @@ Until those land, the flow above is what's running.
 | `sipag/src/serve/htmx.rs:1280+` | v2 path (background task) |
 | `sipag/src/serve/htmx.rs:1577` | `verify_and_heal_dispatch` — legacy nudge loop |
 | `sipag/src/serve/htmx.rs:1877` | `run_dispatch_gate` — wraps `gate::classify` |
-| `sipag-core/src/gate.rs` | Gate classifier (gemma4 via ollama) |
+| `sipag/src/dispatch_gate.rs` | Gate classifier (gemma4 via the ollama bridge — moved out of sipag-core in §9 #9) |
 | `sipag-core/src/llm.rs` | Ollama HTTP client; `OLLAMA_HOST` + `OLLAMA_MODEL` env vars |
 | `sipag-core/src/board/{task,role,project}.rs` | The data model the handler reads/writes |
 | `sipag/src/serve/katulong_proxy.rs::create_or_find_session` | HTTP session-create with 409 fallback |

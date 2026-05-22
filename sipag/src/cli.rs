@@ -396,7 +396,11 @@ fn gate_classify(
         .build()
         .context("failed to build tokio runtime for gate classify")?;
     rt.block_on(async {
-        let http = reqwest::Client::new();
+        // Use the shared bridge-friendly client (Mozilla UA + 600s
+        // timeout). `reqwest::Client::new()` would 403 against a
+        // Cloudflare-fronted bridge tunnel and would hang
+        // indefinitely on transport failure.
+        let http = crate::bridge::default_http_client()?;
         let wiring = crate::bridge::build_bridge_wiring(http).context(
             "dispatch gate requires the ollama bridge; set up ~/.ollama-bridge/remote.json",
         )?;

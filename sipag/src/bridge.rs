@@ -28,11 +28,29 @@ use anyhow::{Context, Result};
 use ollama_bridge_client::{OllamaBridgeClient, RemoteConfig};
 use sipag_corpus::BridgeEmbedder;
 use sipag_lens::BridgeChatBackend;
+use std::time::Duration;
 
 /// Embedder model the scheduler + lens-workers use for corpus writes
 /// + `corpus.search` queries. Local, free, stable dim. Lift to
 /// `~/.sipag/models.toml` when a second embed model becomes plausible.
 pub const DEFAULT_EMBEDDER_MODEL: &str = "nomic-embed-text";
+
+/// Build a reqwest client suitable for talking to the bridge from any
+/// sipag surface (serve, CLI, future tools). Cloudflare's Browser
+/// Integrity Check 403s the default `reqwest/x.y.z` UA when the
+/// bridge sits behind a tunnel — keep "Mozilla" in the UA so we
+/// always get through. 600s timeout matches gemma's worst-case
+/// generation latency for the gate-tier prompt.
+pub fn default_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .user_agent(concat!(
+            "Mozilla/5.0 sipag-bridge/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .build()
+        .context("failed to build reqwest client for the bridge")
+}
 
 /// Constructed bridge consumers, ready to share between the
 /// scheduler, the dispatch gate, and any future bridge caller.

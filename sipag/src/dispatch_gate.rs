@@ -39,7 +39,7 @@
 
 use serde::Deserialize;
 use sipag_board::Status;
-use sipag_lens::ChatBackend;
+use sipag_lens::{ChatBackend, ChatOptions};
 
 /// Inputs the gate needs to reason about a session.
 pub struct GateInput<'a> {
@@ -86,11 +86,27 @@ const FALLBACK_STATUS: &str = "needs-human";
 /// bloating a task file.
 const MAX_RAW_REASON_LEN: usize = 280;
 
-/// Model name the gate calls. Bridge-tier classifier — fast small
-/// model is the right pick. Lift to per-lens model selection via
-/// `~/.sipag/models.toml` if/when the gate's prompt needs a stronger
-/// model.
-const GATE_MODEL: &str = "gemma4:latest";
+/// Default model name the gate calls when `OLLAMA_MODEL` is unset.
+/// Bridge-tier classifier — fast small model is the right pick.
+/// Operators can override via `OLLAMA_MODEL` env var for parity with
+/// the pre-fold gate's behavior (`sipag_core::llm::env_model`). Lift
+/// to per-lens model selection via `~/.sipag/models.toml` if/when the
+/// gate grows a `Lens` representation.
+const DEFAULT_GATE_MODEL: &str = "gemma4:latest";
+
+/// Resolve the gate's model: `OLLAMA_MODEL` env var if set,
+/// otherwise [`DEFAULT_GATE_MODEL`]. Mirrors the pre-§9-#9
+/// behavior of `sipag_core::llm::env_model`.
+fn gate_model() -> String {
+    std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_GATE_MODEL.to_string())
+}
+
+/// Sampling options the gate pins. Pre-§9-#9 the gate set these
+/// explicitly in its `ChatOptions` so gemma's classification stayed
+/// deterministic enough to parse reliably; we preserve them on the
+/// new path via `ChatBackend::chat_with_options`.
+const GATE_TEMPERATURE: f32 = 0.2;
+const GATE_NUM_PREDICT: u32 = 512;
 
 /// Classify the session and return the gate's verdict.
 ///
@@ -107,8 +123,13 @@ pub async fn classify<B: ChatBackend>(
     input: GateInput<'_>,
 ) -> Result<GateDecision, GateError> {
     let user_prompt = render_user_prompt(&input);
+    let model = gate_model();
+    let options = ChatOptions {
+        temperature: Some(GATE_TEMPERATURE),
+        num_predict: Some(GATE_NUM_PREDICT),
+    };
     let raw = backend
-        .chat(GATE_MODEL, SYSTEM_PROMPT, &user_prompt)
+        .chat_with_options(&model, SYSTEM_PROMPT, &user_prompt, &options)
         .await
         .map_err(|e| GateError::Backend(e.to_string()))?;
     Ok(parse_decision(&raw, input.statuses))
@@ -295,6 +316,7 @@ mod tests {
         captured_model: Arc<Mutex<Option<String>>>,
         captured_system: Arc<Mutex<Option<String>>>,
         captured_user: Arc<Mutex<Option<String>>>,
+        captured_options: Arc<Mutex<Option<ChatOptions>>>,
     }
 
     impl CannedBackend {
@@ -304,6 +326,7 @@ mod tests {
                 captured_model: Arc::new(Mutex::new(None)),
                 captured_system: Arc::new(Mutex::new(None)),
                 captured_user: Arc::new(Mutex::new(None)),
+                captured_options: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -314,6 +337,20 @@ mod tests {
             *self.captured_model.lock().await = Some(model.to_string());
             *self.captured_system.lock().await = Some(system.to_string());
             *self.captured_user.lock().await = Some(user.to_string());
+            Ok(self.reply.clone())
+        }
+
+        async fn chat_with_options(
+            &self,
+            model: &str,
+            system: &str,
+            user: &str,
+            options: &ChatOptions,
+        ) -> LensResult<String> {
+            *self.captured_model.lock().await = Some(model.to_string());
+            *self.captured_system.lock().await = Some(system.to_string());
+            *self.captured_user.lock().await = Some(user.to_string());
+            *self.captured_options.lock().await = Some(options.clone());
             Ok(self.reply.clone())
         }
     }
@@ -451,14 +488,57 @@ mod tests {
         let captured_model = backend.captured_model.lock().await.clone().unwrap();
         let captured_system = backend.captured_system.lock().await.clone().unwrap();
         assert_eq!(
-            captured_model, GATE_MODEL,
-            "classify must call ChatBackend::chat with the gate-tier model"
+            captured_model, DEFAULT_GATE_MODEL,
+            "classify must call ChatBackend with the gate-tier model (default when OLLAMA_MODEL unset)"
         );
         assert_eq!(
             captured_system, SYSTEM_PROMPT,
             "classify must use the documented dispatch-gate system prompt verbatim"
         );
     }
+
+    #[tokio::test]
+    async fn classify_pins_gate_sampling_options_via_chat_with_options() {
+        // Pre-§9-#9 the gate set temperature=0.2 + num_predict=512
+        // explicitly. The fold must preserve this — without it ollama
+        // defaults to ~0.8 temperature + unbounded num_predict, which
+        // causes JSON-shape drift and more `fallback_unparsable`
+        // coercions → more spurious needs-human parks of actually
+        // dispatchable sessions.
+        let backend = CannedBackend::new(r#"{"status":"todo","reason":"r","human_action":null}"#);
+        let statuses = sample_statuses();
+        classify(
+            &backend,
+            GateInput {
+                task_title: "T",
+                task_role: "claude",
+                statuses: &statuses,
+                session_output: "$ ",
+            },
+        )
+        .await
+        .unwrap();
+        let options = backend.captured_options.lock().await.clone();
+        let opts = options.expect("classify must use chat_with_options, not bare chat");
+        assert_eq!(
+            opts.temperature,
+            Some(GATE_TEMPERATURE),
+            "gate must pin temperature for deterministic structured output"
+        );
+        assert_eq!(
+            opts.num_predict,
+            Some(GATE_NUM_PREDICT),
+            "gate must pin num_predict to bound model output length"
+        );
+    }
+
+    // Note: OLLAMA_MODEL env-override behavior is exercised by
+    // operators directly. We don't unit-test it here because
+    // `std::env::set_var` is process-global and test parallelism
+    // would interleave with any other test reading `OLLAMA_MODEL`.
+    // The default-when-unset path IS covered by
+    // `classify_routes_through_chat_backend_with_gate_model_and_system_prompt`
+    // (the test runs without OLLAMA_MODEL set and asserts DEFAULT_GATE_MODEL).
 
     #[tokio::test]
     async fn classify_user_turn_contains_rendered_prompt() {
