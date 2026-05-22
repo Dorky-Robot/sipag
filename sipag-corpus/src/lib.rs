@@ -157,7 +157,13 @@ pub trait Embedder: Send + Sync {
 /// Gated behind the default `bridge` cargo feature. Disable
 /// (`default-features = false`) when consuming sipag-corpus with
 /// an alternate embedder.
+/// `Clone` because the underlying `OllamaBridgeClient` is `Clone`
+/// (its `reqwest::Client` is Arc-internal) and `String` /
+/// `Duration` clone cheaply. Lets callers fan the embedder out
+/// across the scheduler + ad-hoc lens-workers + future per-lens
+/// embedder selections without rebuilding.
 #[cfg(feature = "bridge")]
+#[derive(Clone)]
 pub struct BridgeEmbedder {
     client: ollama_bridge_client::OllamaBridgeClient,
     model: String,

@@ -487,6 +487,30 @@ pub type LensResult<T> = std::result::Result<T, LensError>;
 
 // ── chat backend ───────────────────────────────────────────────────
 
+/// Per-call sampling options the caller wants threaded through to
+/// ollama's `/api/chat` `options` field. Each field is `Option` so
+/// callers can request just temperature, or just num_predict, or
+/// both. Backends that can't pass options through (test mocks, the
+/// default-impl collapse) ignore the values silently — production
+/// `BridgeChatBackend` includes whichever are `Some` in the request
+/// body.
+///
+/// Added with §9 #9 (dispatch gate fold). The gate needs deterministic
+/// JSON output from gemma; without options-passthrough, gemma defaults
+/// to ~0.8 temperature and unbounded `num_predict`, which causes
+/// structured-output drift. With `{temperature: 0.2, num_predict: 512}`
+/// pinned, the gate's classification stays reliable.
+#[derive(Debug, Clone, Default)]
+pub struct ChatOptions {
+    /// Sampling temperature. Lower = more deterministic (good for
+    /// structured-JSON outputs); higher = more diverse. ollama
+    /// default is ~0.8.
+    pub temperature: Option<f32>,
+    /// Maximum tokens to predict. `None` means use ollama default
+    /// (`-1`, unbounded).
+    pub num_predict: Option<u32>,
+}
+
 /// The chat backend a [`LensWorker`] talks to. Decoupled from
 /// `OllamaBridgeClient` directly so tests can inject a mock that
 /// returns canned JSON without spinning up a real bridge.
@@ -530,9 +554,36 @@ pub trait ChatBackend: Send + Sync {
         }
         self.chat(model, &system, &user).await
     }
+
+    /// One-shot chat with per-call sampling options. Backends that
+    /// can pass options to the underlying transport should override;
+    /// the default impl ignores `options` and falls through to
+    /// [`Self::chat`], which is fine for test mocks but means callers
+    /// that genuinely need deterministic sampling MUST go through a
+    /// backend that honors the options (e.g. [`BridgeChatBackend`]).
+    ///
+    /// Added with §9 #9 (dispatch gate fold) so the gate can pin its
+    /// historical `{temperature: 0.2, num_predict: 512}` without
+    /// forcing every existing single-arg call site to grow an unused
+    /// options parameter.
+    async fn chat_with_options(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        _options: &ChatOptions,
+    ) -> LensResult<String> {
+        self.chat(model, system, user).await
+    }
 }
 
 /// Production [`ChatBackend`] — calls the bridge.
+///
+/// `Clone` because the underlying `OllamaBridgeClient` is `Clone`
+/// (its `reqwest::Client` is Arc-internal) and `Duration` is `Copy`.
+/// Callers that fan the backend out across the scheduler + the
+/// dispatch gate + ad-hoc lens-workers benefit from cheap clones.
+#[derive(Clone)]
 pub struct BridgeChatBackend {
     client: OllamaBridgeClient,
     timeout: Duration,
@@ -588,6 +639,51 @@ impl ChatBackend for BridgeChatBackend {
             .map_err(|e| LensError::Bridge(e.to_string()))?;
         // Ollama's /api/chat response shape:
         //   { "message": { "role": "assistant", "content": "..." } }
+        let content = result
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| {
+                LensError::Bridge(format!("no message.content in bridge response: {result}"))
+            })?;
+        Ok(content.to_string())
+    }
+
+    async fn chat_with_options(
+        &self,
+        model: &str,
+        system: &str,
+        user: &str,
+        options: &ChatOptions,
+    ) -> LensResult<String> {
+        // Ollama's `/api/chat` accepts an `options` object alongside
+        // `model` + `messages`. We only set fields the caller asked
+        // for, so an empty ChatOptions yields no `options` key in the
+        // body (identical to the plain `chat_messages` path).
+        let mut options_obj = serde_json::Map::new();
+        if let Some(t) = options.temperature {
+            options_obj.insert("temperature".into(), serde_json::Value::from(t));
+        }
+        if let Some(n) = options.num_predict {
+            options_obj.insert("num_predict".into(), serde_json::Value::from(n));
+        }
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
+            ],
+        });
+        if !options_obj.is_empty() {
+            body.as_object_mut()
+                .expect("constructed object above")
+                .insert("options".into(), serde_json::Value::Object(options_obj));
+        }
+        let result = self
+            .client
+            .submit_and_wait(JobEndpoint::Chat, body, self.timeout)
+            .await
+            .map_err(|e| LensError::Bridge(e.to_string()))?;
         let content = result
             .get("message")
             .and_then(|m| m.get("content"))

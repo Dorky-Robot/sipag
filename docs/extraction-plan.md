@@ -44,9 +44,11 @@ sipag/
 │       ├── config.rs       ← stays (cross-cutting; tiny)
 │       ├── feature.rs      ⛔ deprecated
 │       ├── refine.rs       ⛔ deprecated
-│       ├── gate.rs         ⛕ retiring (Phase 2 #9 — folds into lens-worker abstraction)
-│       │                   (nudge.rs deleted in §9 #11; no successor needed)
-│       ├── llm.rs          ⛕ retiring (callers migrate to `ollama-bridge-client`)
+│                            (gate.rs moved to sipag/src/dispatch_gate.rs in §9 #9 —
+│                             now talks gemma through sipag_lens::ChatBackend;
+│                             nudge.rs deleted in §9 #11; no successor needed)
+│       ├── llm.rs          ⛕ retiring (categorize.rs / workers::research /
+│       │                   workers::expand still depend; migrate to bridge)
 │       └── lib.rs          (thin re-exports of katulong-client / pubsub / mesh / board / auth)
 ├── sipag/             (binary: CLI + serve/)
 │   └── src/serve/htmx.rs   ~1620 LOC — remaining mess is route plumbing + the gate (legacy nudge loop deleted in §9 #11)
@@ -64,7 +66,7 @@ External dependencies sipag relies on (not in this repo, but called out so the s
 
 **Target reached.** Nine planned workspace crates + sipag-core (shim) + sipag (binary) + tui (binary). The target tree from earlier drafts is now the current state — see §1 above.
 
-The remaining work isn't more extraction; it's the **post-extraction cleanup**: retire `sipag-core/src/gate.rs` + `llm.rs` (callers migrate to the lens-worker abstraction; `nudge.rs` already retired in §9 #11), let `sipag-core` shrink to just `config.rs` + the re-export shims, and then eventually consider dissolving sipag-core itself once the shims have aged out. That's all in modules.md §9 Phase 2 + Phase 3, not in this doc.
+The remaining work isn't more extraction; it's the **post-extraction cleanup**: retire `sipag-core/src/llm.rs` (callers — `categorize.rs`, `workers::research`, `workers::expand` — migrate to `sipag_lens::ChatBackend`), let `sipag-core` shrink to just `config.rs` + the re-export shims, and then eventually consider dissolving sipag-core itself once the shims have aged out. `gate.rs` already moved out in §9 #9 (now `sipag/src/dispatch_gate.rs`); `nudge.rs` already retired in §9 #11. That's all in modules.md §9 Phase 2 + Phase 3, not in this doc.
 
 ---
 
@@ -244,4 +246,4 @@ A crate is "fully migrated" (re-export can be deleted) when zero `use sipag_core
   - `sipag-auth` (PR #554) — identity subsystem. Mechanical move of sipag-core/src/auth/ (9 files). Bulk `crate::auth::…` → `crate::…` fix (20+ references).
   - This docs PR closes the loop: §1 (current state) + §2 (target reached) + §3 (every entry ✅ done with PR link) + §4 (sequencing all done) updated.
 
-**The plan is complete.** Future work — retire `sipag-core/src/{gate,llm}.rs` as the lens-worker scheduler lands (`nudge.rs` already retired in §9 #11), then dissolve `sipag-core` itself once its shims have aged out — lives in modules.md §9, not here.
+**The plan is complete.** Future work — retire `sipag-core/src/llm.rs` (categorize / research / expand callers migrate to `sipag_lens::ChatBackend`; `gate.rs` already moved to `sipag/src/dispatch_gate.rs` in §9 #9; `nudge.rs` already retired in §9 #11), then dissolve `sipag-core` itself once its shims have aged out — lives in modules.md §9, not here.

@@ -1,3 +1,4 @@
+use crate::bridge::BridgeWiring;
 use crate::serve::categorize::ProposalState;
 use katulong_client::KatulongAsyncClient;
 use sipag_core::auth::{AuthStore, WebAuthnService};
@@ -38,6 +39,20 @@ pub struct AppState {
     /// render time when the underlying summary hash changes; never
     /// persisted (proposals are advisory render-time hints).
     pub kr_proposals: Arc<RwLock<HashMap<String, ProposalState>>>,
+    /// Shared ollama-bridge wiring. `Some` when
+    /// `~/.ollama-bridge/remote.json` was loadable at startup;
+    /// `None` when the bridge isn't configured. Consumed by the
+    /// dispatch gate (`dispatch_gate::classify` via `wiring.chat`)
+    /// and by the lens scheduler (`serve/lens_scheduler.rs` via
+    /// `wiring.chat + wiring.embedder`). When None, the gate path
+    /// fails closed at dispatch time with a clear "configure the
+    /// bridge" error — same shape as today's gemma-unreachable
+    /// failure mode, just earlier in the call chain.
+    ///
+    /// `BridgeWiring: Clone` (the gate fold added `Clone` to its
+    /// underlying types), so AppState's per-request `.clone()` stays
+    /// cheap.
+    pub bridge: Option<BridgeWiring>,
 }
 
 impl AppState {

@@ -67,15 +67,16 @@ pub struct Task {
     #[serde(default)]
     pub key_results: Vec<u64>,
     /// Short phrase from the dispatch gate explaining why the task is
-    /// in its current status. Set by `gate::classify` when it parks a
-    /// task at a non-dispatchable column (login required, permission
-    /// prompt, etc.). Cleared when the task moves back to a clean
-    /// dispatchable state.
+    /// in its current status. Set by the gate (lives in sipag's
+    /// `dispatch_gate::classify` after §9 #9 moved it out of
+    /// sipag-core) when it parks a task at a non-dispatchable
+    /// column (login required, permission prompt, etc.). Cleared
+    /// when the task moves back to a clean dispatchable state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// What a human needs to do to unblock the task. Mirrors
-    /// `gate::GateDecision::human_action`. Rendered next to the task
-    /// in the TUI / web UI when present.
+    /// `dispatch_gate::GateDecision::human_action`. Rendered next to
+    /// the task in the TUI / web UI when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_action: Option<String>,
     /// Katulong session id this task was dispatched into, set when

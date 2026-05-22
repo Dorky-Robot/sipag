@@ -36,7 +36,9 @@ sipag-core/src/                # Library — domain logic + auth + LLM client + 
 ├── config.rs                  # default_sipag_dir() — resolves SIPAG_DIR / ~/.sipag
 ├── feature.rs                 # ⛔ deprecated (kanban refinement pipeline; PR #536)
 ├── refine.rs                  # ⛔ deprecated (companion to feature.rs)
-├── gate.rs                    # early lens-worker prototype (pre-dispatch classifier)
+│                              # (no gate.rs — moved to sipag binary
+│                              # as dispatch_gate.rs in §9 #9 and now
+│                              # talks gemma via the bridge ChatBackend)
 │                              # (no nudge.rs — deleted in §9 #11; the
 │                              # post-dispatch observer role belongs to
 │                              # the lens-worker abstraction now)
@@ -204,7 +206,7 @@ This matters for Claude sessions specifically: reach for `diwa search` BEFORE `g
 
 - `sipag-core/src/board/` — Objective / KeyResult / Task / Role / Project schema
 - `sipag-core/src/llm.rs` — gemma4 / ollama client (will export `LlmClient` trait per Phase 2 #8)
-- `sipag-core/src/gate.rs` — early lens-worker prototype (pre-dispatch classifier); folds into the lens-worker abstraction in Phase 1 #3. (Companion `nudge.rs` retired in §9 #11.)
+- `sipag/src/dispatch_gate.rs` — pre-dispatch classifier. Moved out of sipag-core in §9 #9 and now talks gemma through `sipag_lens::ChatBackend` (concretely `BridgeChatBackend`) instead of the legacy direct-reqwest `llm::chat` path. (`sipag-core/src/gate.rs` is gone; `nudge.rs` retired in §9 #11.)
 - `sipag/src/serve/` — the web UI (htmx + maud), where Steering lives today
 - `tui/src/board_app.rs` — interactive board
 - `katulong-client/src/` — wire client; touch when adding HTTP/WS/SSE consumers

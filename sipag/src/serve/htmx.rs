@@ -9,6 +9,7 @@
 //! The matching JSON `/api/*` endpoints in `board.rs` are still
 //! authoritative — these are just thin re-renders.
 
+use crate::dispatch_gate::{self, GateInput};
 use crate::serve::board_view::{
     self, board_main, dispatch_picker, idea_box, load_snapshot, new_kr_form, new_objective_form,
     new_standing_form, new_task_form, oob_clear_dispatch_picker, oob_toast, page,
@@ -27,7 +28,6 @@ use sipag_core::board::{
     add_task, create_project_with_kind, delete_project, load_project, move_task, KeyResult,
     KrStance, Observation, Project, ProjectKind, Task, TaskStatus, MISC_PROJECT,
 };
-use sipag_core::gate::{self, GateInput};
 use sipag_core::katulong::RemoteConfig;
 use sipag_dispatch::{DispatchInput, DispatchStep, WorktreeSpec};
 use tracing::{info, warn};
@@ -1412,8 +1412,23 @@ async fn run_dispatch_gate(
     // will see no signal and route to needs-human).
     let session_output = fetch_pane_scrollback(state, host, session_id).await;
 
-    let decision = match gate::classify(
-        &state.http,
+    let bridge_chat = match state.bridge.as_ref() {
+        Some(wiring) => &wiring.chat,
+        None => {
+            warn!(
+                project = %project_name,
+                task = task.id,
+                "dispatch gate: bridge unconfigured — refusing to dispatch"
+            );
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "dispatch gate: ~/.ollama-bridge/remote.json missing — configure the bridge and restart sipag serve, then retry."
+                    .to_string(),
+            ));
+        }
+    };
+    let decision = match dispatch_gate::classify(
+        bridge_chat,
         GateInput {
             task_title: &task.title,
             task_role: &role_command,

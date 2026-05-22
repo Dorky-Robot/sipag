@@ -29,7 +29,6 @@ pub mod config;
 /// must be deprecated as a unit (otherwise the test-harness friendly
 /// fire from `#[deprecated]` returns).
 pub mod feature;
-pub mod gate;
 /// Katulong wire protocol + HTTP/WS client. Extracted into its own
 /// workspace crate (`katulong-client`) so it can be developed and
 /// tested in isolation from sipag-the-task-manager. Re-exported here
