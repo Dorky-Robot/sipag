@@ -10,23 +10,36 @@
 //! every Claude Code dispatch in the screenshots from 2026-05-11).
 //!
 //! The gate sidesteps the long tail by handing the pane contents to
-//! a local LLM (gemma4 via ollama on `OLLAMA_HOST`) together with the
-//! project's declared statuses — each carrying a free-form
-//! description of what work in that column looks like. The model
-//! picks the status whose description best matches what the pane is
-//! showing right now, and surfaces a reason plus an optional
-//! `human_action` string when human intervention is needed.
+//! a local LLM (gemma4 via the bridge) together with the project's
+//! declared statuses — each carrying a free-form description of what
+//! work in that column looks like. The model picks the status whose
+//! description best matches what the pane is showing right now, and
+//! surfaces a reason plus an optional `human_action` string when
+//! human intervention is needed.
 //!
-//! See `sipag-core/src/board/project.rs` for the `Status` shape and
-//! its `dispatchable` flag. The dispatch wiring in
-//! `sipag/src/cli.rs::run_dispatch_task` consults the gate before
-//! `exec_session(agent_cmd)` and refuses to fire when the chosen
-//! status is anything other than the project's dispatchable one.
+//! ## Why this lives in the sipag binary, not sipag-core
+//!
+//! Originally `sipag-core::gate`. Moved here as part of §9 #9 (fold
+//! gate into the lens-worker abstraction) — the gate now talks gemma
+//! through `sipag_lens::ChatBackend` (concretely `BridgeChatBackend`)
+//! instead of the legacy `sipag_core::llm::chat` direct-reqwest path.
+//! ChatBackend lives in sipag-lens, sipag-lens isn't a sipag-core
+//! dependency, so the cleanest placement is in the binary that owns
+//! the bridge wiring.
+//!
+//! The output shape (`GateDecision { status_name, reason, human_action }`)
+//! doesn't naturally map to one of the four lens-worker
+//! `StructuralAction` verbs (the classification has no kr_ref, and
+//! `human_action` has no slot in `SuggestStance`), so we keep the
+//! gate's existing one-shot calling convention. The "fold" is about
+//! the wire, not the call shape.
+//!
+//! See `sipag-board/src/project.rs` for the `Status` shape and its
+//! `dispatchable` flag.
 
 use serde::Deserialize;
-
-use crate::board::Status;
-use crate::llm::{self, ChatMessage, ChatOptions, LlmError};
+use sipag_board::Status;
+use sipag_lens::ChatBackend;
 
 /// Inputs the gate needs to reason about a session.
 pub struct GateInput<'a> {
@@ -73,32 +86,55 @@ const FALLBACK_STATUS: &str = "needs-human";
 /// bloating a task file.
 const MAX_RAW_REASON_LEN: usize = 280;
 
+/// Model name the gate calls. Bridge-tier classifier — fast small
+/// model is the right pick. Lift to per-lens model selection via
+/// `~/.sipag/models.toml` if/when the gate's prompt needs a stronger
+/// model.
+const GATE_MODEL: &str = "gemma4:latest";
+
 /// Classify the session and return the gate's verdict.
 ///
-/// Calls gemma4 (or whatever model `OLLAMA_MODEL` resolves to) via
-/// the existing `llm::chat` SSE client. No retries — if the model
-/// call itself fails (transport, timeout, HTTP error) this propagates
-/// the error so the caller fails closed and skips dispatch. If the
-/// model *replies* but the reply is unusable, the function coerces
-/// to a `needs-human` decision rather than erroring, so the operator
-/// always sees a row state they can react to.
-pub async fn classify(
-    http: &reqwest::Client,
+/// Calls gemma via the supplied `ChatBackend` — in production that's
+/// `BridgeChatBackend`, which routes through `ollama-bridge-client`
+/// (queue + auth + dedup) before reaching ollama. No retries — if
+/// the bridge call itself fails (transport, timeout, HTTP error) this
+/// propagates the error so the caller fails closed and skips
+/// dispatch. If the model *replies* but the reply is unusable, the
+/// function coerces to a `needs-human` decision rather than erroring,
+/// so the operator always sees a row state they can react to.
+pub async fn classify<B: ChatBackend>(
+    backend: &B,
     input: GateInput<'_>,
-) -> std::result::Result<GateDecision, LlmError> {
-    let prompt = render_user_prompt(&input);
-    let opts = ChatOptions {
-        temperature: 0.2,
-        num_predict: Some(512),
-        ..Default::default()
-    };
-    let messages = vec![
-        ChatMessage::system(SYSTEM_PROMPT),
-        ChatMessage::user(prompt),
-    ];
-    let raw = llm::chat(http, &llm::env_host(), messages, opts).await?;
+) -> Result<GateDecision, GateError> {
+    let user_prompt = render_user_prompt(&input);
+    let raw = backend
+        .chat(GATE_MODEL, SYSTEM_PROMPT, &user_prompt)
+        .await
+        .map_err(|e| GateError::Backend(e.to_string()))?;
     Ok(parse_decision(&raw, input.statuses))
 }
+
+/// What can go wrong calling the gate. Today only bridge transport
+/// failures bubble — model-output parsing falls back to
+/// `needs-human` inside [`parse_decision`] so the caller always
+/// sees a decision.
+#[derive(Debug)]
+pub enum GateError {
+    /// `ChatBackend::chat` failed (bridge unreachable, ollama down,
+    /// timeout, auth, etc.). The error message is the formatted
+    /// `LensError::Display` from sipag-lens.
+    Backend(String),
+}
+
+impl std::fmt::Display for GateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GateError::Backend(msg) => write!(f, "gate bridge call failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for GateError {}
 
 const SYSTEM_PROMPT: &str =
     "You are a dispatch gate for a remote interactive shell on a katulong host.\n\
@@ -161,9 +197,9 @@ fn parse_decision(raw: &str, statuses: &[Status]) -> GateDecision {
         human_action: Option<String>,
     }
 
-    // Same {/} extraction `propose_recovery` uses — gemma sometimes
-    // prefixes/suffixes the JSON with stray text despite the schema
-    // line in the system prompt.
+    // Same {/} extraction the lens-worker's parse_tool_call uses —
+    // gemma sometimes prefixes/suffixes the JSON with stray text
+    // despite the schema line in the system prompt.
     let (start, end) = match (raw.find('{'), raw.rfind('}')) {
         (Some(s), Some(e)) if e > s => (s, e),
         _ => return fallback_unparsable(raw),
@@ -227,6 +263,10 @@ fn fallback_unparsable(raw: &str) -> GateDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use sipag_lens::{ChatBackend, LensError, LensResult};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn sample_statuses() -> Vec<Status> {
         vec![
@@ -247,6 +287,57 @@ mod tests {
             },
         ]
     }
+
+    // ── canned chat backend for tests ──────────────────────────────
+
+    struct CannedBackend {
+        reply: String,
+        captured_model: Arc<Mutex<Option<String>>>,
+        captured_system: Arc<Mutex<Option<String>>>,
+        captured_user: Arc<Mutex<Option<String>>>,
+    }
+
+    impl CannedBackend {
+        fn new(reply: impl Into<String>) -> Self {
+            Self {
+                reply: reply.into(),
+                captured_model: Arc::new(Mutex::new(None)),
+                captured_system: Arc::new(Mutex::new(None)),
+                captured_user: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ChatBackend for CannedBackend {
+        async fn chat(&self, model: &str, system: &str, user: &str) -> LensResult<String> {
+            *self.captured_model.lock().await = Some(model.to_string());
+            *self.captured_system.lock().await = Some(system.to_string());
+            *self.captured_user.lock().await = Some(user.to_string());
+            Ok(self.reply.clone())
+        }
+    }
+
+    struct FailingBackend;
+
+    #[async_trait]
+    impl ChatBackend for FailingBackend {
+        async fn chat(&self, _: &str, _: &str, _: &str) -> LensResult<String> {
+            Err(LensError::Bridge("simulated transport failure".into()))
+        }
+    }
+
+    // ── feature-requirement tests ──────────────────────────────────
+    //
+    // Tests pin what the gate PROMISES to its callers:
+    // - classify routes through the supplied ChatBackend with the
+    //   gate-tier model + the documented system prompt;
+    // - successful parse produces the right GateDecision shape;
+    // - bridge transport failures propagate as GateError::Backend;
+    // - unparsable / unknown-status replies coerce to needs-human
+    //   inside classify (caller always sees a decision, never a
+    //   parse error);
+    // - the prompt renderer includes all four input fields verbatim.
 
     #[test]
     fn rendered_prompt_includes_all_inputs() {
@@ -279,8 +370,6 @@ mod tests {
 
     #[test]
     fn parse_decision_extracts_json_wrapped_in_prose() {
-        // Gemma occasionally prefixes the JSON with an explanation
-        // despite the schema line. The {/} extractor recovers.
         let raw =
             "Sure! Here's my answer: {\"status\":\"todo\",\"reason\":\"ready\",\"human_action\":null} Hope that helps.";
         let d = parse_decision(raw, &sample_statuses());
@@ -299,9 +388,6 @@ mod tests {
 
     #[test]
     fn parse_decision_unknown_status_coerced_to_needs_human() {
-        // Model picked a status not on the project's list — coerce
-        // rather than blindly trusting the name, so the dispatcher
-        // never tries to move a task to a column that doesn't exist.
         let raw = r#"{"status":"in-flight","reason":"agent thinking","human_action":null}"#;
         let d = parse_decision(raw, &sample_statuses());
         assert_eq!(d.status_name, FALLBACK_STATUS);
@@ -312,8 +398,6 @@ mod tests {
 
     #[test]
     fn parse_decision_normalizes_human_action_empty_and_null_strings() {
-        // `"null"` and `""` from the model both become `None`. The
-        // TUI branches on `is_some`, so we need a clean signal.
         let a = parse_decision(
             r#"{"status":"todo","reason":"r","human_action":"null"}"#,
             &sample_statuses(),
@@ -335,12 +419,112 @@ mod tests {
 
     #[test]
     fn parse_decision_truncates_long_raw_in_fallback_reason() {
-        // A model that returns a wall of prose shouldn't bloat the
-        // task file. Reason text is bounded.
         let long = "x".repeat(MAX_RAW_REASON_LEN * 4);
         let d = parse_decision(&long, &sample_statuses());
         assert_eq!(d.status_name, FALLBACK_STATUS);
         assert!(d.reason.len() < long.len());
         assert!(d.reason.ends_with("…"));
+    }
+
+    // ── classify() integration with ChatBackend ────────────────────
+
+    #[tokio::test]
+    async fn classify_routes_through_chat_backend_with_gate_model_and_system_prompt() {
+        // Pins the fold contract: classify() goes through ChatBackend,
+        // not the legacy llm::chat path. The model name passed is the
+        // gate-tier choice; the system prompt is the documented one.
+        let backend =
+            CannedBackend::new(r#"{"status":"todo","reason":"ready","human_action":null}"#);
+        let statuses = sample_statuses();
+        let decision = classify(
+            &backend,
+            GateInput {
+                task_title: "T",
+                task_role: "claude",
+                statuses: &statuses,
+                session_output: "$ ",
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(decision.status_name, "todo");
+        let captured_model = backend.captured_model.lock().await.clone().unwrap();
+        let captured_system = backend.captured_system.lock().await.clone().unwrap();
+        assert_eq!(
+            captured_model, GATE_MODEL,
+            "classify must call ChatBackend::chat with the gate-tier model"
+        );
+        assert_eq!(
+            captured_system, SYSTEM_PROMPT,
+            "classify must use the documented dispatch-gate system prompt verbatim"
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_user_turn_contains_rendered_prompt() {
+        let backend = CannedBackend::new(r#"{"status":"todo","reason":"r","human_action":null}"#);
+        let statuses = sample_statuses();
+        classify(
+            &backend,
+            GateInput {
+                task_title: "Patch the handler",
+                task_role: "claude",
+                statuses: &statuses,
+                session_output: "$ ls\n",
+            },
+        )
+        .await
+        .unwrap();
+        let captured = backend.captured_user.lock().await.clone().unwrap();
+        assert!(captured.contains("Patch the handler"));
+        assert!(captured.contains("- todo:"));
+        assert!(captured.contains("$ ls"));
+    }
+
+    #[tokio::test]
+    async fn classify_propagates_bridge_transport_failures() {
+        let backend = FailingBackend;
+        let statuses = sample_statuses();
+        let err = classify(
+            &backend,
+            GateInput {
+                task_title: "T",
+                task_role: "claude",
+                statuses: &statuses,
+                session_output: "$ ",
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            GateError::Backend(msg) => {
+                assert!(
+                    msg.contains("simulated"),
+                    "must surface the underlying transport error message"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_coerces_unparseable_to_needs_human_without_erroring() {
+        // If the bridge succeeds but the model replies with garbage,
+        // classify returns a needs-human decision rather than an
+        // error. Caller always sees a usable row state.
+        let backend = CannedBackend::new("definitely not json");
+        let statuses = sample_statuses();
+        let decision = classify(
+            &backend,
+            GateInput {
+                task_title: "T",
+                task_role: "claude",
+                statuses: &statuses,
+                session_output: "$ ",
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(decision.status_name, FALLBACK_STATUS);
+        assert!(decision.human_action.is_some());
     }
 }

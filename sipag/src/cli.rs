@@ -1,7 +1,8 @@
+use crate::dispatch_gate;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_board as board;
-use sipag_core::{config::default_sipag_dir, gate, katulong};
+use sipag_core::{config::default_sipag_dir, katulong};
 use std::io::{BufRead, BufReader};
 use std::process::Command;
 
@@ -375,26 +376,33 @@ fn run_sipag_dispatch_cli(
     Ok(())
 }
 
-/// Run `gate::classify` inside a one-shot tokio runtime. The rest of
-/// the CLI is sync; only the LLM call (and therefore the gate) needs
-/// to be async. Building a current-thread runtime per dispatch is
-/// cheap relative to the model call itself and keeps the rest of the
-/// codepath synchronous.
+/// Run `dispatch_gate::classify` inside a one-shot tokio runtime. The
+/// rest of the CLI is sync; only the bridge call (and therefore the
+/// gate) needs to be async. Building a current-thread runtime per
+/// dispatch is cheap relative to the model call itself and keeps the
+/// rest of the codepath synchronous.
+///
+/// Loads `~/.ollama-bridge/remote.json` per call (the CLI doesn't
+/// share an AppState). If missing/malformed, returns Err with a
+/// clear "configure the bridge" message so dispatch fails closed.
 fn gate_classify(
     task: &board::Task,
     role: &board::Role,
     project_cfg: &board::Project,
     session_output: &str,
-) -> Result<gate::GateDecision> {
+) -> Result<dispatch_gate::GateDecision> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("failed to build tokio runtime for gate classify")?;
-    let http = reqwest::Client::new();
     rt.block_on(async {
-        gate::classify(
-            &http,
-            gate::GateInput {
+        let http = reqwest::Client::new();
+        let wiring = crate::bridge::build_bridge_wiring(http).context(
+            "dispatch gate requires the ollama bridge; set up ~/.ollama-bridge/remote.json",
+        )?;
+        dispatch_gate::classify(
+            &wiring.chat,
+            dispatch_gate::GateInput {
                 task_title: &task.title,
                 task_role: &role.command,
                 statuses: &project_cfg.statuses,
@@ -414,7 +422,7 @@ fn park_task_at(
     sipag_dir: &std::path::Path,
     project_name: &str,
     task_id: u64,
-    decision: &gate::GateDecision,
+    decision: &dispatch_gate::GateDecision,
     session_name: &str,
 ) -> Result<()> {
     let mut task = board::Task::load(sipag_dir, project_name, task_id)?;

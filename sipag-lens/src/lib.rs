@@ -533,6 +533,12 @@ pub trait ChatBackend: Send + Sync {
 }
 
 /// Production [`ChatBackend`] — calls the bridge.
+///
+/// `Clone` because the underlying `OllamaBridgeClient` is `Clone`
+/// (its `reqwest::Client` is Arc-internal) and `Duration` is `Copy`.
+/// Callers that fan the backend out across the scheduler + the
+/// dispatch gate + ad-hoc lens-workers benefit from cheap clones.
+#[derive(Clone)]
 pub struct BridgeChatBackend {
     client: OllamaBridgeClient,
     timeout: Duration,

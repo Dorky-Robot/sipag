@@ -120,11 +120,17 @@ async fn async_run(
     }
 
     if lens_scheduler_enabled {
-        match spawn_lens_scheduler(&state.sipag_dir).await {
-            Ok(()) => info!("lens scheduler enabled — tick loop spawned"),
-            Err(e) => warn!(
-                error = %e,
-                "lens scheduler enable requested but startup failed — continuing without it"
+        match &state.bridge {
+            Some(bridge) => match spawn_lens_scheduler(&state.sipag_dir, bridge.clone()).await {
+                Ok(()) => info!("lens scheduler enabled — tick loop spawned"),
+                Err(e) => warn!(
+                    error = %e,
+                    "lens scheduler enable requested but startup failed — continuing without it"
+                ),
+            },
+            None => warn!(
+                "lens scheduler enable requested but bridge wiring unavailable \
+                 (~/.ollama-bridge/remote.json missing) — scheduler will not start"
             ),
         }
     } else {
@@ -167,6 +173,25 @@ async fn build_state(
         .context("AuthStore open failed")?;
     let broker = Broker::open(&sipag_dir).context("Broker::open failed")?;
 
+    // Try to load the bridge at startup so the dispatch gate +
+    // future bridge-using paths share one configured client.
+    // Missing/malformed config logs a warn and leaves `bridge` as
+    // None — the gate path then fails closed at dispatch time with
+    // a clear message rather than spinning at unhelp.
+    let bridge = match crate::bridge::build_bridge_wiring(http.clone()) {
+        Ok(wiring) => {
+            info!("bridge wiring loaded — dispatch gate + lens scheduler can call gemma");
+            Some(wiring)
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "bridge wiring unavailable — dispatch gate will fail closed; --lens-scheduler will not start"
+            );
+            None
+        }
+    };
+
     Ok(AppState {
         hosts: Arc::new(hosts),
         http,
@@ -178,33 +203,23 @@ async fn build_state(
         broker,
         workers_enabled,
         kr_proposals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        bridge,
     })
 }
 
-/// Wire up the lens-worker scheduler. Loads `~/.ollama-bridge/remote.json`
-/// for the bridge URL + bearer, opens (or creates) `~/.sipag/corpus/`,
-/// walks `~/.sipag/lenses/*.toml` for the registry, then spawns the
-/// scheduler tick loop. Returns Err on configuration problems
-/// (missing bridge config, malformed remote.json) so the caller can
-/// log and continue without the scheduler — sipag serve stays useful
-/// for everything that doesn't depend on lens-workers.
-async fn spawn_lens_scheduler(sipag_dir: &std::path::Path) -> Result<()> {
-    use ollama_bridge_client::{OllamaBridgeClient, RemoteConfig};
-    use sipag_corpus::{BridgeEmbedder, Corpus};
-    use sipag_lens::{BridgeChatBackend, ModelResolver};
+/// Wire up the lens-worker scheduler against an already-loaded
+/// [`BridgeWiring`]. Opens (or creates) `~/.sipag/corpus/`, walks
+/// `~/.sipag/lenses/*.toml` for the registry, then spawns the
+/// scheduler tick loop. Returns Err on corpus or models.toml
+/// problems so the caller can log and continue without the
+/// scheduler — sipag serve stays useful for the rest of the surface.
+async fn spawn_lens_scheduler(
+    sipag_dir: &std::path::Path,
+    bridge: crate::bridge::BridgeWiring,
+) -> Result<()> {
+    use sipag_corpus::Corpus;
+    use sipag_lens::ModelResolver;
     use tokio::sync::Mutex;
-
-    let bridge_cfg = RemoteConfig::load()
-        .context("load ~/.ollama-bridge/remote.json — required for --lens-scheduler")?;
-    let bridge_http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(600))
-        .user_agent(concat!(
-            "Mozilla/5.0 sipag-lens-scheduler/",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .context("failed to build reqwest client for the bridge")?;
-    let bridge = OllamaBridgeClient::with_client(bridge_http, bridge_cfg.url, bridge_cfg.api_key);
 
     let corpus_dir = sipag_dir.join("corpus");
     let corpus = Corpus::open(&corpus_dir)
@@ -226,18 +241,11 @@ async fn spawn_lens_scheduler(sipag_dir: &std::path::Path) -> Result<()> {
         );
     }
 
-    // Embedder model: `nomic-embed-text` is the standard local embed
-    // model in the dorky-robot stack (small, fast, stable dim). The
-    // lens scheduler doesn't surface this as config today; promote
-    // to `~/.sipag/models.toml` if/when a second embedder model
-    // becomes plausible.
-    let embedder = BridgeEmbedder::new(bridge.clone(), "nomic-embed-text".to_string());
-    let backend = BridgeChatBackend::new(bridge);
     let resolver =
         ModelResolver::load().map_err(|e| anyhow::anyhow!("load ~/.sipag/models.toml: {e}"))?;
 
     let scheduler = lens_scheduler::LensScheduler::new(lenses, resolver);
-    lens_scheduler::spawn(scheduler, backend, embedder, corpus);
+    lens_scheduler::spawn(scheduler, bridge.chat, bridge.embedder, corpus);
     Ok(())
 }
 
