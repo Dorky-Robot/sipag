@@ -1,14 +1,18 @@
 //! Role template — stored at `~/.sipag/projects/{project}/roles/{name}.toml`.
 //!
 //! A Role is the "how to launch this kind of agent session" recipe a
-//! Task points at via its `role: String` field. Three fields today:
+//! Task points at via its `role: String` field. Three fields today
+//! (struct-declaration order):
 //!
 //! - `name` — stable identifier (`dev`, `reviewer`, `ci-fixer`).
-//! - `command` — the launch keystroke sipag types into the katulong
-//!   pane (e.g. `claude`, `claude --resume`). Default `yolo`.
 //! - `worktree` — when `true`, sipag runs `git worktree add` against
 //!   the project repo before launching, so the role works on its own
 //!   branch.
+//! - `command` — the launch keystroke sipag types into the katulong
+//!   pane (e.g. `claude`, `claude --resume`). [`default_command`]
+//!   returns `yolo` as a struct-level fallback for malformed TOMLs;
+//!   operators in practice override it to `claude` (or
+//!   `claude --resume`) in their role files — see CLAUDE.md.
 //!
 //! **Removed 2026-05-25** in the dead-field trim: `type` /
 //! `container` / `memory_context` were Docker-era categorization
