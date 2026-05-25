@@ -418,7 +418,7 @@ pub fn spawn<B>(
         loop {
             ticker.tick().await;
             let mut c = corpus.lock().await;
-            let summary = scheduler.run_one_tick(&backend, &embedder, &mut *c).await;
+            let summary = scheduler.run_one_tick(&backend, &embedder, &mut c).await;
             if !summary.fired.is_empty() || !summary.errors.is_empty() {
                 info!(
                     fired = ?summary.fired,
