@@ -2,10 +2,11 @@
 //!
 //! Both the lens scheduler (`serve/lens_scheduler.rs`) and the
 //! dispatch gate (`dispatch_gate.rs`) call gemma through the
-//! ollama-bridge daemon (`dorky-robot/ollama-bridge`, Elixir queue
-//! + auth + dedup in front of `ollama serve`). This module is the
-//! one place that knows how to turn `~/.ollama-bridge/remote.json`
-//! into the trio of consumers callers actually use:
+//! ollama-bridge daemon (`dorky-robot/ollama-bridge`, an Elixir
+//! queue-and-auth-and-dedup layer in front of `ollama serve`).
+//! This module is the one place that knows how to turn
+//! `~/.ollama-bridge/remote.json` into the trio of consumers
+//! callers actually use:
 //!
 //! - [`OllamaBridgeClient`] — raw wire client (enqueue / poll /
 //!   probe). Lens-workers and the gate go through one of the
@@ -30,9 +31,10 @@ use sipag_corpus::BridgeEmbedder;
 use sipag_lens::BridgeChatBackend;
 use std::time::Duration;
 
-/// Embedder model the scheduler + lens-workers use for corpus writes
-/// + `corpus.search` queries. Local, free, stable dim. Lift to
-/// `~/.sipag/models.toml` when a second embed model becomes plausible.
+/// Embedder model the scheduler + lens-workers use both for corpus
+/// writes and for `corpus.search` queries. Local, free, stable dim.
+/// Lift to `~/.sipag/models.toml` when a second embed model becomes
+/// plausible.
 pub const DEFAULT_EMBEDDER_MODEL: &str = "nomic-embed-text";
 
 /// Build a reqwest client suitable for talking to the bridge from any

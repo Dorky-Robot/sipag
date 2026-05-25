@@ -1,4 +1,27 @@
 //! Role template — stored at `~/.sipag/projects/{project}/roles/{name}.toml`.
+//!
+//! A Role is the "how to launch this kind of agent session" recipe a
+//! Task points at via its `role: String` field. Three fields today
+//! (struct-declaration order):
+//!
+//! - `name` — stable identifier (`dev`, `reviewer`, `ci-fixer`).
+//! - `worktree` — when `true`, sipag runs `git worktree add` against
+//!   the project repo before launching, so the role works on its own
+//!   branch.
+//! - `command` — the launch keystroke sipag types into the katulong
+//!   pane (e.g. `claude`, `claude --resume`). [`default_command`]
+//!   returns `yolo` as a struct-level fallback for malformed TOMLs;
+//!   operators in practice override it to `claude` (or
+//!   `claude --resume`) in their role files — see CLAUDE.md.
+//!
+//! **Removed 2026-05-25** in the dead-field trim: `type` /
+//! `container` / `memory_context` were Docker-era categorization
+//! fields from sipag's pre-katulong dispatch model. None of the
+//! sipag-binary code read them after the v2/v3 Docker dispatch path
+//! was deleted (April 2026). The struct does NOT use
+//! `#[serde(deny_unknown_fields)]`, so operator TOMLs that still
+//! carry the old keys continue to load — the keys are silently
+//! ignored. A back-compat test below pins that contract.
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -9,25 +32,14 @@ use super::atomic_write;
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Role {
     pub name: String,
-    /// "kubo", "host", or "local".
-    #[serde(rename = "type")]
-    pub role_type: String,
-    #[serde(default)]
-    pub container: Option<String>,
     #[serde(default)]
     pub worktree: bool,
     #[serde(default = "default_command")]
     pub command: String,
-    #[serde(default = "default_memory_context")]
-    pub memory_context: String,
 }
 
 fn default_command() -> String {
     "yolo".to_string()
-}
-
-fn default_memory_context() -> String {
-    "shared".to_string()
 }
 
 impl Role {
@@ -98,19 +110,15 @@ mod tests {
 
         let role = Role {
             name: "dev".to_string(),
-            role_type: "kubo".to_string(),
-            container: Some("katulong".to_string()),
             worktree: true,
-            command: "yolo".to_string(),
-            memory_context: "shared".to_string(),
+            command: "claude".to_string(),
         };
         role.save(dir.path(), "test").unwrap();
 
         let loaded = Role::load(dir.path(), "test", "dev").unwrap();
         assert_eq!(loaded.name, "dev");
-        assert_eq!(loaded.role_type, "kubo");
-        assert_eq!(loaded.container.as_deref(), Some("katulong"));
         assert!(loaded.worktree);
+        assert_eq!(loaded.command, "claude");
     }
 
     #[test]
@@ -128,19 +136,13 @@ mod tests {
 
         let dev = Role {
             name: "dev".to_string(),
-            role_type: "kubo".to_string(),
-            container: None,
             worktree: true,
-            command: "yolo".to_string(),
-            memory_context: "shared".to_string(),
+            command: "claude".to_string(),
         };
         let test_role = Role {
             name: "test".to_string(),
-            role_type: "host".to_string(),
-            container: None,
             worktree: false,
-            command: "yolo -p test".to_string(),
-            memory_context: "shared".to_string(),
+            command: "claude -p test".to_string(),
         };
         dev.save(dir.path(), "test").unwrap();
         test_role.save(dir.path(), "test").unwrap();
@@ -149,5 +151,33 @@ mod tests {
         assert_eq!(roles.len(), 2);
         assert_eq!(roles[0].name, "dev");
         assert_eq!(roles[1].name, "test");
+    }
+
+    #[test]
+    fn role_load_ignores_removed_legacy_docker_fields() {
+        // Operator TOMLs from the pre-katulong dispatch model may
+        // still have `type`, `container`, and `memory_context` keys.
+        // The struct doesn't set `deny_unknown_fields`, so these
+        // load fine with the legacy keys silently dropped. Pinning
+        // this contract so a future `deny_unknown_fields` addition
+        // would surface as a test failure rather than silently
+        // breaking every existing operator's role files.
+        let dir = TempDir::new().unwrap();
+        let roles_dir = dir.path().join("projects").join("test").join("roles");
+        std::fs::create_dir_all(&roles_dir).unwrap();
+        let legacy_toml = r#"
+name = "dev"
+type = "kubo"
+container = "katulong"
+worktree = true
+command = "claude"
+memory_context = "shared"
+"#;
+        std::fs::write(roles_dir.join("dev.toml"), legacy_toml).unwrap();
+
+        let loaded = Role::load(dir.path(), "test", "dev").unwrap();
+        assert_eq!(loaded.name, "dev");
+        assert_eq!(loaded.command, "claude");
+        assert!(loaded.worktree);
     }
 }
