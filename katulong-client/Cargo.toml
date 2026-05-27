@@ -40,6 +40,10 @@ url = "2"
 # response-body cap can short-circuit before the full body is
 # allocated — see `KatulongAsyncClient::get_capped` / `post_capped`.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# Bytes is a transitive dep of reqwest's stream feature; surfaced
+# directly so the SSE subscriber can name `bytes::Bytes` in its
+# response-body stream type.
+bytes = "1"
 
 # WS attach client.
 futures-util = { version = "0.3", default-features = false }

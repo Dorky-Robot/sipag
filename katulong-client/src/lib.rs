@@ -31,6 +31,7 @@ pub mod async_http;
 pub mod attach;
 pub mod http;
 pub mod protocol;
+pub mod sse;
 
 /// Notebook-style web UI for stepping through library calls. Pulls
 /// in axum and a small JSON surface; gated behind the `serve` Cargo
@@ -61,3 +62,10 @@ pub use async_http::{
     bytes_capped, AsyncResult, KatulongAsyncClient, KatulongAsyncError, DEFAULT_BODY_CAP,
     TRANSCRIPT_BODY_CAP,
 };
+
+// Re-export the SSE subscriber. The third wire surface alongside
+// the sync REST client, the async HTTP client, and the WS attach
+// client. Feeds the lens-worker bridge (modules.md §9 Phase 1 #3 +
+// Phase 2 #7) — emits structured `KatulongEvent`s the bridge's
+// sliding window consumes.
+pub use sse::{subscribe, KatulongEvent, KatulongEventStream, SseError};
