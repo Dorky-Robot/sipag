@@ -138,7 +138,21 @@ fn upsert_observation(state: &AppState, host: &Host, s: &KatulongSession, now: &
     // the ended-row detail panel render without any host round-trip.
     if let Some(uuid) = s.meta_claude_uuid() {
         if !uuid.is_empty() {
+            let is_new_uuid = obs.claude_uuid.is_empty() || obs.claude_uuid != uuid;
             obs.claude_uuid = uuid.to_string();
+            if is_new_uuid {
+                if let Ok(guard) = state.bridge_handle.try_read() {
+                    if let Some(handle) = guard.as_ref() {
+                        let topic = format!("claude/{uuid}");
+                        tracing::debug!(
+                            topic = %topic,
+                            session = %s.name,
+                            "observers: feeding claude topic to bridge worker"
+                        );
+                        handle.watch(topic);
+                    }
+                }
+            }
         }
     }
     if let Some(title) = s.meta_auto_title() {
