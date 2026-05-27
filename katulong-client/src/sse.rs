@@ -101,6 +101,18 @@ pub enum SseError {
     /// IO error reading the response body chunk stream.
     #[error("body read error: {0}")]
     Body(String),
+    /// A single SSE line (between two `\n`s) exceeded [`LINE_BUF_CAP`]
+    /// without a terminating newline. Defends against a hostile or
+    /// buggy upstream streaming an unbounded line and OOMing the
+    /// subscriber. Stream ends after this error.
+    #[error("SSE line exceeded {limit} bytes without a newline")]
+    LineTooLong { limit: usize },
+    /// One SSE event's accumulated `data:` payload exceeded
+    /// [`EVENT_BUF_CAP`] before the terminating blank line. Same
+    /// defense as `LineTooLong` but for the per-event accumulator.
+    /// Stream ends after this error.
+    #[error("SSE event payload exceeded {limit} bytes")]
+    EventTooLarge { limit: usize },
 }
 
 /// Cap on how much of the connect-failure body we paste into
@@ -108,6 +120,37 @@ pub enum SseError {
 /// `DEFAULT_BODY_CAP` philosophy: bounded error context, no
 /// unbounded log inflation if the upstream returns a huge page.
 const CONNECT_ERROR_BODY_CAP: usize = 1024;
+
+/// Cap on the line buffer — bytes between two `\n`s on the SSE
+/// wire. 256 KiB is well above any realistic katulong event
+/// payload (gemma prompts, file contents, etc.) while bounding
+/// the OOM blast radius from a hostile or buggy upstream that
+/// streams without newlines.
+pub const LINE_BUF_CAP: usize = 256 * 1024;
+
+/// Cap on the per-event payload buffer — sum of all `data:` lines
+/// in one event. 1 MiB matches `katulong-client::async_http`'s
+/// `DEFAULT_BODY_CAP`; same philosophy (consumer can't tell the
+/// difference between "huge legitimate event" and "adversarial
+/// stuffing," so bound both).
+pub const EVENT_BUF_CAP: usize = 1024 * 1024;
+
+/// Truncate a `String` at a byte index that may not be on a UTF-8
+/// char boundary. Walks back to the nearest boundary at or before
+/// `target_len` and truncates there. `String::truncate` itself
+/// PANICS on a non-boundary index — this wrapper is the safe form
+/// for arbitrary upstream content that may contain multi-byte chars
+/// straddling the cap.
+fn truncate_at_char_boundary(s: &mut String, target_len: usize) {
+    if s.len() <= target_len {
+        return;
+    }
+    let mut cap = target_len;
+    while !s.is_char_boundary(cap) {
+        cap -= 1;
+    }
+    s.truncate(cap);
+}
 
 /// Async stream of events from a katulong pub/sub topic. Created
 /// via [`subscribe`].
@@ -155,6 +198,15 @@ impl Stream for KatulongEventStream {
                 }
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.line_buf.extend_from_slice(&chunk);
+                    if self.line_buf.len() > LINE_BUF_CAP {
+                        // Drop the buffer so we don't keep growing
+                        // before the stream ends.
+                        self.line_buf.clear();
+                        self.data_buf.clear();
+                        return Poll::Ready(Some(Err(SseError::LineTooLong {
+                            limit: LINE_BUF_CAP,
+                        })));
+                    }
                     // Loop around to try draining again.
                 }
             }
@@ -200,6 +252,12 @@ impl KatulongEventStream {
                     self.data_buf.push('\n');
                 }
                 self.data_buf.push_str(data);
+                if self.data_buf.len() > EVENT_BUF_CAP {
+                    self.data_buf.clear();
+                    return Some(Err(SseError::EventTooLarge {
+                        limit: EVENT_BUF_CAP,
+                    }));
+                }
                 continue;
             }
             // SSE has `event:`, `id:`, `retry:` lines too. We
@@ -268,7 +326,12 @@ pub async fn subscribe(
             .map(|b| {
                 let mut snippet = b.trim().to_string();
                 if snippet.len() > CONNECT_ERROR_BODY_CAP {
-                    snippet.truncate(CONNECT_ERROR_BODY_CAP);
+                    // `String::truncate` PANICS on a non-char-boundary
+                    // index — and arbitrary upstream bodies routinely
+                    // contain multi-byte UTF-8 (any localized error
+                    // page). Walk back to the nearest boundary at or
+                    // below the cap.
+                    truncate_at_char_boundary(&mut snippet, CONNECT_ERROR_BODY_CAP);
                     snippet.push('…');
                 }
                 snippet
@@ -526,5 +589,139 @@ mod tests {
         let with = sub_url("https://k.example/", "t", 0);
         let without = sub_url("https://k.example", "t", 0);
         assert_eq!(with, without);
+    }
+
+    // ── round-1 review-fix coverage ─────────────────────────────────
+
+    #[tokio::test]
+    async fn event_with_no_session_field_lands_as_none() {
+        // Pins the `Option<String>` + `#[serde(default)]` contract on
+        // `KatulongEvent::session`. Topics like `observations/activity`
+        // emit project-/topic-level events with no session id.
+        let payload = r#"{"seq":1,"event":"project-meta","timestamp":"2026-05-26T10:00:00Z"}"#;
+        let body = format!("data: {payload}\n\n");
+        let (url, _done) = spawn_sse_server(move |mut s| async move {
+            write_sse_response(&mut s, &body).await;
+            let _ = s.shutdown().await;
+        })
+        .await;
+
+        let http = reqwest::Client::new();
+        let mut stream = subscribe(http, &url, "k", "observations/activity", 0)
+            .await
+            .unwrap();
+        let evt = stream.next().await.unwrap().unwrap();
+        assert_eq!(evt.seq, 1);
+        assert!(
+            evt.session.is_none(),
+            "topic-level events must surface session = None, not crash on missing field"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_line_data_concatenates_with_newline() {
+        // SSE spec: multiple `data:` lines in one event concatenate
+        // with `\n` between them. Pin the contract — the parser
+        // explicitly takes the trouble to implement this and the
+        // module doc-comment promises it at the wire-shape example.
+        let body = "data: {\"seq\":7,\"event\":\"split\",\n\
+                    data: \"timestamp\":\"2026-05-26T10:00:00Z\",\n\
+                    data: \"session\":\"sess-x\"}\n\n";
+        let (url, _done) = spawn_sse_server(move |mut s| async move {
+            write_sse_response(&mut s, body).await;
+            let _ = s.shutdown().await;
+        })
+        .await;
+
+        let http = reqwest::Client::new();
+        let mut stream = subscribe(http, &url, "k", "topic", 0).await.unwrap();
+        let evt = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            evt.seq, 7,
+            "multi-line data: must concatenate to one valid JSON document"
+        );
+        assert_eq!(evt.session.as_deref(), Some("sess-x"));
+    }
+
+    #[tokio::test]
+    async fn line_buffer_cap_surfaces_line_too_long_error() {
+        // Hostile / buggy upstream streams unbounded bytes with no
+        // newline. The cap defends against OOM; the error variant
+        // lets the consumer log + reconnect.
+        //
+        // Write enough garbage bytes (no `\n`) to push past
+        // LINE_BUF_CAP, then close. Pin that the stream surfaces
+        // `LineTooLong` rather than panicking or growing forever.
+        let garbage_len = LINE_BUF_CAP + 1024;
+        let body = "x".repeat(garbage_len);
+        let (url, _done) = spawn_sse_server(move |mut s| async move {
+            write_sse_response(&mut s, &body).await;
+            let _ = s.shutdown().await;
+        })
+        .await;
+
+        let http = reqwest::Client::new();
+        let mut stream = subscribe(http, &url, "k", "topic", 0).await.unwrap();
+        let item = stream
+            .next()
+            .await
+            .expect("must yield an item, not Pending");
+        match item {
+            Err(SseError::LineTooLong { limit }) => {
+                assert_eq!(limit, LINE_BUF_CAP);
+            }
+            other => panic!("expected LineTooLong, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_buffer_cap_surfaces_event_too_large_error() {
+        // Same defense, different vector: many `data:` lines that
+        // total over EVENT_BUF_CAP but each line is fine on its own
+        // (so LINE_BUF_CAP doesn't trip first).
+        //
+        // Build a body with many short `data:` lines whose sum
+        // exceeds EVENT_BUF_CAP.
+        let line = "data: ".to_string() + &"a".repeat(LINE_BUF_CAP / 2) + "\n";
+        let line_payload_size = LINE_BUF_CAP / 2; // bytes appended to data_buf per line
+        let lines_needed = (EVENT_BUF_CAP / line_payload_size) + 2; // overshoot
+        let body = line.repeat(lines_needed);
+        let (url, _done) = spawn_sse_server(move |mut s| async move {
+            write_sse_response(&mut s, &body).await;
+            let _ = s.shutdown().await;
+        })
+        .await;
+
+        let http = reqwest::Client::new();
+        let mut stream = subscribe(http, &url, "k", "topic", 0).await.unwrap();
+        let item = stream.next().await.expect("must yield an item");
+        match item {
+            Err(SseError::EventTooLarge { limit }) => {
+                assert_eq!(limit, EVENT_BUF_CAP);
+            }
+            other => panic!("expected EventTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_does_not_panic_on_multibyte_split() {
+        // The HIGH from round 1: `String::truncate` panics if the
+        // index isn't on a char boundary. Pin the safe wrapper.
+        //
+        // Build a string where byte position `cap` lands inside a
+        // 2-byte char (`ö` = 2 bytes: 0xC3 0xB6).
+        let mut s = "a".repeat(1023) + "ö" + &"b".repeat(100);
+        truncate_at_char_boundary(&mut s, 1024);
+        // Should have truncated to 1023 (just before the ö) to stay
+        // on a char boundary, not panicked.
+        assert_eq!(s.len(), 1023);
+        assert!(s.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn truncate_at_char_boundary_noop_when_already_short_enough() {
+        let mut s = "hello".to_string();
+        truncate_at_char_boundary(&mut s, 1024);
+        assert_eq!(s, "hello");
     }
 }
