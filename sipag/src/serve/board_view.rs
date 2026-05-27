@@ -45,11 +45,6 @@ pub struct BoardSnapshot {
     /// Every active (not-done) KR across all projects, used to populate
     /// the "pick another" dropdown on each misc row.
     pub kr_choices: Vec<KrChoice>,
-    /// Recent Claude-transcript entries per observation id. Fetched
-    /// from each host's `/api/claude-transcript/:uuid` endpoint at
-    /// snapshot time; rendered into the expanded `<details>` body so
-    /// the user can scan what Claude is doing without leaving sipag.
-    pub feeds: HashMap<String, Vec<FeedEntry>>,
     pub error: Option<String>,
     /// Process-lifetime token used as a `?v=` cache-buster on JS asset
     /// URLs. Changes on every server restart so iPad Safari (and other
@@ -70,51 +65,6 @@ pub struct LiveSessionMeta {
 
 /// One Claude-transcript entry as exposed by katulong's
 /// `/api/claude-transcript/:uuid` — already normalized server-side.
-/// Only the fields sipag's row renders are kept.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "role", rename_all = "snake_case")]
-// uuid + ts are deserialized for completeness / future dedup + sort
-// keys, but no consumer reads them yet. Suppress dead_code so the
-// schema can grow without churning the struct each time.
-#[allow(dead_code)]
-pub enum FeedEntry {
-    User {
-        #[serde(default)]
-        uuid: String,
-        #[serde(default)]
-        ts: i64,
-        #[serde(default)]
-        text: String,
-    },
-    Assistant {
-        #[serde(default)]
-        uuid: String,
-        #[serde(default)]
-        ts: i64,
-        #[serde(default)]
-        text: Option<String>,
-        #[serde(default)]
-        tools: Vec<FeedTool>,
-    },
-    ToolResult {
-        #[serde(default)]
-        uuid: String,
-        #[serde(default)]
-        ts: i64,
-        #[serde(default)]
-        text: String,
-    },
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
-pub struct FeedTool {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub target: String,
-}
-
 /// Boot id assigned once per process. Used to cache-bust JS assets.
 fn boot_id() -> &'static str {
     use std::sync::OnceLock;
@@ -171,7 +121,6 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
                 observations: Vec::new(),
                 proposals: HashMap::new(),
                 kr_choices: Vec::new(),
-                feeds: HashMap::new(),
                 error: Some(format!("{e}")),
                 boot_id: boot_id().to_string(),
             }
@@ -199,7 +148,6 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
     let objectives = load_objectives_blocking(&state.sipag_dir, &projects);
     let kr_choices = build_kr_choices(&objectives);
     let proposals = resolve_proposals(state, &observations, &live, &kr_choices).await;
-    let feeds = fetch_feeds(state, &observations, &live).await;
 
     BoardSnapshot {
         objectives,
@@ -210,60 +158,12 @@ pub async fn load_snapshot(state: &AppState) -> BoardSnapshot {
         observations,
         proposals,
         kr_choices,
-        feeds,
         error: None,
         boot_id: boot_id().to_string(),
     }
 }
 
 /// For every misc observation that has a Claude UUID in its live meta,
-/// pull the last few transcript entries from the owning katulong host.
-/// Errors degrade silently (empty feed → no panel content). Polled
-/// per-render rather than streamed; the existing pulse signal carries
-/// the "something happened" cue for now.
-async fn fetch_feeds(
-    state: &AppState,
-    observations: &[sipag_core::board::Observation],
-    live: &BTreeMap<(String, String), LiveSessionMeta>,
-) -> HashMap<String, Vec<FeedEntry>> {
-    const FEED_LIMIT: u32 = 8;
-    let mut out = HashMap::new();
-    for obs in observations {
-        if obs.project != sipag_core::board::MISC_PROJECT {
-            continue;
-        }
-        let uuid = match live
-            .get(&(obs.host.clone(), obs.session.clone()))
-            .and_then(|m| m.claude_uuid.as_deref())
-        {
-            Some(u) if !u.is_empty() => u.to_string(),
-            _ => continue,
-        };
-        let host = match state.hosts.hosts.iter().find(|h| h.id == obs.host) {
-            Some(h) => h,
-            None => continue,
-        };
-        let entries = fetch_recent_transcript(state, host, &uuid, FEED_LIMIT).await;
-        if !entries.is_empty() {
-            out.insert(obs.id(), entries);
-        }
-    }
-    out
-}
-
-async fn fetch_recent_transcript(
-    _state: &AppState,
-    _host: &Host,
-    _uuid: &str,
-    _limit: u32,
-) -> Vec<FeedEntry> {
-    // The Claude-transcript-proxy path (sipag → katulong → Claude
-    // JSONL) was retired in §9 #7. Session activity is now captured
-    // by the bridge lens-worker via SSE. A corpus-backed feed view
-    // is a follow-up UI task; until then the feed panel is empty.
-    Vec::new()
-}
-
 /// Flatten every active (not-done) KR across all *objectives* into the
 /// list gemma4 picks from and the "pick another" dropdown shows.
 /// Project-level (legacy) KRs are deliberately excluded — categorize
@@ -1705,22 +1605,21 @@ fn live_obs_row(snap: &BoardSnapshot, obs: &sipag_core::board::Observation) -> M
     let live = snap.live.get(&(obs.host.clone(), obs.session.clone()));
     let proposal = snap.proposals.get(&obs.id());
     let kr_choices = &snap.kr_choices;
-    let _feed = snap.feeds.get(&obs.id()); // reserved for gemma4 task-progress inference
-                                           // `?s=<name>` is katulong's deep-link primitive — its boot path
-                                           // (app.js around line 97) reads the param and calls
-                                           // `activateSession(name)` if a tile already exists for it, or
-                                           // creates one and makes it active otherwise. So clicking always
-                                           // resolves to the canonical "this tile is now front-and-center"
-                                           // state regardless of whether the session was already open.
-                                           //
-                                           // We deliberately do NOT set `target="_blank"`. On iOS/macOS,
-                                           // when the user has installed katulong's domain as a PWA, the OS
-                                           // routes plain in-scope navigations to the PWA; `target="_blank"`
-                                           // forces the external-browser path and defeats that. Without a
-                                           // target, devices without the PWA installed still get a sensible
-                                           // browser-tab open. (Sipag PWA users get sent OUT of the sipag
-                                           // PWA — the link is to a different origin, so this is the right
-                                           // behavior; we don't want sipag to host katulong as a fragment.)
+    // `?s=<name>` is katulong's deep-link primitive — its boot path
+    // (app.js around line 97) reads the param and calls
+    // `activateSession(name)` if a tile already exists for it, or
+    // creates one and makes it active otherwise. So clicking always
+    // resolves to the canonical "this tile is now front-and-center"
+    // state regardless of whether the session was already open.
+    //
+    // We deliberately do NOT set `target="_blank"`. On iOS/macOS,
+    // when the user has installed katulong's domain as a PWA, the OS
+    // routes plain in-scope navigations to the PWA; `target="_blank"`
+    // forces the external-browser path and defeats that. Without a
+    // target, devices without the PWA installed still get a sensible
+    // browser-tab open. (Sipag PWA users get sent OUT of the sipag
+    // PWA — the link is to a different origin, so this is the right
+    // behavior; we don't want sipag to host katulong as a fragment.)
     let katulong_url = host_url.map(|u| format!("{u}/?s={}", urlencode(&obs.session)));
     // Prefer live snapshot data when present (active sessions); fall
     // back to the archived obs.* fields. This is what gives ended
