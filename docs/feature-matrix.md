@@ -42,10 +42,10 @@ The human's two questions per VISION: "what are we optimizing for" and "is it wo
 
 | Capability | Status | Where (code) | Notes |
 |---|---|---|---|
-| Create / view / close an **Objective** | 🟡 | `sipag-core/src/board/objective.rs` + `sipag/src/serve/board_view.rs` | Type exists; web UI exposes objectives. CLI ⏳ per UI-first priority. |
-| Add / view / edit a **Key Result** under an Objective | 🟡 | `sipag-core/src/board/key_result.rs` + `sipag/src/serve/board.rs:237` | Type exists; web UI can add/edit. CLI ⏳. |
-| Set **KrStance** (green / yellow / red / done) | 🟡 | `sipag-core/src/board/key_result.rs:19` (`KrStance` enum); `sipag/src/serve/board.rs:269` (HTTP toggle) | Stance is the scalar reward signal per VISION. Web UI works. CLI ⏳. |
-| **Standing** — top-level surface for upkeep/firefights (work that doesn't ladder to an Objective) | 🟡 | `sipag-core/src/board/project.rs:17` (`ProjectKind::Standing`) | Exists as a project kind; web UI semantics still evolving. CLI ⏳. |
+| Create / view / close an **Objective** | 🟡 | `sipag-board/src/objective.rs` + `sipag/src/serve/board_view.rs` | Type exists; web UI exposes objectives. CLI ⏳ per UI-first priority. |
+| Add / view / edit a **Key Result** under an Objective | 🟡 | `sipag-board/src/key_result.rs` + `sipag/src/serve/board.rs:237` | Type exists; web UI can add/edit. CLI ⏳. |
+| Set **KrStance** (green / yellow / red / done) | 🟡 | `sipag-board/src/key_result.rs:19` (`KrStance` enum); `sipag/src/serve/board.rs:269` (HTTP toggle) | Stance is the scalar reward signal per VISION. Web UI works. CLI ⏳. |
+| **Standing** — top-level surface for upkeep/firefights (work that doesn't ladder to an Objective) | 🟡 | `sipag-board/src/project.rs:17` (`ProjectKind::Standing`) | Exists as a project kind; web UI semantics still evolving. CLI ⏳. |
 | **Idea box** — parking lot for unprocessed input | 🔴 | not modeled as a first-class type | VISION names this explicitly. No `Idea` aggregate. Captured ad-hoc as tasks today. **Web UI work** when this lands (Phase 1 #4 in modules.md). |
 | **promote_idea → Experiment** (the ACL crossing into Experimentation) | 🔴 | n/a — depends on Idea + Experiment types | Per modules.md §6, this is the first-class cross-context ACL. Blocked on Phase 1 #3 + #4. |
 | **Agent API surface** — read KRs, `report_stance` from agent | 🔴 | not implemented | VISION-planned: same `POST /tasks` and `PATCH /tasks/:id` endpoints exposed for agent loops. Phase 1 #5 + Phase 3 #14 in modules.md §9. |

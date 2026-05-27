@@ -87,9 +87,9 @@ plat ←   │  Topology            │                │   Identity           
 
 | Piece | Path | Status |
 |---|---|---|
-| Objective + KrRef | `sipag-core/src/board/objective.rs` | 🟡 |
-| KeyResult + KrStance | `sipag-core/src/board/key_result.rs` | 🟡 |
-| Project + Status + ProjectKind::Standing | `sipag-core/src/board/project.rs` | 🟧 — mixes Steering (Standing) with Experimentation (Status column metadata, Role) |
+| Objective + KrRef | `sipag-board/src/objective.rs` | 🟡 |
+| KeyResult + KrStance | `sipag-board/src/key_result.rs` | 🟡 |
+| Project + Status + ProjectKind::Standing | `sipag-board/src/project.rs` | 🟧 — mixes Steering (Standing) with Experimentation (Status column metadata, Role) |
 | Idea | ❌ not modeled as a type | per VISION, "Idea box" exists — needs first-class aggregate |
 | Agent API surface (read KRs, push stance) | ❌ not implemented | **planned per VISION**; published-language layer for agents |
 | Human web UI | `sipag/src/serve/board.rs` (602), `serve/board_view.rs` (2276 🔴), parts of `serve/htmx.rs` | needs decomposition (§8) |
@@ -196,10 +196,10 @@ These are the places the implementer will invent a policy on day one if the doc 
 
 | Piece | Path | Status |
 |---|---|---|
-| Task | `sipag-core/src/board/task.rs` | 🟡 — stays as a board-level concept (a task on the board, dispatched to a session). NOT renamed to `Trial`. The `propose_task` structural verb writes into this. |
-| Observation aggregate | `sipag-core/src/board/observation.rs` | 🟧 — close cousin of `CorpusItem`; either renames or composes once the corpus lands |
+| Task | `sipag-board/src/task.rs` | 🟡 — stays as a board-level concept (a task on the board, dispatched to a session). NOT renamed to `Trial`. The `propose_task` structural verb writes into this. |
+| Observation aggregate | `sipag-board/src/observation.rs` | 🟧 — close cousin of `CorpusItem`; either renames or composes once the corpus lands |
 | Claude transcript proxy | `sipag/src/serve/htmx.rs::observation_transcript_handler` + `katulong-client::http::claude_transcript_url` | 🔴 **Demeter violation** — sipag parsing Claude-shaped JSONL through a katulong proxy. Retires when the SSE subscriber lets sipag consume katulong's `claude/<uuid>` topic events instead. See `[[feedback-strict-layer-coupling]]`. |
-| Role (agent command template) | `sipag-core/src/board/role.rs` | 🟡 — Experimentation `act` infrastructure |
+| Role (agent command template) | `sipag-board/src/role.rs` | 🟡 — Experimentation `act` infrastructure. Trimmed to 3 fields in §9 Phase 3 (PR #560 — `name` / `worktree` / `command`; Docker-era `type` / `container` / `memory_context` dropped). |
 | Pre-dispatch classifier ("gate") | `sipag/src/dispatch_gate.rs` (was `sipag-core/src/gate.rs` until §9 #9) | ✅ **folded into the lens-worker abstraction** in §9 #9. Now talks gemma through `sipag_lens::ChatBackend` (concretely `BridgeChatBackend`) instead of the legacy direct-reqwest `llm::chat`. Output shape (`GateDecision { status_name, reason, human_action }`) didn't fit any of the four `StructuralAction` verbs cleanly, so the gate kept its one-shot calling convention — the fold is about the wire, not the call shape. |
 | ~~Post-dispatch observer~~ | ~~`sipag-core/src/nudge.rs` (417 LOC)~~ | ✅ **deleted** in §9 #11 (the only consumer was the recovery loop, which retired in the same PR). The "post-dispatch progress" lens lives in the lens-worker abstraction (Phase 1 #3) instead. |
 | Categorize loop | `sipag/src/serve/categorize.rs` (199 LOC) | 🟧 **early lens-worker prototype** — gemma reads board items + KRs, categorizes. Folds in as a worker with a "board-item categorization" lens. |

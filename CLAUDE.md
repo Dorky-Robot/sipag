@@ -208,8 +208,8 @@ This matters for Claude sessions specifically: reach for `diwa search` BEFORE `g
 
 ### What changes most
 
-- `sipag-core/src/board/` — Objective / KeyResult / Task / Role / Project schema
-- `sipag-core/src/llm.rs` — gemma4 / ollama client (will export `LlmClient` trait per Phase 2 #8)
+- `sipag-board/src/` — Objective / KeyResult / Task / Role / Project schema (extracted from sipag-core in PR #553)
+- `sipag-core/src/llm.rs` — gemma4 / ollama client; retires when `categorize.rs`, `workers::research`, `workers::expand` finish migrating to `sipag_lens::ChatBackend` (Phase 2 #8 follow-up — `sipag-lens::BridgeChatBackend` is the replacement)
 - `sipag/src/dispatch_gate.rs` — pre-dispatch classifier. Moved out of sipag-core in §9 #9 and now talks gemma through `sipag_lens::ChatBackend` (concretely `BridgeChatBackend`) instead of the legacy direct-reqwest `llm::chat` path. (`sipag-core/src/gate.rs` is gone; `nudge.rs` retired in §9 #11.)
 - `sipag/src/serve/` — the web UI (htmx + maud), where Steering lives today
 - `tui/src/board_app.rs` — interactive board
