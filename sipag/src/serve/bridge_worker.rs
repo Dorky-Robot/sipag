@@ -26,12 +26,11 @@
 //! `VecDeque<KatulongEvent>`, max [`WINDOW_CAP`] = 200 events)
 //! and its own trigger state. The trigger fires gemma when either:
 //!
-//! - **Threshold**: N events have accumulated since the last fire
-//!   (default [`FIRE_THRESHOLD`] = 10).
-//! - **Blind-spot**: 20+ events arrived in the last 5 minutes but
-//!   no action was produced — a catch-all for quiet-but-productive
-//!   sessions that threshold alone would miss (§3 second-tier
-//!   trigger).
+//! - **Threshold** (v1): N events have accumulated since the last
+//!   fire (default [`FIRE_THRESHOLD`] = 10).
+//! - **Blind-spot** (v1: deferred): 20+ events in 5 min + no
+//!   action produced. Deferred until per-fire outcome tracking
+//!   exists — see `should_fire` doc comment for rationale.
 //!
 //! ## Prompt shape
 //!
@@ -118,7 +117,7 @@ impl SessionWindow {
     }
 
     fn push(&mut self, event: KatulongEvent) {
-        self.last_seq = event.seq;
+        self.last_seq = self.last_seq.max(event.seq);
         self.events_since_fire += 1;
         self.events.push_back(event);
         if self.events.len() > WINDOW_CAP {
@@ -401,8 +400,8 @@ async fn fire_and_record<B: ChatBackend>(
     corpus: &Arc<Mutex<Corpus>>,
     resolver: &ModelResolver,
 ) {
-    let events: Vec<&KatulongEvent> = window.events.iter().collect();
-    let user_prompt = render_prompt(&events.iter().map(|e| (*e).clone()).collect::<Vec<_>>());
+    let snapshot: Vec<KatulongEvent> = window.events.iter().cloned().collect();
+    let user_prompt = render_prompt(&snapshot);
 
     let worker = LensWorker::new(lens, backend, resolver);
     let actions = {
