@@ -138,21 +138,34 @@ fn upsert_observation(state: &AppState, host: &Host, s: &KatulongSession, now: &
     // the ended-row detail panel render without any host round-trip.
     if let Some(uuid) = s.meta_claude_uuid() {
         if !uuid.is_empty() {
-            let is_new_uuid = obs.claude_uuid.is_empty() || obs.claude_uuid != uuid;
             obs.claude_uuid = uuid.to_string();
-            if is_new_uuid {
-                if let Ok(guard) = state.bridge_handle.try_read() {
-                    if let Some(handle) = guard.as_ref() {
-                        let topic = format!("claude/{uuid}");
-                        tracing::debug!(
-                            topic = %topic,
-                            session = %s.name,
-                            "observers: feeding claude topic to bridge worker"
-                        );
-                        handle.watch(topic);
-                    }
+        }
+    }
+    // Feed the bridge worker with this session's `claude/<uuid>`
+    // topic. Called on EVERY poll where the UUID is present —
+    // the bridge worker's coordinator deduplicates internally
+    // (HashMap keyed by topic), so repeat sends are a no-op
+    // (one String allocation + channel send per 15s poll, negligible).
+    //
+    // This deliberately avoids gating on "is this UUID new" because
+    // that couples persistence of `obs.claude_uuid` to the bridge
+    // handle's availability — a startup race where the observer's
+    // first poll fires before the bridge handle is written would
+    // permanently miss the topic. Always-send + internal-dedup
+    // eliminates the race.
+    if !obs.claude_uuid.is_empty() {
+        if sipag_core::katulong::is_valid_session_id(&obs.claude_uuid) {
+            if let Ok(guard) = state.bridge_handle.try_read() {
+                if let Some(handle) = guard.as_ref() {
+                    handle.watch(format!("claude/{}", obs.claude_uuid));
                 }
             }
+        } else {
+            tracing::warn!(
+                uuid = %obs.claude_uuid,
+                session = %s.name,
+                "observers: rejected invalid claude_uuid for bridge topic"
+            );
         }
     }
     if let Some(title) = s.meta_auto_title() {
