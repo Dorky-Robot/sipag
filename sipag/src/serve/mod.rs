@@ -10,6 +10,7 @@ mod auth;
 mod auth_middleware;
 mod board;
 mod board_view;
+pub mod bridge_worker;
 mod categorize;
 mod cookie;
 mod devices;
@@ -46,6 +47,7 @@ pub fn run(
     web_root: PathBuf,
     workers_enabled: bool,
     lens_scheduler_enabled: bool,
+    bridge_worker_enabled: bool,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -56,6 +58,7 @@ pub fn run(
         web_root,
         workers_enabled,
         lens_scheduler_enabled,
+        bridge_worker_enabled,
     ))
 }
 
@@ -64,6 +67,7 @@ async fn async_run(
     web_root: PathBuf,
     workers_enabled: bool,
     lens_scheduler_enabled: bool,
+    bridge_worker_enabled: bool,
 ) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -137,6 +141,45 @@ async fn async_run(
         info!("lens scheduler disabled — pass --lens-scheduler to enable Phase 1 #3 lens-workers");
     }
 
+    if bridge_worker_enabled {
+        match (&state.bridge, katulong_remote()) {
+            (Some(bridge), Ok(remote)) => {
+                match spawn_bridge_worker(
+                    &state.sipag_dir,
+                    bridge.clone(),
+                    remote,
+                    state.http.clone(),
+                )
+                .await
+                {
+                    Ok(handle) => {
+                        info!("bridge worker enabled — waiting for session topics from dispatch");
+                        // Store the handle in AppState so the dispatch handler
+                        // can call handle.watch(topic) after successful dispatch.
+                        *state.bridge_handle.write().await = Some(handle);
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        "bridge worker enable requested but startup failed — continuing without it"
+                    ),
+                }
+            }
+            (None, _) => warn!(
+                "bridge worker enable requested but bridge wiring unavailable \
+                 (~/.ollama-bridge/remote.json missing) — bridge worker will not start"
+            ),
+            (_, Err(e)) => warn!(
+                error = %e,
+                "bridge worker enable requested but katulong remote unavailable \
+                 (~/.katulong/remote.json missing) — bridge worker will not start"
+            ),
+        }
+    } else {
+        info!(
+            "bridge worker disabled — pass --bridge-worker to enable reactive session observation"
+        );
+    }
+
     let app = build_router(state, web_root.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -204,6 +247,7 @@ async fn build_state(
         workers_enabled,
         kr_proposals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         bridge,
+        bridge_handle: Arc::new(tokio::sync::RwLock::new(None)),
     })
 }
 
@@ -247,6 +291,46 @@ async fn spawn_lens_scheduler(
     let scheduler = lens_scheduler::LensScheduler::new(lenses, resolver);
     lens_scheduler::spawn(scheduler, bridge.chat, bridge.embedder, corpus);
     Ok(())
+}
+
+/// Load `~/.katulong/remote.json` for the SSE subscriber's base URL
+/// and bearer token.
+fn katulong_remote() -> Result<katulong_client::RemoteConfig> {
+    katulong_client::RemoteConfig::load()
+        .context("load ~/.katulong/remote.json for bridge worker SSE")
+}
+
+/// Wire up the bridge worker. Opens (or creates) the corpus, loads
+/// the model resolver, and spawns the coordinator task. Returns the
+/// [`bridge_worker::BridgeHandle`] the dispatch handler uses to feed
+/// new session topics.
+async fn spawn_bridge_worker(
+    sipag_dir: &std::path::Path,
+    bridge: crate::bridge::BridgeWiring,
+    remote: katulong_client::RemoteConfig,
+    http: reqwest::Client,
+) -> Result<bridge_worker::BridgeHandle> {
+    use sipag_corpus::Corpus;
+    use sipag_lens::ModelResolver;
+    use tokio::sync::Mutex;
+
+    let corpus_dir = sipag_dir.join("corpus");
+    let corpus = Corpus::open(&corpus_dir)
+        .await
+        .with_context(|| format!("open corpus at {}", corpus_dir.display()))?;
+    let corpus = Arc::new(Mutex::new(corpus));
+
+    let resolver =
+        ModelResolver::load().map_err(|e| anyhow::anyhow!("load ~/.sipag/models.toml: {e}"))?;
+
+    Ok(bridge_worker::spawn(
+        bridge.chat,
+        bridge.embedder,
+        corpus,
+        resolver,
+        remote,
+        http,
+    ))
 }
 
 fn build_webauthn(public_url: &str) -> Result<WebAuthnService> {
