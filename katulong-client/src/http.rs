@@ -454,12 +454,6 @@ pub fn kill_url(base: &str, session_id: &str) -> String {
     format!("{base}/sessions/by-id/{session_id}")
 }
 
-/// `GET /api/claude-transcript/{uuid}?limit=N` — fetch a Claude
-/// session's transcript JSONL up to `limit` recent entries.
-pub fn claude_transcript_url(base: &str, uuid: &str, limit: u32) -> String {
-    format!("{base}/api/claude-transcript/{uuid}?limit={limit}")
-}
-
 /// `POST /api/claude/respond/{uuid}` — type a message into a running
 /// Claude TUI as if from the user's keyboard.
 pub fn claude_respond_url(base: &str, uuid: &str) -> String {
@@ -739,14 +733,6 @@ mod tests {
         assert_eq!(
             output_lines_url("https://k.example", "s_abc", 80),
             "https://k.example/sessions/by-id/s_abc/output?lines=80"
-        );
-    }
-
-    #[test]
-    fn claude_transcript_url_includes_uuid_and_limit() {
-        assert_eq!(
-            claude_transcript_url("https://k.example", "uuid-123", 500),
-            "https://k.example/api/claude-transcript/uuid-123?limit=500"
         );
     }
 
