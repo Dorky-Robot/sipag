@@ -130,12 +130,19 @@ sipag reads its state from `~/.sipag/` (override with `SIPAG_DIR`):
 
 ```
 ~/.sipag/
-├── config.toml                   # default_project, etc.
+├── config.toml                        # default_project, etc.
+├── hosts.toml                         # multi-host katulong mesh registration
+├── corpus/items.jsonl                 # local vector store for lens-worker observations
+├── lenses/<name>.toml                 # lens registry (one file per lens; see extras/lens.toml.example)
+├── models.toml                        # optional: Profile → concrete model name per machine
+├── pubsub/<topic>/log.jsonl           # file-backed durable broker
+├── objectives/<id>/                   # top-level Objectives + their KRs
 └── projects/
     └── <project>/
-        ├── project.toml          # name, repo, statuses
-        ├── tasks/<id>.toml       # one file per task
-        └── roles/<role>.toml     # role templates (command, worktree)
+        ├── project.toml               # name, repo, statuses
+        ├── tasks/<id>.toml            # one file per task
+        ├── roles/<role>.toml          # role templates (command, worktree)
+        └── key-results/<NNN>.toml     # KRs scoped to this project
 ```
 
 Dispatch talks to katulong over HTTP; configure the connection at
@@ -143,6 +150,14 @@ Dispatch talks to katulong over HTTP; configure the connection at
 
 ```json
 { "url": "https://katulong.example", "apiKey": "..." }
+```
+
+The lens scheduler + dispatch gate go through the ollama-bridge
+(local queue/auth daemon in front of `ollama serve`); configure at
+`~/.ollama-bridge/remote.json`:
+
+```json
+{ "url": "https://ollama-bridge.local", "apiKey": "..." }
 ```
 
 ## CLI reference
@@ -157,6 +172,9 @@ sipag move <id> <status>     Move a task to a new status
 sipag projects               List all projects
 sipag project add <name>     Register a project
 sipag sub <topic>            Subscribe to a katulong pub/sub topic
+sipag serve                  Run the web UI (default port 7100)
+                             --workers            enable label-driven autonomous workers
+                             --lens-scheduler     enable the lens-worker scheduler (Phase 1 #3)
 sipag version                Print version
 ```
 
