@@ -20,7 +20,7 @@ The two visible commands today:
 1. **`sipag dispatch <task_id>`** — Sends a task from the board to its role's katulong session and moves it to `in-progress`.
 2. **`sipag tui`** — Interactive board view across all configured projects.
 
-Beyond that, sipag is becoming an **OKR + Experimentation surface**: humans write Objectives and KRs; lens-workers (gemma-driven, configured by each Steering entry's text) derive insights into a local vector corpus; KR sidebars surface what's been observed. Phase 1 #3 in `docs/modules.md` §9 is the next major work item.
+Beyond that, sipag is an **OKR + Experimentation surface**: humans write Objectives and KRs; lens-workers (gemma-driven, configured by each Steering entry's text) derive insights into a local vector corpus; KR sidebars surface what's been observed. The lens-worker substrate, scheduler, and bridge worker are all shipped (§9 Phase 1 #3 closed). The next major surface is structural-verb dispatch to the UI (rendering `suggest_stance` / `ask_human` / `propose_task` into the KR sidebar).
 
 Project-aware review agents and slash commands are scaffolded by [hulma](https://github.com/Dorky-Robot/hulma), a separate tool extracted from sipag in April 2026. The legacy v2/v3 Docker dispatch path was deleted in April 2026 — sipag no longer launches containers itself.
 
@@ -51,7 +51,9 @@ sipag-core/src/                # Library — domain logic + auth + LLM client + 
 
 katulong-client/src/           # Wire client — extracted into its own crate via PR #535
 ├── http.rs                    # KatulongClient: REST surface
+├── async_http.rs              # KatulongAsyncClient: async HTTP with body caps
 ├── attach.rs                  # KatulongAttachClient: WS attach (full duplex)
+├── sse.rs                     # SSE subscriber: KatulongEventStream (§9 #7)
 ├── protocol.rs                # Inbound/Outbound wire types
 ├── serve.rs                   # `katulong-client serve` notebook UI
 └── lib.rs
@@ -61,7 +63,12 @@ sipag/src/                     # Binary — CLI + web server
 ├── cli.rs                     # CLI subcommands: dispatch, up, tui, add, list, move,
 │                              # projects, project, sub, serve, version
 │                              # (feature/refine were removed in PR #536)
+├── bridge.rs                  # shared BridgeWiring (OllamaBridgeClient + ChatBackend + Embedder)
+├── dispatch_gate.rs           # pre-dispatch classifier (folded into lens-worker in §9 #9)
 └── serve/                     # axum + maud htmx-based web UI
+    ├── bridge_worker.rs       # reactive bridge lens-worker (§9 Phase 1 #3; PR #564)
+    ├── lens_scheduler.rs      # periodic lens-worker scheduler (§9 Phase 1 #3; PR #558)
+    └── observers.rs           # passive katulong session poll → feeds bridge worker (PR #565)
 
 tui/src/                       # Binary — interactive board (ratatui)
 ├── main.rs
@@ -106,7 +113,7 @@ Everything sipag knows lives under `~/.sipag/` as TOML/JSONL:
 
 Two parallel KR locations today (project-scoped vs Objective-scoped) — both are load-bearing per `sipag-board/src/key_result.rs:77` (project) and `:149` (objective).
 
-The **local vector corpus** + the **lens registry** + the **scheduler** all shipped (PRs #550 / #551 / #556 / #558). What's pending in Phase 1 #3 is the **bridge lens-worker concrete instance** (reactive on katulong events, depends on §9 Phase 2 #7 SSE subscriber or a polling fallback) and **structural-verb dispatch to UI surfaces** (the scheduler logs `suggest_stance` / `ask_human` / `propose_task` at warn-level today but doesn't render them into the KR sidebar).
+The **local vector corpus** + the **lens registry** + the **scheduler** + the **bridge lens-worker** all shipped (PRs #549-#551 / #556 / #558 / #562 / #564 / #565). The bridge worker subscribes to katulong `claude/<uuid>` SSE topics (session discovery via the observer poll), maintains a 200-event sliding window per session, and fires gemma via `LensWorker::run_with_tools` on threshold. Enable end-to-end with `sipag serve --bridge-worker --workers`. What's pending: **structural-verb dispatch to UI surfaces** (both the scheduler and bridge worker log `suggest_stance` / `ask_human` / `propose_task` at warn-level today but don't render them into the KR sidebar).
 
 ## Commands
 
@@ -150,6 +157,7 @@ Two upstream issues filed (Phase 1 #3 depends on the topics they add):
 
 - `--workers` — autonomous label-driven dispatcher (research / expand). Off by default.
 - `--lens-scheduler` — lens-worker scheduler (Phase 1 #3). Walks `~/.sipag/lenses/*.toml` and fires each lens on its `TriggerPolicy::Schedule` cadence. Requires `~/.ollama-bridge/remote.json` (URL + bearer for the local ollama bridge). Off by default; flip on once the lens registry has content.
+- `--bridge-worker` — reactive bridge lens-worker (Phase 1 #3). Subscribes to katulong `claude/<uuid>` SSE topics for dispatched sessions (discovered via the observer poll) and fires gemma against a 200-event sliding window on threshold (every 10 events). Requires both `~/.ollama-bridge/remote.json` (gemma) and `~/.katulong/remote.json` (SSE). Off by default. Best paired with `--workers` so the observer poll is running to feed session topics.
 
 > `SIPAG_DISPATCH_V2` retired in §9 #11 (closes sipag #528 by
 > deletion). The WS-attach path is now the only path; the legacy
