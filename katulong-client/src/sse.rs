@@ -101,17 +101,20 @@ pub enum SseError {
     /// IO error reading the response body chunk stream.
     #[error("body read error: {0}")]
     Body(String),
-    /// A single SSE line (between two `\n`s) exceeded [`LINE_BUF_CAP`]
-    /// without a terminating newline. Defends against a hostile or
-    /// buggy upstream streaming an unbounded line and OOMing the
-    /// subscriber. Stream ends after this error.
+    /// A single SSE line (bytes up to the next `\n`) exceeded
+    /// [`LINE_BUF_CAP`]. Defends against a hostile or buggy upstream
+    /// streaming an unbounded line and OOMing the subscriber. The
+    /// stream is terminated after this error — subsequent
+    /// `poll_next` returns `None`. The cap is per-line, not
+    /// per-buffer: a chunk containing many short lines drains
+    /// normally even if its total size exceeds the cap.
     #[error("SSE line exceeded {limit} bytes without a newline")]
     LineTooLong { limit: usize },
-    /// One SSE event's accumulated `data:` payload exceeded
-    /// [`EVENT_BUF_CAP`] before the terminating blank line. Same
-    /// defense as `LineTooLong` but for the per-event accumulator.
-    /// Stream ends after this error.
-    #[error("SSE event payload exceeded {limit} bytes")]
+    /// One SSE event's accumulated `data:` payload would exceed
+    /// [`EVENT_BUF_CAP`] if the next `data:` line were appended.
+    /// Same defense as `LineTooLong` but for the per-event
+    /// accumulator. The stream is terminated after this error.
+    #[error("SSE event payload would exceed {limit} bytes")]
     EventTooLarge { limit: usize },
 }
 
@@ -168,12 +171,21 @@ pub struct KatulongEventStream {
     // SSE event accumulator: when a blank line arrives, we emit
     // the buffered `data:` content (parsed as JSON) and reset.
     data_buf: String,
+    // Once a cap-trip surfaces `LineTooLong` / `EventTooLarge`, the
+    // wire is in an unrecoverable mid-event state — the next bytes
+    // would be parsed as the tail of an oversized event. Latch
+    // termination so subsequent polls return `None`, matching what
+    // the error variants' doc comments promise.
+    terminated: bool,
 }
 
 impl Stream for KatulongEventStream {
     type Item = Result<KatulongEvent, SseError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminated {
+            return Poll::Ready(None);
+        }
         loop {
             // Try to extract a complete SSE event from what's
             // already in `line_buf` + `data_buf` before pulling
@@ -181,6 +193,9 @@ impl Stream for KatulongEventStream {
             // separator is a blank line, i.e. `\n\n` or `\n`
             // after a `\n`.
             if let Some(event) = self.drain_complete_event() {
+                if matches!(event, Err(SseError::EventTooLarge { .. })) {
+                    self.terminated = true;
+                }
                 return Poll::Ready(Some(event));
             }
 
@@ -190,19 +205,33 @@ impl Stream for KatulongEventStream {
                 Poll::Ready(None) => {
                     // Stream ended. If we have a half-built event
                     // sitting in the buffer it's malformed (no
-                    // trailing blank line); discard it.
+                    // trailing blank line); discard it. The
+                    // reconnect contract (consumer resumes from
+                    // `last_seen_seq + 1`; broker replays retained
+                    // events) covers the lost-event case.
+                    self.terminated = true;
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some(Err(e))) => {
+                    self.terminated = true;
                     return Poll::Ready(Some(Err(SseError::Body(e.to_string()))));
                 }
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.line_buf.extend_from_slice(&chunk);
-                    if self.line_buf.len() > LINE_BUF_CAP {
-                        // Drop the buffer so we don't keep growing
-                        // before the stream ends.
+                    // The cap is per-line, not per-buffer: a chunk
+                    // containing many short lines is fine — they'll
+                    // drain on the next loop iteration. Only an
+                    // unterminated leading line bigger than the cap
+                    // is the OOM vector we're guarding against.
+                    let first_line_len = self
+                        .line_buf
+                        .iter()
+                        .position(|&b| b == b'\n')
+                        .unwrap_or(self.line_buf.len());
+                    if first_line_len > LINE_BUF_CAP {
                         self.line_buf.clear();
                         self.data_buf.clear();
+                        self.terminated = true;
                         return Poll::Ready(Some(Err(SseError::LineTooLong {
                             limit: LINE_BUF_CAP,
                         })));
@@ -248,16 +277,25 @@ impl KatulongEventStream {
             }
             if let Some(data) = line.strip_prefix("data:") {
                 let data = data.strip_prefix(' ').unwrap_or(data);
-                if !self.data_buf.is_empty() {
-                    self.data_buf.push('\n');
-                }
-                self.data_buf.push_str(data);
-                if self.data_buf.len() > EVENT_BUF_CAP {
+                let separator = if self.data_buf.is_empty() { 0 } else { 1 };
+                let projected = self
+                    .data_buf
+                    .len()
+                    .saturating_add(separator)
+                    .saturating_add(data.len());
+                // Pre-check: refuse to grow `data_buf` past the cap.
+                // Matches `line_buf`'s pre-check; same OOM-blast-
+                // radius rationale.
+                if projected > EVENT_BUF_CAP {
                     self.data_buf.clear();
                     return Some(Err(SseError::EventTooLarge {
                         limit: EVENT_BUF_CAP,
                     }));
                 }
+                if separator == 1 {
+                    self.data_buf.push('\n');
+                }
+                self.data_buf.push_str(data);
                 continue;
             }
             // SSE has `event:`, `id:`, `retry:` lines too. We
@@ -344,6 +382,7 @@ pub async fn subscribe(
         body: Box::pin(resp.bytes_stream()),
         line_buf: Vec::new(),
         data_buf: String::new(),
+        terminated: false,
     })
 }
 
@@ -359,13 +398,6 @@ fn sub_url(base: &str, topic: &str, from_seq: u64) -> String {
         "{}/sub/{encoded_topic}?fromSeq={from_seq}",
         base.trim_end_matches('/')
     )
-}
-
-// Tiny shim so `?` propagation in user code stays ergonomic.
-impl From<reqwest::Error> for SseError {
-    fn from(e: reqwest::Error) -> Self {
-        SseError::Transport(e.to_string())
-    }
 }
 
 #[cfg(test)]
@@ -672,19 +704,27 @@ mod tests {
             }
             other => panic!("expected LineTooLong, got {other:?}"),
         }
+        // Stream is terminated after the cap-trip per the variant's
+        // doc — pin the contract so a regression that kept the
+        // stream alive (consuming arbitrary mid-event bytes) fails
+        // here, not in production.
+        assert!(
+            stream.next().await.is_none(),
+            "stream must terminate after LineTooLong per the variant's doc comment"
+        );
     }
 
     #[tokio::test]
     async fn event_buffer_cap_surfaces_event_too_large_error() {
         // Same defense, different vector: many `data:` lines that
-        // total over EVENT_BUF_CAP but each line is fine on its own
-        // (so LINE_BUF_CAP doesn't trip first).
-        //
-        // Build a body with many short `data:` lines whose sum
-        // exceeds EVENT_BUF_CAP.
-        let line = "data: ".to_string() + &"a".repeat(LINE_BUF_CAP / 2) + "\n";
-        let line_payload_size = LINE_BUF_CAP / 2; // bytes appended to data_buf per line
-        let lines_needed = (EVENT_BUF_CAP / line_payload_size) + 2; // overshoot
+        // total over EVENT_BUF_CAP but each line is well under
+        // LINE_BUF_CAP. Keep individual lines tiny (~1 KiB) so the
+        // line-cap can't trip first regardless of how reqwest chunks
+        // the body off the wire — the line-cap is per-line not
+        // per-chunk, but tiny lines remove any ambiguity.
+        const LINE_PAYLOAD: usize = 1024;
+        let line = "data: ".to_string() + &"a".repeat(LINE_PAYLOAD) + "\n";
+        let lines_needed = (EVENT_BUF_CAP / LINE_PAYLOAD) + 2; // overshoot
         let body = line.repeat(lines_needed);
         let (url, _done) = spawn_sse_server(move |mut s| async move {
             write_sse_response(&mut s, &body).await;
@@ -701,6 +741,12 @@ mod tests {
             }
             other => panic!("expected EventTooLarge, got {other:?}"),
         }
+        // Stream is terminated after the cap-trip; the next poll
+        // returns None rather than continuing to read garbage.
+        assert!(
+            stream.next().await.is_none(),
+            "stream must terminate after EventTooLarge per the variant's doc comment"
+        );
     }
 
     #[test]
@@ -723,5 +769,54 @@ mod tests {
         let mut s = "hello".to_string();
         truncate_at_char_boundary(&mut s, 1024);
         assert_eq!(s, "hello");
+    }
+
+    #[tokio::test]
+    async fn body_read_error_mid_stream_surfaces_as_body_variant() {
+        // Pin that `SseError::Body` is constructed when the upstream
+        // closes mid-event. Without coverage, a regression that
+        // silently swallowed body errors (treating them as clean
+        // EOF) would slip through and the bridge worker — which
+        // distinguishes Body from Transport for retry-class
+        // decisions — would lose information.
+        //
+        // Approach: advertise Content-Length much larger than what
+        // we actually send, then close. reqwest's body stream
+        // surfaces the premature EOF as an error.
+        let response = "HTTP/1.1 200 OK\r\n\
+                        Content-Type: text/event-stream\r\n\
+                        Content-Length: 1000000\r\n\
+                        \r\n\
+                        data: {\"se";
+        let (url, _done) = spawn_sse_server(move |mut s| async move {
+            s.write_all(response.as_bytes()).await.unwrap();
+            s.flush().await.unwrap();
+            // Drop without writing the rest — reqwest should error
+            // on the next body read since Content-Length promised
+            // 1 MB and we sent ~10 bytes.
+            drop(s);
+        })
+        .await;
+
+        let http = reqwest::Client::new();
+        let mut stream = subscribe(http, &url, "k", "topic", 0).await.unwrap();
+        let item = stream
+            .next()
+            .await
+            .expect("must yield an error item, not clean EOF");
+        match item {
+            Err(SseError::Body(msg)) => {
+                assert!(
+                    !msg.is_empty(),
+                    "Body variant must carry diagnostic text from the underlying reqwest error"
+                );
+            }
+            other => panic!("expected SseError::Body, got {other:?}"),
+        }
+        // After a body error the stream is terminated.
+        assert!(
+            stream.next().await.is_none(),
+            "stream must terminate after Body error"
+        );
     }
 }
