@@ -3,7 +3,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use sipag_board as board;
 use sipag_core::{config::default_sipag_dir, katulong};
-use std::io::{BufRead, BufReader};
 use std::process::Command;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -638,76 +637,65 @@ fn run_project_add(name: &str, repo: &str) -> Result<()> {
 fn run_sub(topic: &str, from_seq: u64, json_output: bool) -> Result<()> {
     let cfg = katulong::RemoteConfig::load()
         .context("Cannot load ~/.katulong/remote.json — is it set up?")?;
-    let url = cfg.sub_url(topic, from_seq);
 
     eprintln!("Subscribing to: {topic}");
-    eprintln!("Endpoint: {url}");
+    eprintln!("From seq: {from_seq}");
 
-    // Use curl to connect to SSE endpoint and stream events.
-    let mut cmd = Command::new("curl");
-    cmd.args(["-sfN", "--no-buffer"]);
-    cmd.args(["-H", &format!("Authorization: Bearer {}", cfg.api_key)]);
-    cmd.arg(&url);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::null());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime for sub")?;
 
-    let mut child = cmd
-        .spawn()
-        .context("Failed to start curl for SSE subscription")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("Failed to capture curl stdout")?;
+    rt.block_on(async {
+        use futures::StreamExt;
 
-    let reader = BufReader::new(stdout);
-    let mut event_type = String::new();
-    let mut data_buf = String::new();
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("sipag/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("failed to build HTTP client")?;
 
-    for line in reader.lines() {
-        let line = line.context("Error reading SSE stream")?;
+        let mut stream = katulong::subscribe(http, &cfg.url, &cfg.api_key, topic, from_seq)
+            .await
+            .context("SSE connect failed")?;
 
-        if let Some(rest) = line.strip_prefix("event:") {
-            event_type = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("data:") {
-            let data = rest.trim();
-            if !data_buf.is_empty() {
-                data_buf.push('\n');
-            }
-            data_buf.push_str(data);
-        } else if line.is_empty() && !data_buf.is_empty() {
-            // End of SSE event — dispatch
-            if json_output {
-                println!("{data_buf}");
-            } else {
-                // Pretty-print: try to parse as JSON for display
-                match serde_json::from_str::<serde_json::Value>(&data_buf) {
-                    Ok(val) => {
-                        let evt = val["event"].as_str().unwrap_or(&event_type);
-                        let ts = val["timestamp"].as_str().unwrap_or("?");
-                        let session = val["session"].as_str().unwrap_or("?");
-                        println!("[{ts}] {evt} session={session}");
-                        // Print extra fields based on event type
-                        if let Some(task_id) = val["task_id"].as_str() {
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(evt) => {
+                    if json_output {
+                        let mut map = evt.extra.clone();
+                        map.insert("seq".into(), evt.seq.into());
+                        map.insert("event".into(), evt.event.clone().into());
+                        map.insert("timestamp".into(), evt.timestamp.clone().into());
+                        if let Some(s) = &evt.session {
+                            map.insert("session".into(), s.clone().into());
+                        }
+                        if let Ok(json) = serde_json::to_string(&map) {
+                            println!("{json}");
+                        }
+                    } else {
+                        let session = evt.session.as_deref().unwrap_or("?");
+                        println!("[{}] {} session={session}", evt.timestamp, evt.event);
+                        if let Some(serde_json::Value::String(task_id)) = evt.extra.get("task_id") {
                             println!("  task_id: {task_id}");
                         }
-                        if let Some(msg) = val["message"].as_str() {
+                        if let Some(serde_json::Value::String(msg)) = evt.extra.get("message") {
                             if !msg.is_empty() {
                                 println!("  message: {msg}");
                             }
                         }
                     }
-                    Err(_) => {
-                        println!("[{event_type}] {data_buf}");
-                    }
+                }
+                Err(katulong::SseError::BadEvent(msg)) => {
+                    eprintln!("malformed event: {msg}");
+                }
+                Err(e) => {
+                    anyhow::bail!("SSE stream error: {e}");
                 }
             }
-            event_type.clear();
-            data_buf.clear();
         }
-    }
-
-    let _ = child.wait();
-    Ok(())
+        eprintln!("stream ended");
+        Ok(())
+    })
 }
 
 fn run_version() -> Result<()> {

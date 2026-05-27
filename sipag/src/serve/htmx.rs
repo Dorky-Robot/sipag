@@ -868,99 +868,20 @@ async fn attention_fragment(State(state): State<AppState>) -> Response {
 /// katulong's endpoint 404s (broker meta missing — known issue queued
 /// as a katulong task).
 async fn observation_transcript_handler(
-    AxumPath(obs_id): AxumPath<String>,
-    State(state): State<AppState>,
+    AxumPath(_obs_id): AxumPath<String>,
+    State(_state): State<AppState>,
 ) -> Response {
-    let dir = load_dir();
-    let obs = match Observation::load(&dir, &obs_id) {
-        Ok(o) => o,
-        Err(_) => return err_response(StatusCode::NOT_FOUND, "observation not found"),
-    };
-    if obs.claude_uuid.is_empty() {
-        return html_response(maud::html! {
-            div.transcript-empty.subtle {
-                "no Claude session UUID was captured for this observation — "
-                "transcript not available"
-            }
-        });
-    }
-    let host = match state.hosts.find(&obs.host) {
-        Some(h) => h,
-        None => {
-            return html_response(maud::html! {
-                div.transcript-empty.subtle {
-                    "host '" (obs.host) "' is no longer configured — transcript not available"
-                }
-            });
+    // The Claude-transcript-proxy path (sipag → katulong →
+    // Claude JSONL) was a Demeter violation retired in §9 #7.
+    // Session activity is now observed via the bridge lens-worker
+    // (PR #564) consuming `claude/<uuid>` SSE events directly.
+    // A corpus-backed transcript view is a follow-up UI task.
+    html_response(maud::html! {
+        div.transcript-empty.subtle {
+            "Session activity is now captured via the bridge worker. "
+            "A corpus-backed transcript view is coming soon."
         }
-    };
-    // `obs.claude_uuid` flows in from `KatulongSession.meta.claude.uuid`
-    // via the observer poll path — i.e. server-supplied. Validate
-    // before URL interpolation for the same reason as session ids
-    // (#526). The validator's allow-list is a superset of UUID format.
-    if !sipag_core::katulong::is_valid_session_id(&obs.claude_uuid) {
-        warn!(
-            obs = %obs_id, claude_uuid = %obs.claude_uuid,
-            "rejected invalid claude_uuid from upstream observation"
-        );
-        return html_response(maud::html! {
-            div.transcript-empty.subtle { "transcript fetch failed: invalid identifier" }
-        });
-    }
-    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), &obs.claude_uuid, 500);
-    // 10 MiB cap (TRANSCRIPT_BODY_CAP) accommodates long Claude
-    // sessions while still bounding worst-case memory under a
-    // misbehaving katulong (sipag #527). Tighter than the default 1
-    // MiB because transcript JSONL legitimately grows.
-    let parsed: serde_json::Value = match state
-        .katulong_for(host)
-        .get_capped(&url, katulong_client::TRANSCRIPT_BODY_CAP)
-        .await
-    {
-        Ok(v) => v,
-        Err(katulong_client::KatulongAsyncError::Http { status, body }) => {
-            // Operator detail to the log; user gets a clean status.
-            warn!(host = %obs.host, status = %status, body = %body, "transcript fetch returned non-2xx");
-            return html_response(maud::html! {
-                div.transcript-empty.subtle {
-                    "transcript not available (HTTP " (status.as_u16()) ")"
-                }
-            });
-        }
-        Err(katulong_client::KatulongAsyncError::BodyTooLarge { cap }) => {
-            warn!(host = %obs.host, cap, "transcript body exceeded cap (sipag #527 defense)");
-            return html_response(maud::html! {
-                div.transcript-empty.subtle { "transcript too large to render" }
-            });
-        }
-        Err(katulong_client::KatulongAsyncError::BadSessionId(id)) => {
-            // Trust-boundary violation: katulong returned an id that
-            // didn't pass the validation gate. Log loud — this is
-            // exactly the kind of thing operator alerting wants to
-            // pick up (a compromised or misbehaving katulong is
-            // attempting injection via the id field).
-            warn!(host = %obs.host, bad_id = %id, "trust-boundary: katulong returned invalid session id during transcript fetch");
-            return html_response(maud::html! {
-                div.transcript-empty.subtle { "transcript fetch rejected: invalid identifier from upstream" }
-            });
-        }
-        Err(e) => {
-            // Transport / JSON errors. Detail in log; generic message
-            // in UI (e.to_string() can carry the tunnel hostname for
-            // transport errors).
-            warn!(host = %obs.host, error = %e, "transcript fetch failed");
-            return html_response(maud::html! {
-                div.transcript-empty.subtle {
-                    "transcript fetch failed"
-                }
-            });
-        }
-    };
-    let entries: Vec<board_view::FeedEntry> = parsed
-        .get("entries")
-        .and_then(|e| serde_json::from_value(e.clone()).ok())
-        .unwrap_or_default();
-    html_response(board_view::transcript_panel(&entries))
+    })
 }
 
 /// Mark the current gemma4 proposal for an observation as rejected.

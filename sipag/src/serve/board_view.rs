@@ -107,17 +107,12 @@ pub enum FeedEntry {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct FeedTool {
     #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub target: String,
-}
-
-#[derive(serde::Deserialize, Default)]
-struct TranscriptResponse {
-    #[serde(default)]
-    entries: Vec<FeedEntry>,
 }
 
 /// Boot id assigned once per process. Used to cache-bust JS assets.
@@ -257,24 +252,16 @@ async fn fetch_feeds(
 }
 
 async fn fetch_recent_transcript(
-    state: &AppState,
-    host: &Host,
-    uuid: &str,
-    limit: u32,
+    _state: &AppState,
+    _host: &Host,
+    _uuid: &str,
+    _limit: u32,
 ) -> Vec<FeedEntry> {
-    let url = sipag_core::katulong::claude_transcript_url(host.base_url(), uuid, limit);
-    // Drop-on-error: this feed is best-effort. 10 MiB cap is right
-    // for transcript JSONL (sipag #527 — defense against a
-    // misbehaving katulong streaming an unbounded body).
-    let body: TranscriptResponse = match state
-        .katulong_for(host)
-        .get_capped(&url, katulong_client::TRANSCRIPT_BODY_CAP)
-        .await
-    {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    body.entries
+    // The Claude-transcript-proxy path (sipag → katulong → Claude
+    // JSONL) was retired in §9 #7. Session activity is now captured
+    // by the bridge lens-worker via SSE. A corpus-backed feed view
+    // is a follow-up UI task; until then the feed panel is empty.
+    Vec::new()
 }
 
 /// Flatten every active (not-done) KR across all *objectives* into the
@@ -1967,64 +1954,6 @@ fn ended_detail_body(
                 }
             }
         }
-    }
-}
-
-/// Render a list of FeedEntry into HTML for the transcript tab. Used
-/// by the transcript endpoint's HTMX response.
-pub fn transcript_panel(entries: &[FeedEntry]) -> Markup {
-    if entries.is_empty() {
-        return html! {
-            div.transcript-empty.subtle {
-                "transcript is empty (or wasn't recorded for this session)"
-            }
-        };
-    }
-    html! {
-        ol.transcript-list {
-            @for e in entries {
-                (transcript_row(e))
-            }
-        }
-    }
-}
-
-fn transcript_row(entry: &FeedEntry) -> Markup {
-    match entry {
-        FeedEntry::User { text, .. } => html! {
-            li.transcript-row.transcript-user {
-                span.transcript-marker { "›" }
-                span.transcript-text { (text) }
-            }
-        },
-        FeedEntry::Assistant { text, tools, .. } => html! {
-            li.transcript-row.transcript-assistant {
-                span.transcript-marker { "‹" }
-                @if let Some(t) = text {
-                    @if !t.is_empty() {
-                        span.transcript-text { (t) }
-                    }
-                }
-                @if !tools.is_empty() {
-                    div.transcript-tools {
-                        @for tool in tools {
-                            span.transcript-tool {
-                                span.transcript-tool-name { (tool.name) }
-                                @if !tool.target.is_empty() {
-                                    span.transcript-tool-target.subtle { " " (tool.target) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        FeedEntry::ToolResult { text, .. } => html! {
-            li.transcript-row.transcript-tool-result {
-                span.transcript-marker { "⚙" }
-                span.transcript-text { (text) }
-            }
-        },
     }
 }
 
