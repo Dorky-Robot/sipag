@@ -86,7 +86,11 @@ Everything sipag knows lives under `~/.sipag/` as TOML/JSONL:
 ~/.sipag/
 ├── config.toml                        # default_project, etc.
 ├── hosts.toml                         # multi-host mesh registration
-├── pubsub/                            # file-backed durable broker
+├── models.toml                        # optional: Profile (Fast/Strong/CodeAware) → concrete model
+├── corpus/items.jsonl                 # local vector store (sipag-corpus; lens-worker observations)
+├── lenses/<name>.toml                 # lens registry walked by --lens-scheduler
+│                                      # (see extras/lens.toml.example for schema)
+├── pubsub/                            # file-backed durable broker (sipag-pubsub)
 │   └── <topic>/log.jsonl
 ├── objectives/                        # top-level Objectives (project-agnostic)
 │   └── <id>/
@@ -100,9 +104,9 @@ Everything sipag knows lives under `~/.sipag/` as TOML/JSONL:
         └── roles/<role>.toml          # Role template (command + worktree)
 ```
 
-Two parallel KR locations today (project-scoped vs Objective-scoped) — both are load-bearing per `sipag-core/src/board/key_result.rs:77` (project) and `:149` (objective).
+Two parallel KR locations today (project-scoped vs Objective-scoped) — both are load-bearing per `sipag-board/src/key_result.rs:77` (project) and `:149` (objective).
 
-A future addition (Phase 1 #3 in modules.md §9): a **local vector corpus** sibling to the TOML state, holding observations and derived insights tagged + timestamped + embedded via ollama.
+The **local vector corpus** + the **lens registry** + the **scheduler** all shipped (PRs #550 / #551 / #556 / #558). What's pending in Phase 1 #3 is the **bridge lens-worker concrete instance** (reactive on katulong events, depends on §9 Phase 2 #7 SSE subscriber or a polling fallback) and **structural-verb dispatch to UI surfaces** (the scheduler logs `suggest_stance` / `ask_human` / `propose_task` at warn-level today but doesn't render them into the KR sidebar).
 
 ## Commands
 
