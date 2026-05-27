@@ -10,6 +10,7 @@ mod auth;
 mod auth_middleware;
 mod board;
 mod board_view;
+mod bridge_worker;
 mod categorize;
 mod cookie;
 mod devices;
@@ -46,6 +47,7 @@ pub fn run(
     web_root: PathBuf,
     workers_enabled: bool,
     lens_scheduler_enabled: bool,
+    bridge_worker_enabled: bool,
 ) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -56,6 +58,7 @@ pub fn run(
         web_root,
         workers_enabled,
         lens_scheduler_enabled,
+        bridge_worker_enabled,
     ))
 }
 
@@ -64,6 +67,7 @@ async fn async_run(
     web_root: PathBuf,
     workers_enabled: bool,
     lens_scheduler_enabled: bool,
+    bridge_worker_enabled: bool,
 ) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -119,22 +123,78 @@ async fn async_run(
         info!("workers disabled — pass --workers to enable autonomous dispatch");
     }
 
+    // Shared corpus instance for all lens-worker consumers (scheduler
+    // + bridge worker). Opened once so both share the same in-memory
+    // state + file handle — avoids duplicate ID assignment and
+    // interleaved JSONL writes that two independent `Corpus::open`
+    // calls against the same path would cause.
+    let shared_corpus = if lens_scheduler_enabled || bridge_worker_enabled {
+        match open_shared_corpus(&state.sipag_dir).await {
+            Ok(c) => Some(c),
+            Err(e) => {
+                warn!(error = %e, "corpus open failed — lens scheduler and bridge worker will not start");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if lens_scheduler_enabled {
-        match &state.bridge {
-            Some(bridge) => match spawn_lens_scheduler(&state.sipag_dir, bridge.clone()).await {
-                Ok(()) => info!("lens scheduler enabled — tick loop spawned"),
-                Err(e) => warn!(
-                    error = %e,
-                    "lens scheduler enable requested but startup failed — continuing without it"
-                ),
-            },
-            None => warn!(
+        match (&state.bridge, &shared_corpus) {
+            (Some(bridge), Some(corpus)) => {
+                match spawn_lens_scheduler(&state.sipag_dir, bridge.clone(), corpus.clone()).await {
+                    Ok(()) => info!("lens scheduler enabled — tick loop spawned"),
+                    Err(e) => warn!(
+                        error = %e,
+                        "lens scheduler enable requested but startup failed — continuing without it"
+                    ),
+                }
+            }
+            (None, _) => warn!(
                 "lens scheduler enable requested but bridge wiring unavailable \
                  (~/.ollama-bridge/remote.json missing) — scheduler will not start"
             ),
+            _ => {} // corpus open already warned
         }
     } else {
         info!("lens scheduler disabled — pass --lens-scheduler to enable Phase 1 #3 lens-workers");
+    }
+
+    if bridge_worker_enabled {
+        match (&state.bridge, katulong_remote(), &shared_corpus) {
+            (Some(bridge), Ok(remote), Some(corpus)) => {
+                match spawn_bridge_worker(
+                    bridge.clone(),
+                    corpus.clone(),
+                    remote,
+                    state.http.clone(),
+                ) {
+                    Ok(handle) => {
+                        info!("bridge worker enabled — waiting for session topics from dispatch");
+                        *state.bridge_handle.write().await = Some(handle);
+                    }
+                    Err(e) => warn!(
+                        error = %e,
+                        "bridge worker enable requested but startup failed — continuing without it"
+                    ),
+                }
+            }
+            (None, _, _) => warn!(
+                "bridge worker enable requested but bridge wiring unavailable \
+                 (~/.ollama-bridge/remote.json missing) — bridge worker will not start"
+            ),
+            (_, Err(e), _) => warn!(
+                error = %e,
+                "bridge worker enable requested but katulong remote unavailable \
+                 (~/.katulong/remote.json missing) — bridge worker will not start"
+            ),
+            _ => {} // corpus open already warned
+        }
+    } else {
+        info!(
+            "bridge worker disabled — pass --bridge-worker to enable reactive session observation"
+        );
     }
 
     let app = build_router(state, web_root.clone());
@@ -204,28 +264,31 @@ async fn build_state(
         workers_enabled,
         kr_proposals: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         bridge,
+        bridge_handle: Arc::new(tokio::sync::RwLock::new(None)),
     })
 }
 
+/// Open (or create) `~/.sipag/corpus/` once for all lens-worker
+/// consumers (scheduler + bridge worker).
+async fn open_shared_corpus(
+    sipag_dir: &std::path::Path,
+) -> Result<Arc<tokio::sync::Mutex<sipag_corpus::Corpus>>> {
+    let corpus_dir = sipag_dir.join("corpus");
+    let corpus = sipag_corpus::Corpus::open(&corpus_dir)
+        .await
+        .with_context(|| format!("open corpus at {}", corpus_dir.display()))?;
+    Ok(Arc::new(tokio::sync::Mutex::new(corpus)))
+}
+
 /// Wire up the lens-worker scheduler against an already-loaded
-/// [`BridgeWiring`]. Opens (or creates) `~/.sipag/corpus/`, walks
-/// `~/.sipag/lenses/*.toml` for the registry, then spawns the
-/// scheduler tick loop. Returns Err on corpus or models.toml
-/// problems so the caller can log and continue without the
-/// scheduler — sipag serve stays useful for the rest of the surface.
+/// [`BridgeWiring`] and shared corpus. Walks `~/.sipag/lenses/*.toml`
+/// for the registry, then spawns the scheduler tick loop.
 async fn spawn_lens_scheduler(
     sipag_dir: &std::path::Path,
     bridge: crate::bridge::BridgeWiring,
+    corpus: Arc<tokio::sync::Mutex<sipag_corpus::Corpus>>,
 ) -> Result<()> {
-    use sipag_corpus::Corpus;
     use sipag_lens::ModelResolver;
-    use tokio::sync::Mutex;
-
-    let corpus_dir = sipag_dir.join("corpus");
-    let corpus = Corpus::open(&corpus_dir)
-        .await
-        .with_context(|| format!("open corpus at {}", corpus_dir.display()))?;
-    let corpus = Arc::new(Mutex::new(corpus));
 
     let lenses = lens_scheduler::load_lenses_from_dir(&sipag_dir.join("lenses")).await;
     if lenses.is_empty() {
@@ -247,6 +310,37 @@ async fn spawn_lens_scheduler(
     let scheduler = lens_scheduler::LensScheduler::new(lenses, resolver);
     lens_scheduler::spawn(scheduler, bridge.chat, bridge.embedder, corpus);
     Ok(())
+}
+
+/// Load `~/.katulong/remote.json` for the SSE subscriber's base URL
+/// and bearer token.
+fn katulong_remote() -> Result<katulong_client::RemoteConfig> {
+    katulong_client::RemoteConfig::load()
+        .context("load ~/.katulong/remote.json for bridge worker SSE")
+}
+
+/// Wire up the bridge worker against the shared corpus. Spawns the
+/// coordinator task and returns the [`bridge_worker::BridgeHandle`]
+/// the dispatch handler uses to feed new session topics.
+fn spawn_bridge_worker(
+    bridge: crate::bridge::BridgeWiring,
+    corpus: Arc<tokio::sync::Mutex<sipag_corpus::Corpus>>,
+    remote: katulong_client::RemoteConfig,
+    http: reqwest::Client,
+) -> Result<bridge_worker::BridgeHandle> {
+    use sipag_lens::ModelResolver;
+
+    let resolver =
+        ModelResolver::load().map_err(|e| anyhow::anyhow!("load ~/.sipag/models.toml: {e}"))?;
+
+    Ok(bridge_worker::spawn(
+        bridge.chat,
+        bridge.embedder,
+        corpus,
+        resolver,
+        remote,
+        http,
+    ))
 }
 
 fn build_webauthn(public_url: &str) -> Result<WebAuthnService> {

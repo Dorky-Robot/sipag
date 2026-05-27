@@ -1,4 +1,5 @@
 use crate::bridge::BridgeWiring;
+use crate::serve::bridge_worker::BridgeHandle;
 use crate::serve::categorize::ProposalState;
 use katulong_client::KatulongAsyncClient;
 use sipag_core::auth::{AuthStore, WebAuthnService};
@@ -53,6 +54,11 @@ pub struct AppState {
     /// underlying types), so AppState's per-request `.clone()` stays
     /// cheap.
     pub bridge: Option<BridgeWiring>,
+    /// Handle for the bridge lens-worker (§9 Phase 1 #3 remainder).
+    /// `Some` after `--bridge-worker` startup succeeds. The dispatch
+    /// handler calls `handle.watch(topic)` after successful dispatch
+    /// so the bridge starts observing the new session.
+    pub bridge_handle: Arc<RwLock<Option<BridgeHandle>>>,
 }
 
 impl AppState {

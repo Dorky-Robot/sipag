@@ -156,6 +156,15 @@ pub enum Commands {
         /// content and the bridge is reachable.
         #[arg(long, default_value_t = false)]
         lens_scheduler: bool,
+
+        /// Enable the bridge lens-worker (§9 Phase 1 #3 remainder).
+        /// Subscribes to katulong `claude/<uuid>` SSE topics for
+        /// dispatched sessions and fires gemma against a sliding
+        /// window of events to produce observations. Requires both
+        /// `~/.ollama-bridge/remote.json` (gemma) and
+        /// `~/.katulong/remote.json` (SSE).
+        #[arg(long, default_value_t = false)]
+        bridge_worker: bool,
     },
 
     /// Print version
@@ -214,7 +223,8 @@ pub fn run(cli: Cli) -> Result<()> {
             web_root,
             workers,
             lens_scheduler,
-        }) => crate::serve::run(port, web_root, workers, lens_scheduler),
+            bridge_worker,
+        }) => crate::serve::run(port, web_root, workers, lens_scheduler, bridge_worker),
         Some(Commands::Version) => run_version(),
     }
 }
