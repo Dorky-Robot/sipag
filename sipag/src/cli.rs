@@ -109,7 +109,7 @@ pub enum Commands {
     // `Feature { action: FeatureAction }` and `Refine { ... }` subcommands
     // were deprecated 2026-05-17 and their wiring stripped. See
     // sipag_core::{feature, refine} module doc-comments and
-    // docs/modules.md §3 for the work-model reframe (Experimentation
+    // docs/architecture.md §3 for the work-model reframe (Experimentation
     // replaces the kanban refinement pipeline).
     /// Subscribe to katulong pub/sub topic and print events
     Sub {

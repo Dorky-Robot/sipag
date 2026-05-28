@@ -3,7 +3,7 @@
 //! Subscribes to katulong `claude/<uuid>` SSE topics and fires
 //! gemma against a sliding window of session events to produce
 //! observations and structural verbs. This closes the remainder
-//! of Phase 1 #3 + Phase 2 #7 in `docs/modules.md` §9.
+//! of Phase 1 #3 + Phase 2 #7 in `docs/architecture.md` §9.
 //!
 //! ## Architecture
 //!

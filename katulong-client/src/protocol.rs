@@ -10,7 +10,7 @@
 //! `katulong/public/lib/input-sender.js` (outbound) and the
 //! handlers in `katulong/lib/ws-manager.js` (inbound + outbound
 //! dispatch). Sipag is a second kind of client speaking the exact
-//! same protocol; for the broader architecture see `docs/modules.md`
+//! same protocol; for the broader architecture see `docs/architecture.md`
 //! §4 (Topology).
 //!
 //! Every message is a single JSON object on a single transport

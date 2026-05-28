@@ -6,7 +6,7 @@ If that one sentence is true, everything else cascades. If it isn't, nothing els
 
 This document is the **product narrative** — what sipag is, what using it feels like, why it exists, and what it deliberately isn't. It's written present-tense, as if the product is fully shipped, on the Amazon "Working Backwards" theory that you should be able to describe a product compellingly *before* you build it. Some of what's described here is real today; some is on the queue. The shape doesn't change.
 
-For the strategic principles behind the shape, see [`../VISION.md`](../VISION.md). For the architecture, [`modules.md`](modules.md). For capability state, [`feature-matrix.md`](feature-matrix.md). For commands, [`cli-reference.md`](cli-reference.md). This doc is the spine; those are the ribs.
+For the strategic principles behind the shape, see [`../VISION.md`](../VISION.md). For the architecture (runtime topology, crate map, event topology, phase queue), [`architecture.md`](architecture.md). For commands, [`cli-reference.md`](cli-reference.md). This doc is the spine; those are the ribs.
 
 ---
 
@@ -120,7 +120,7 @@ The fleet continues. Lens-workers continue deriving. Sipag accumulates insights 
 Software teams (or solo developers) running an agentic dev fleet — i.e., multiple Claude / agent instances working in parallel on tracked work. Sipag is overkill if you're using AI assistance for autocomplete; sipag is the right shape if you're treating agents as semi-autonomous coworkers and need a way to direct them without coordinating them.
 
 **Is sipag finished?**
-No. Several capabilities described above are aspirational at this writing — see [`feature-matrix.md`](feature-matrix.md) for the per-capability scorecard (✅ / 🟡 / 🟧 / 🔴 / ⏳). The product *shape* is settled. The implementation is staged in phases per [`modules.md`](modules.md) §9. As of late May 2026, the **lens-worker substrate is shipped**: the local corpus, the `LensWorker` runtime, `corpus.search` / `corpus.expand` tool wrappers gemma can call mid-prompt, per-lens model selection, and the scheduler that walks `~/.sipag/lenses/*.toml` and fires each lens on its cadence. What's pending is the **bridge lens-worker concrete instance** (reactive on katulong session events) and **structural-verb dispatch to UI affordances** (`suggest_stance` / `ask_human` / `propose_task` are produced today but not yet rendered into the KR sidebar). Until those two land, the "what's happening" the narrative describes is partially observed but not fully surfaced.
+No. Several capabilities described above are aspirational at this writing — see [`architecture.md`](architecture.md#phase-queue) for the current phase queue snapshot. The product *shape* is settled. As of late May 2026, the **lens-worker substrate is shipped end-to-end**: the local corpus, the `LensWorker` runtime, the `corpus.search` / `corpus.expand` tool wrappers gemma can call mid-prompt, per-lens model selection, the scheduler that walks `~/.sipag/lenses/*.toml`, and the **bridge lens-worker** that subscribes to katulong session events reactively. What's still pending is **structural-verb dispatch to UI affordances** — `suggest_stance` / `ask_human` / `propose_task` are produced today but not yet rendered into the KR sidebar. Until that lands, the "what's happening" the narrative describes is observed but not surfaced.
 
 **What's the alternative I should consider instead?**
 Build your own coordination by hand using shell scripts + the existing Claude CLI + some glue. That's what most people are doing today. It works. It also doesn't compound — every project ends up with bespoke glue. Sipag is the bet that the glue is worth standardizing.
@@ -135,11 +135,8 @@ Now that you have the narrative spine, here's where each supporting doc fits:
 |---|---|
 | [`narrative.md`](narrative.md) | **You are here.** The product story; the spine everything else hangs on. |
 | [`../VISION.md`](../VISION.md) | The strategic principles — why this shape, what we refuse to be |
-| [`modules.md`](modules.md) | The architecture — DDD bounded contexts, lens-worker abstraction, phase queue |
-| [`extraction-plan.md`](extraction-plan.md) | The crate-shaped view of the same work — which lego blocks come out, in what order |
-| [`feature-matrix.md`](feature-matrix.md) | The capability scorecard — what's shipped, what's gapped, what's deliberately not in scope |
+| [`architecture.md`](architecture.md) | The single technical reference — system context, runtime topology, crate map, data flow, event topology, invariants, trust boundaries, phase queue |
 | [`getting-started.md`](getting-started.md) | The tactical how-to — install, register a project, dispatch a task |
-| [`dispatch.md`](dispatch.md) | What actually happens when you click "Dispatch" — flow diagrams + file:line refs |
 | [`cli-reference.md`](cli-reference.md) | Every command + flag |
 | [`../README.md`](../README.md) | Repo-root overview + install instructions |
 | [`../CLAUDE.md`](../CLAUDE.md) | Internal priming for Claude Code sessions working on sipag itself |

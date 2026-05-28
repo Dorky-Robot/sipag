@@ -4,7 +4,7 @@
 //! client" — the same kind of client the browser tile is, with the
 //! same auth, the same wire protocol, the same lifecycle — just
 //! without a human rendering pixels. See `protocol.rs` for the JSON
-//! message contract; `docs/modules.md` §3 (Experimentation) for how
+//! message contract; `docs/architecture.md` §3 (Experimentation) for how
 //! this attach is consumed by the gemma4 bridge lens-worker.
 //!
 //! ## Architecture
@@ -624,7 +624,7 @@ impl Drop for KatulongAttach {
 /// Not configurable yet — bounded memory is the design choice
 /// (aligns with katulong's per-client backpressure cap; consumers can
 /// always fetch older context from the corpus via `corpus.search` per
-/// `docs/modules.md` §3 — the in-attach buffer doesn't need to hold
+/// `docs/architecture.md` §3 — the in-attach buffer doesn't need to hold
 /// everything).
 const BUFFER_SOFT_CAP: usize = 1_048_576; // 1 MiB
 
