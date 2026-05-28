@@ -5,7 +5,7 @@
 //! This module implements the **kanban-shaped refinement pipeline**
 //! (`raw → grouped → refined → ticket`) that has been replaced by the
 //! **Experimentation context** (spike → observe → iterate) per the
-//! work-model reframe documented in `docs/modules.md` §3 and the project
+//! work-model reframe documented in `docs/architecture.md` §3 and the project
 //! memory `project-sipag-work-model-experimentation`. The thesis behind
 //! deprecation: with cheap AI spikes, the cheapest specification of work
 //! is to *try it and observe the result*, not to refine an upfront

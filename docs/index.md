@@ -48,9 +48,9 @@ actually run live in katulong. sipag tells katulong what to do next.
     <feature>` for turning raw ideas into actionable tickets via a
     background `claude` subprocess. That pipeline was retired in favor
     of a new **Experimentation** work model (spike → observe →
-    iterate) currently being designed. See
-    [`docs/modules.md`](https://github.com/Dorky-Robot/sipag/blob/main/docs/modules.md)
-    §3 for the new direction. The deprecated source is preserved in
+    derive). See
+    [`docs/architecture.md`](architecture.md) for the current shape.
+    The deprecated source is preserved in
     `sipag-core/src/{feature,refine}.rs` with deprecation banners.
 
 ---

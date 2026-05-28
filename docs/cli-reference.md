@@ -116,8 +116,8 @@ are left on disk (sipag does not auto-migrate or delete them) but are
 no longer reachable from the CLI — read them directly with your
 editor if you need to.
 
-See [`docs/modules.md`](https://github.com/Dorky-Robot/sipag/blob/main/docs/modules.md)
-§3 for the new direction. The deprecated source is preserved in
+See [`docs/architecture.md`](architecture.md) for the current shape.
+The deprecated source is preserved in
 `sipag-core/src/{feature,refine}.rs` with deprecation banners.
 
 ## sipag sub

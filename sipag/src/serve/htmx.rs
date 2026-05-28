@@ -683,7 +683,7 @@ async fn dispatch_task_handler(
     // Dispatch action: `sipag_dispatch::dispatch` via
     // `KatulongAttachClient`'s `wait_for` orchestration (TUI-ready
     // wait, paste echo, processing wait). The action logic lives in
-    // the `sipag-dispatch` workspace crate (modules.md §9 Phase 2
+    // the `sipag-dispatch` workspace crate (architecture.md Phase 2
     // #12); this site is the web-UI entry. The legacy keystroke-
     // driving `verify_and_heal_dispatch` nudge loop was deleted in
     // §9 Phase 2 #11 (closes sipag #528 by deletion — see also
@@ -947,7 +947,7 @@ async fn claude_respond_handler(
     }
     let url = sipag_core::katulong::claude_respond_url(host.base_url(), &uuid);
     // Direct reqwest POST (claude-respond doesn't have a method on
-    // `KatulongAsyncClient` because modules.md §9 #7 retires this
+    // `KatulongAsyncClient` because architecture.md retires this
     // endpoint entirely). What this rewrite adds: a body cap on BOTH
     // the success and error paths via `bytes_capped`. Previously the
     // error path's `resp.text()` was unbounded — sipag #527 leak.
@@ -1483,7 +1483,7 @@ mod dispatch_helpers_tests {
         // 0-4 numbering — preserve it.
         //
         // This test ALSO serves as the canary for the planned
-        // retirement: when modules.md §9 #11 lands and operators
+        // retirement: when architecture.md lands and operators
         // switch to a typed step discriminator, this whole mapping
         // can disappear. A regression in the table while it's still
         // load-bearing would silently shift every dispatch event.

@@ -16,7 +16,7 @@
 //! and for diagnostic reads. The dispatch path migrated to the
 //! long-lived WebSocket attach via the [`protocol`] + [`attach`]
 //! submodules (PRs #532-#535). For the current architecture see
-//! `docs/modules.md` §3 (Experimentation) and §4 (Topology).
+//! `docs/architecture.md` §3 (Experimentation) and §4 (Topology).
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -265,7 +265,7 @@ impl KatulongClient {
     /// Claude *doing work* — an idle Claude TUI waiting on input
     /// still has `agent.running = true`. For dispatch progress
     /// detection, the attach client's rolling-buffer pattern matching
-    /// is the right primitive (and Phase 2 #11 in `docs/modules.md`
+    /// is the right primitive (and Phase 2 #11 in `docs/architecture.md`
     /// §9 retires the recovery-loop fallback that ever needed this).
     pub fn session_status(&self, id: &str) -> Result<TmuxSessionStatus> {
         let url = status_url(&self.url, id);

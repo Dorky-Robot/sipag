@@ -6,7 +6,7 @@
 //! features into actionable tickets via a `claude` subprocess. Deprecated
 //! together with `feature` per the work-model reframe: Experimentation
 //! replaces the kanban refinement pipeline. See
-//! [`crate::feature`]'s top-of-file doc, `docs/modules.md` §3, and project
+//! [`crate::feature`]'s top-of-file doc, `docs/architecture.md` §3, and project
 //! memory `project-sipag-work-model-experimentation` for the rationale.
 //!
 //! Source preserved per `feedback-deprecate-with-rationale` memory. All

@@ -11,7 +11,7 @@ Two principles drive every architectural choice:
 - **Strict layer coupling.** `Claude → katulong → sipag`. Sipag never reaches past katulong to talk to Claude directly. The bridge between Claude's free-form output and sipag's structured world is **gemma4 on sipag's side**. See memory `feedback-strict-layer-coupling`.
 - **Empirical, not procedural.** Spike → observe → derive. Claude is the iterator; sipag observes and records. State machines were the wrong frame and were retired this session. See memory `project-sipag-work-model-experimentation`.
 
-For the product narrative, see [`docs/narrative.md`](docs/narrative.md). For current architecture, see [`docs/modules.md`](docs/modules.md). For capability-level state, see [`docs/feature-matrix.md`](docs/feature-matrix.md).
+For the product narrative, see [`docs/narrative.md`](docs/narrative.md). For architecture, runtime, event topology, and the phase queue, see [`docs/architecture.md`](docs/architecture.md).
 
 ## Project overview
 
@@ -76,7 +76,7 @@ tui/src/                       # Binary — interactive board (ratatui)
 └── ui/board.rs
 ```
 
-### Bounded contexts (DDD frame, per modules.md)
+### Bounded contexts (DDD frame)
 
 | Context | Side | What it owns |
 |---|---|---|
@@ -240,8 +240,7 @@ Each tool composes; any can be replaced. Sipag's only runtime dependency is a re
 
 - **Product narrative**: [`docs/narrative.md`](docs/narrative.md) — the customer-facing story; read this first if you're getting your bearings.
 - **Vision**: [`VISION.md`](VISION.md) — strategic principles behind the narrative; don't reframe operational changes into it.
-- **Architecture**: [`docs/modules.md`](docs/modules.md) — DDD bounded contexts, lens-worker abstraction, phase queue.
-- **Capability state**: [`docs/feature-matrix.md`](docs/feature-matrix.md) — per-capability ✅/🟡/🟧/🔴/⏳/🚫 with code locations.
+- **Architecture**: [`docs/architecture.md`](docs/architecture.md) — system context, runtime topology, crate map, data flow, **event topology** (sugo as universal mesh bus), key abstractions, invariants, trust boundaries, phase queue. The single technical reference.
 - **Memories** (accumulated context across sessions): live under `~/.claude/projects/<encoded-cwd>/memory/`. **Naming convention**: in-repo references use hyphens (`feedback-strict-layer-coupling`); on-disk filenames use underscores (`feedback_strict_layer_coupling.md`). Most load-bearing today:
   - `feedback-strict-layer-coupling` — sipag never reaches past katulong; gemma is the bridge
   - `feedback-fix-at-right-layer` — when sipag would need a workaround, extend the upstream tool instead

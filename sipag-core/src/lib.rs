@@ -15,7 +15,7 @@ pub mod config;
 /// idea → grouped → refined → ticket) — replaced by the Experimentation
 /// context (spike → observe → iterate). Source preserved as "we tried
 /// this" per memory `feedback-deprecate-with-rationale`. See
-/// `docs/modules.md` §3 and memory
+/// `docs/architecture.md` §3 and memory
 /// `project-sipag-work-model-experimentation` for rationale.
 ///
 /// The `#[deprecated]` attribute is intentionally omitted: no in-tree

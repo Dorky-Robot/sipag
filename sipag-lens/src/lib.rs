@@ -1,7 +1,7 @@
 //! Lens-worker primitive — runtime that turns a lens definition
 //! into structured observations + typed verb calls.
 //!
-//! Per `docs/modules.md` §3 (Phase 1 #3) and `docs/extraction-plan.md`
+//! Per `docs/architecture.md` §3 (Phase 1 #3) and `docs/architecture.md`
 //! §3: this is the abstraction every Steering entry becomes a
 //! configuration of, plus project-meta and ad-hoc workers. The
 //! bridge worker (gemma watching katulong events) is just the first
@@ -101,7 +101,7 @@ pub enum Profile {
 
 /// Resolves [`ModelChoice`] → concrete model name. Reads
 /// `~/.sipag/models.toml` if present; otherwise uses built-in
-/// defaults that match the dorky-robot stack (per modules.md
+/// defaults that match the dorky-robot stack (per architecture.md
 /// §10's tentative-defaults note).
 ///
 /// `models.toml` shape:
@@ -122,7 +122,7 @@ pub struct ModelResolver {
 
 impl ModelResolver {
     /// Build a resolver with the built-in defaults baked into
-    /// modules.md §10 (`Fast=gemma4:latest`, `Strong=gemma4:31b`,
+    /// architecture.md (`Fast=gemma4:latest`, `Strong=gemma4:31b`,
     /// `CodeAware=qwen2.5-coder:7b`). No file I/O.
     pub fn with_defaults() -> Self {
         let mut profile_map = HashMap::new();
@@ -225,7 +225,7 @@ pub struct Lens {
     pub name: String,
     /// Free-form text — the system prompt of the gemma invocation.
     /// THE load-bearing seam between Steering and Experimentation
-    /// (per modules.md §6). Editing this text changes the worker's
+    /// (per architecture.md Editing this text changes the worker's
     /// behavior.
     pub prompt_text: String,
     /// Origin. Determines lifecycle (Steering-entry lenses retire
@@ -275,7 +275,7 @@ pub enum LensSource {
 pub enum TriggerPolicy {
     /// Run periodically at this interval. Used for derivation-tier
     /// workers (strategic, meta-cognitive — see §3 trigger discussion
-    /// in modules.md).
+    /// in architecture.md).
     Schedule {
         #[serde(with = "duration_secs")]
         interval: Duration,
@@ -287,7 +287,7 @@ pub enum TriggerPolicy {
     /// lens-worker, which checks its own condition.
     Threshold,
     /// Worker decides for itself whether to re-run based on how
-    /// much new content it hasn't yet processed (modules.md §10
+    /// much new content it hasn't yet processed (architecture.md
     /// open question — formalize once telemetry is in).
     ModelDecide,
 }
@@ -321,7 +321,7 @@ mod duration_secs {
 /// What a lens-worker produced after one gemma invocation. The
 /// workhorse is `Observe` (free-form text, becomes a CorpusItem);
 /// the other three drive UI affordances in Steering. Per
-/// modules.md §3, "no per-classification recording verbs."
+/// architecture.md "no per-classification recording verbs."
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "verb", rename_all = "snake_case")]
 pub enum StructuralAction {
@@ -345,7 +345,7 @@ pub enum StructuralAction {
     AskHuman {
         question: String,
         /// `permission-style` / `progress-check` / `is-this-KR-still-alive`
-        /// (see modules.md §3 per-kind dedup windows).
+        /// (see architecture.md per-kind dedup windows).
         kind: String,
     },
     /// Lens suggests a new task. Caller can accept (create task)
@@ -1200,7 +1200,7 @@ mod tests {
 
     #[test]
     fn resolver_defaults_match_modules_md_tentative() {
-        // Per modules.md §10 open-question note, the tentative
+        // Per architecture.md open-question note, the tentative
         // defaults are: Fast=gemma4:latest, Strong=gemma4:31b,
         // CodeAware=qwen2.5-coder:7b. Pin these so a future tweak
         // forces a docs+code sync.

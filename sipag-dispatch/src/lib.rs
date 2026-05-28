@@ -1,5 +1,5 @@
 //! sipag-dispatch — the **act** sub-module of the Experimentation
-//! context (per `docs/extraction-plan.md` and `docs/modules.md` §9
+//! context (per `docs/architecture.md` and `docs/architecture.md` §9
 //! Phase 2 #12).
 //!
 //! Encapsulates the single dispatch action: take a katulong host
@@ -33,9 +33,9 @@
 //! - **Not the gate.** Pre-flight classification (gemma4 deciding
 //!   whether to dispatch) is a separate concern and retires
 //!   separately (the gate's load-bearing use case dissolved with the
-//!   per-dispatch session model). See `docs/modules.md` §9 #11.
+//!   per-dispatch session model). See `docs/architecture.md` §9 #11.
 //! - **Not the nudge loop.** Post-dispatch observation belongs to
-//!   the lens-worker abstraction (see `docs/modules.md` §9 #3). The
+//!   the lens-worker abstraction (see `docs/architecture.md` §9 #3). The
 //!   legacy keystroke-driving recovery loop (`verify_and_heal_dispatch`)
 //!   was deleted entirely with §9 #11 (closes sipag #528 by deletion
 //!   — see also memory `feedback-strict-layer-coupling`).

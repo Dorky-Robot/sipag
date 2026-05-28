@@ -323,7 +323,7 @@ fn infer_categorization(session_name: &str, sipag_dir: &std::path::Path) -> (Str
 /// wire type holds only `{id, name}`; this struct adds the `meta` fields
 /// we need to archive but the client crate drops. Acts as the informal
 /// sipag-side ACL between the wire shape and the observation domain.
-/// See `docs/modules.md` §6 — candidate for a named ACL when Phase 1 #3
+/// See `docs/architecture.md` §6 — candidate for a named ACL when Phase 1 #3
 /// introduces the `Outcome` type.
 #[derive(Debug, Deserialize)]
 struct KatulongSession {

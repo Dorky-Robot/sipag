@@ -1,7 +1,7 @@
 //! Local vector store for sipag — the storage substrate underneath
 //! lens-workers.
 //!
-//! Per `docs/modules.md` §3 (Phase 1 #3) and `docs/extraction-plan.md`
+//! Per `docs/architecture.md` §3 (Phase 1 #3) and `docs/architecture.md`
 //! §3: append-only forever, tagged + timestamped, embedded via
 //! `ollama-bridge-client` → bridge → `/api/embed`. One giant store;
 //! tags + timestamps + cosine-similarity search are the slicing.
@@ -36,7 +36,7 @@
 //!   the tool wrapper translates between the lens's view and
 //!   these calls.
 //! - **Compaction / pruning.** Append-only forever per the design.
-//!   Cross-corpus retrieval (sipag ↔ diwa) is open — see modules.md
+//!   Cross-corpus retrieval (sipag ↔ diwa) is open — see architecture.md
 //!   §10.
 
 use async_trait::async_trait;

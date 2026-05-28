@@ -1,4 +1,4 @@
-//! Lens-worker scheduler (Phase 1 #3 in `docs/modules.md`).
+//! Lens-worker scheduler (Phase 1 #3 in `docs/architecture.md`).
 //!
 //! Walks a registered set of [`Lens`]es and fires each one's
 //! [`LensWorker::run_with_tools`] when its [`TriggerPolicy`] says
@@ -16,7 +16,7 @@
 //!   counts, etc.) are the bridge-worker's territory; the scheduler
 //!   can't evaluate them without the corresponding subscriber.
 //! - [`TriggerPolicy::ModelDecide`] — **skipped with a warn**. Open
-//!   question in `docs/modules.md` §10 — formalize once telemetry is
+//!   question in `docs/architecture.md` §10 — formalize once telemetry is
 //!   in.
 //!
 //! ## Concurrency (v1)

@@ -90,7 +90,7 @@ fn help_lists_subcommands() {
     // accidentally re-added either should fail loudly here (without
     // these guards, the positive list alone wouldn't catch a re-add).
     // See sipag_core::{feature, refine} module doc-comments and
-    // docs/modules.md §3 for the deprecation rationale.
+    // docs/architecture.md §3 for the deprecation rationale.
     for deprecated in &["feature", "refine"] {
         assert!(
             !stdout.contains(deprecated),
@@ -194,7 +194,7 @@ fn up_with_no_roles() {
 // The `feature_*` and `refine_*` smoke tests (and their `setup_project`
 // helper) were removed 2026-05-17 with the rest of the deprecated
 // refinement wiring. See sipag_core::{feature, refine} module
-// doc-comments and docs/modules.md §3.
+// doc-comments and docs/architecture.md §3.
 
 // ── Unknown subcommand ──────────────────────────────────────────────────────
 
