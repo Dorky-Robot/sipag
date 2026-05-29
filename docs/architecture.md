@@ -169,6 +169,8 @@ lens scheduler tick (every 30s)
 
 **Sugo is the universal bus for all external mesh I/O.** This includes both typed coordination events (`incident@v1`, `dispatch.outcome@v1`) AND LLM jobs (`llm-chat@v1`, `llm-embed@v1`). Everything that crosses a process or machine boundary on the mesh goes through sugo. Multiple "event-bus-shaped" things exist today because of historical staging, not architectural intent — they collapse into sugo as the migration proceeds.
 
+> **Scope note.** Sugo's intended scope extends beyond the dorky_robot stack — it's also the unification layer for the humOS stack and related mesh tools (kapwa, manggagamot, tao). What this doc says about sugo's wire shape, profiles, and roadmap reflects **sipag's use of sugo**, not sugo's whole design. When sipag's needs would push design pressure onto sugo that only sipag cares about, defer to sugo's own README as authoritative.
+
 ### What we have today (transitional)
 
 Five surfaces. The end state is **one external bus (sugo)** plus one tightly-scoped local primitive (`tokio::broadcast` for the browser WS loop). Today:
