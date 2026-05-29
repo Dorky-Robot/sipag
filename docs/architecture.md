@@ -652,6 +652,105 @@ Hours later — the bridge worker has been firing against the new KRs. A pinned 
 
 After that — the loop is established. Targeted cards appear when something needs the user. The chat is there when the user wants to think. The corpus accumulates. KRs evolve through conversation. The user's time-per-day drops; the surface area covered doesn't.
 
+### First-run: the wizard that isn't a wizard
+
+**There is no separate wizard UI.** The chat is the chat. On day 1 it does a contextual welcome based on what sipag finds in the operator's environment; on day 30 it picks up where you left off. Same surface, different content.
+
+The principle: **detection before conversation.** Before the AI sends its first message, sipag has already checked:
+
+- `~/.katulong/remote.json` (is katulong wired?)
+- `~/.ollama-bridge/remote.json` (is the bridge wired?)
+- Observer poll state (are there live sessions to surface?)
+- Board state (empty = first run; populated = returning user)
+
+The AI never asks a question it could have answered from filesystem state. The first message is **conditional on what was found**.
+
+#### Branch A — everything wired, live sessions exist
+
+The common case for an operator who already has the dorky_robot stack running. Sipag detects existing sessions and offers to bootstrap the OKR structure from them.
+
+```
+AI: hey. caught you up on what i can see:
+
+    katulong: connected (3 sessions live)
+    ollama-bridge: connected
+    board: empty (this looks like first run)
+
+    your live sessions are:
+      • ralph-auth-rewrite — 4 hours in, looks like real work
+      • brian-flake-investigation — 2 hours, mostly debugging
+      • ralph-docs-typo — idle 45 min
+
+    a) i can look at what these sessions are about and propose
+       Objectives — your sipag board grows from what's already
+       happening
+    b) you tell me what you're working on and we shape the
+       Objectives together
+    c) just use sipag as a session dashboard for now — i'll
+       stay quiet unless you ping me
+
+    or just say what you want.
+```
+
+If the user picks (a), the AI fires the categorize loop on the existing sessions, proposes Objective candidates with KRs, and the strategy chat handles refinement from there. This is the genesis story's first two AHAs collapsed into a single conversational turn.
+
+#### Branch B — everything wired, no sessions
+
+```
+AI: hey. quick scan: katulong + ollama-bridge connected, board
+    empty, no sessions running. so you're either setting up for
+    later, or want to start something now. which?
+```
+
+#### Branch C — bridge missing
+
+The chat panel shows a placeholder; the AI is genuinely dormant. The operator-facing prompt is small and clear:
+
+```
+[chat panel placeholder:]
+AI dormant — wire ~/.ollama-bridge/remote.json to wake me.
+You can still use sipag without me for dispatch + the board.
+```
+
+#### Branch D — katulong missing, bridge wired
+
+The AI is awake but blind. It asks one question:
+
+```
+AI: hey. i'm awake (bridge is wired) but i can't see katulong.
+    without it i can't see sessions, dispatch tasks, or really
+    do most of what i'm here for. paste me the URL + bearer
+    (saves to ~/.katulong/remote.json) or tell me where to find it.
+```
+
+### Principles that fall out of the first-run shape
+
+A few design rules apply across all branches and onward into normal use:
+
+**1. No step flow.** There's no "step 3 of 7" anywhere. The AI's job in any state is one well-judged message that handles the operator's actual situation.
+
+**2. Detect, don't ask.** If sipag can know something from the filesystem or a quick HTTP probe, it knows it before saying anything. The wizard never asks "do you have katulong?" — it already checked.
+
+**3. Volunteer context only when there's a gap.** First-run = huge gap (AI catches you up). Returning user = small gap (AI just acknowledges presence). Returning after 3-week vacation = medium gap (AI does a brief "here's what happened" recap). The rule: speak in proportion to what the user couldn't already know.
+
+**4. Chunk when there's volume.** If the operator has 30 live sessions instead of 3, the AI groups into clusters rather than dumping 30 cards. "i see five rough clusters — want me to dig into any?" is better than 30 lines of session names.
+
+**5. Mesh-aware but single-primary by default.** `~/.katulong/remote.json` is the primary connection; `hosts.toml` adds richness for multi-host deployments. The AI surfaces "you've got katulong on N hosts" but doesn't make the operator pick during first run.
+
+**6. AI-is-real from minute one.** Because we assume the bridge is wired (per the [Scope note](#event-topology) — the bootstrap problem is the only deferred case), there is no templated phase. The first message the operator reads is gemma actually thinking. Honest product position.
+
+### Single-user as N=1 (preparing for team mode without building it)
+
+The team-vs-solo question is a fork in the architecture that, if deferred without preparation, becomes an expensive refactor later. The wizard's "are you solo or team?" branch makes the decision explicit — but for v1 the team arm is **graceful degradation**: "team mode is coming; for now sipag is single-user."
+
+Three small commitments now keep the door open without the team-mode work:
+
+- **KR / Objective ownership is a field** (defaults to "the operator"), not implicit.
+- **Chat threads have an owner** (defaults to "the operator"), not singleton.
+- **Notifications have a recipient** (defaults to "the operator"), not implicit.
+
+Each is a small data-shape change. Single-user becomes the N=1 case of multi-user. When team mode lands, these fields gain real values; nothing about the v1 surface changes for solo operators.
+
 ### Anti-sycophancy via coworker norms
 
 The biggest risk in the strategy-chat shape is that conversational LLMs default to agreement. Without intervention, the AI would tell the user whatever they seem to want to hear, which is the failure mode every operator-facing AI product eventually hits.
@@ -678,6 +777,11 @@ Pulled into the phase queue from this section:
 - Notification router (`sipag/src/serve/notify.rs`)
 - Presence primitive (`/presence` endpoint + state)
 - Strategy chat MVP (persistent thread + selection anchor + mutation diff cards)
+- First-run detection routine (startup check of remote configs + observer state + board state)
+- Conditional first-message generation (chat AI fed the situation summary; picks the right branch)
+- Categorize-into-Objectives as a chat-callable action (wires `categorize.rs` to the chat surface)
+- Many-session chunking heuristics for branch A
+- Single-user-as-N=1 data shapes (owner fields on KRs, Objectives, chat threads, notifications)
 - Structural-verb dispatch to UI (already on queue; covers targeted-card rendering)
 - Lens health metrics (already on queue, PR #571)
 
@@ -725,6 +829,11 @@ Tracking item, not architecture. Snapshots the current state of in-progress work
 | — | **Notification router** (`sipag/src/serve/notify.rs`) | urgency dimension + presence primitive |
 | — | **Presence primitive** (`/presence` endpoint + state) | none |
 | — | **Strategy chat MVP** (persistent thread + selection anchor + mutation diff cards) | shared preamble + structural-verb UI |
+| — | **First-run detection routine** (startup probe of remote configs + observer state + board state) | none |
+| — | **Conditional first-message** in the chat (situation summary fed to gemma; correct branch picked) | first-run detection + strategy chat MVP |
+| — | **Categorize-into-Objectives as a chat action** | strategy chat MVP |
+| — | **Many-session chunking** (cluster N sessions into ~5 groups for first-run branch A) | none |
+| — | **Single-user-as-N=1 data shapes** (owner fields on KRs / Objectives / threads / notifications) | none — preparation for team mode without building it |
 
 **Lens health metrics** (no §, no PR yet — scope sketch):
 
