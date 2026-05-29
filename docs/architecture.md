@@ -569,6 +569,39 @@ Tracking item, not architecture. Snapshots the current state of in-progress work
 | — | Delete `sipag-pubsub` after migration | mesh migration complete |
 | — | `katulong → sugo` mirror service | sugo Phase 2 |
 | — | Structural-verb dispatch to UI | none, but no consumer yet |
+| — | **Lens health metrics** | none — cheapest experimentation-gap plug |
+
+**Lens health metrics** (no §, no PR yet — scope sketch):
+
+The scheduler today tracks `fired` and `errors`. Add three counters per lens:
+
+```
+fires:                  total times the lens fired
+fires_with_action:      fires that produced at least one structural verb
+fires_with_no_action:   fires where gemma picked no_action_warranted
+verbs_produced:         total structural verbs emitted
+verbs_acted_on:         verbs the human acted on (needs UI affordance — couples
+                        with the structural-verb-dispatch follow-up)
+```
+
+Derived rates:
+
+```
+action_rate     = fires_with_action / fires
+no_action_rate  = fires_with_no_action / fires
+citation_rate   = verbs_acted_on / verbs_produced
+```
+
+Surface in a `/lens-health` page. Flag thresholds:
+
+| Signal | Likely meaning |
+|---|---|
+| `action_rate > 0.8` over 50+ fires | Lens is finding pattern in noise (sycophantic / too eager) |
+| `action_rate < 0.05` over 100+ fires | Lens is dead weight |
+| `no_action_rate < 0.1` over 50+ fires | Lens never says "nothing to note" — biased framing |
+| `citation_rate < 0.1` over 50+ verbs | Human ignores this lens — retire it |
+
+Why this plug, ahead of other experimentation-gap plugs: counters are free; the rates are interpretable without ML expertise; and the human-side feedback loop is currently invisible (operators have no way today to notice a lens is misbehaving). Doesn't fix confirmation bias, but it does surface the symptoms of confirmation bias so the operator can decide. See the §10 "lens governance / sprawl" question — this item is the operational primitive that question needs.
 
 ### Blocked / deferred
 
