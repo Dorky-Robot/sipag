@@ -751,6 +751,117 @@ Three small commitments now keep the door open without the team-mode work:
 
 Each is a small data-shape change. Single-user becomes the N=1 case of multi-user. When team mode lands, these fields gain real values; nothing about the v1 surface changes for solo operators.
 
+### The bad-day flow
+
+Trust in sipag is decided by what happens when an agent does something wrong. An operator will not run agents unattended unless they trust the recovery path. The bad-day flow is the most important UX surface in the product — more than the genesis, more than the chat, more than the OKR view. Get it wrong and nothing else matters.
+
+The bad day is not one thing. It's a spectrum, and each point on it has a different detection mechanism, a different urgency, and a different recovery affordance.
+
+#### The failure modes
+
+| Mode | What happens | Detection | Urgency |
+|---|---|---|---|
+| **Pre-destructive** | Agent requests permission for something destructive (`rm -rf /`, force-push to main, drop table) | Bridge worker on `permission-request` event; gemma classifies destructiveness | `Notify` if operator at desk; **`Page` if operator away** |
+| **Post-destructive** | Damage is done — wrong file deleted, force-pushed, etc. | Bridge worker on the event sequence that ended in destruction | `Page` always |
+| **Stuck / lost** | Agent flailing — same kinds of actions repeatedly, no progress | Pattern lens: 10+ permission requests with same prefix; agent-done events not following | `Notify` |
+| **Cross-session conflict** | Two agents stepping on each other (writing same files, contradictory decisions) | Periodic "conflict lens" correlates across session windows | `Notify` |
+| **Off-track drift** | Agent making progress but in the wrong direction; KR lens producing "no relevant activity" while session is busy | Lens-worker action-rate going to zero against active session | `NextOpen` |
+| **Failure cascade** | Test broke → build broke → agent panicked → tried 5 wrong fixes | Bridge worker on sequence of error events followed by destructive recovery attempts | `Page` if cascade is destructive; `Notify` if just spinning |
+
+The two `Page`-level cases (post-destructive, destructive cascade) are the building-on-fire moments. The others are coworker-pulls-you-aside cases. The product policy in all of them is the same:
+
+#### What sipag does in a Page event
+
+The modal/notification carries more than "an agent did a thing." It carries the **context sipag has that the operator doesn't have in the moment**:
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│ 🔥  Destructive action — ralph-auth-rewrite                     │
+│                                                                 │
+│  what happened                                                  │
+│    rm -rf /Users/felix/Projects/auth-worktree                  │
+│    14 seconds ago                                              │
+│                                                                 │
+│  what sipag knows                                              │
+│    • worktree was for branch feat/auth-jwt                     │
+│    • last commit pushed to origin: abc123 (6 min ago)          │
+│    • 3 uncommitted files at deletion                           │
+│    • 2 of those 3 were already committed and pushed            │
+│                                                                 │
+│  what can be recovered                                          │
+│    ✓  branch state (re-create from origin/feat/auth-jwt)       │
+│    ✗  one uncommitted file (NEW src/jwt_test.rs)               │
+│        — likely lost unless session scrollback has it           │
+│                                                                 │
+│  actions                                                        │
+│    [ recreate worktree    ]  ← runs `git worktree add` locally │
+│    [ view session scroll  ]  ← jump to katulong WS attach     │
+│    [ kill ralph's session ]  ← stop further work; needs your   │
+│                                 explicit click                  │
+│    [ acknowledge          ]  ← I'll handle it manually        │
+│                                                                 │
+│  saved to corpus as fire_record id=4129                        │
+└────────────────────────────────────────────────────────────────┘
+```
+
+The actions are operator-authorized — the click is the consent. None of them happen without it.
+
+#### What sipag explicitly does NOT do
+
+This is the trust foundation. Sipag's restraint is what makes it safe to run agents unattended:
+
+- **Never auto-kills a session.** The agent might be doing real work the operator can see in scrollback. Killing is always an operator click.
+- **Never auto-reverts a commit.** Might destroy intentional work. Revert is always an operator click.
+- **Never auto-pauses an agent.** Might break a critical flow. Pause is always an operator click.
+- **Never sends input that wasn't operator-typed.** Per `[[feedback-strict-layer-coupling]]` — Claude generates the agent's input, sipag never does. The Page modal's "kill session" action calls katulong's session-kill API; it does not type into the PTY.
+- **Never escalates urgency without operator consent.** "I keep noticing X" doesn't become a Page event just because sipag thinks it's important. Page is reserved for the failure modes the operator pre-agreed are page-worthy (destructive + irreversible).
+
+Sipag's superpower in a bad day is **context** — it knows the session history, the git state, the corpus, what was running, what was decided. Its restraint is to never act on that context without the operator's word.
+
+#### Detection: who flags what
+
+The bridge worker is the spine of detection. It's already watching `claude/<uuid>` events; it adds destructiveness classification to the existing pipeline:
+
+- On every `permission-request` event, gemma (in the bridge worker fire) classifies the requested action: `safe`, `risky`, `destructive`. The classification result is a tag on the resulting `ask_human` verb. Urgency on the verb gets bumped to `Page` if `destructive` AND `Presence::Away`.
+- On every `tool-use` event that completed a destructive command, the bridge worker records the action with its before/after context (git state, file existence, etc.) for use in the Page modal.
+- A **cross-session conflict lens** runs periodically (probably hourly) — fires gemma against multiple session windows looking for write-overlap and contradictory decisions. Surfaces as `Notify`.
+
+#### Recovery actions sipag owns
+
+The Page modal's action buttons aren't free-form prompts; they map to a small set of operator-authorized operations sipag can perform:
+
+| Action | What sipag does | Trust note |
+|---|---|---|
+| Recreate worktree | Local `git worktree add <path> <branch>` against the source repo | Operator-authorized; restores state, doesn't modify history |
+| View session scrollback | Opens katulong WS attach in a new tab, scrolled to the destructive event | Read-only; just routes the operator |
+| Kill session | Calls katulong's `session-kill` API for the session id | Operator-authorized; uses katulong's API surface, not direct PTY manipulation |
+| Acknowledge | Marks the event in the corpus as "operator handled"; nothing else | No-op from sipag's side; defaults to manual recovery |
+| Revert commit | Local `git revert <sha>` against the source repo (if branch is HEAD) | Operator-authorized; only available when revert is mechanical |
+
+Notably absent: any action that modifies the agent's behavior mid-flight. Sipag pauses, kills, or watches — it does not steer.
+
+#### Post-mortem to corpus
+
+Every Page event writes a `fire_record` to the corpus tagged `kind=bad_day, severity=page, session=<id>`. This includes:
+
+- The triggering event sequence
+- What sipag knew at modal-render time
+- Which recovery action the operator chose (if any)
+- Whether recovery succeeded (operator can mark this; defaults to "unknown")
+
+Future bridge worker fires that see this corpus item via `corpus.search` get to factor it in: "the last time ralph's session did X, the operator killed it." Becomes context, not just history.
+
+#### The off-fire policy when operator is away
+
+`Page` events always interrupt regardless of presence. The interrupt path:
+
+1. Browser modal if sipag is currently focused (`Presence::AtDesk`)
+2. OS notification if sipag tab is open but not focused (`Presence::Recent`)
+3. Email + (if configured) phone push if operator hasn't been seen in 30+ min (`Presence::Away`/`Offline`)
+4. **Default-deny timeout for pre-destructive cases**: if a destructive permission request is pending for > 30s with no operator response and the operator is `Away`, sipag denies on their behalf. The agent can ask again; the operator can reverse the policy with a setting.
+
+The default-deny is the one place where sipag does take an action without explicit consent. It's the conservative choice — preventing damage is reversible (agent retries); allowing damage isn't (operator gets a destroyed worktree). Operators who want a different default can flip it in settings.
+
 ### Anti-sycophancy via coworker norms
 
 The biggest risk in the strategy-chat shape is that conversational LLMs default to agreement. Without intervention, the AI would tell the user whatever they seem to want to hear, which is the failure mode every operator-facing AI product eventually hits.
@@ -782,6 +893,11 @@ Pulled into the phase queue from this section:
 - Categorize-into-Objectives as a chat-callable action (wires `categorize.rs` to the chat surface)
 - Many-session chunking heuristics for branch A
 - Single-user-as-N=1 data shapes (owner fields on KRs, Objectives, chat threads, notifications)
+- Destructiveness classification on `permission-request` events (bridge worker extension)
+- Cross-session conflict lens
+- Bad-day Page modal UI + the operator-authorized recovery action set
+- `fire_record` corpus item kind (for post-mortem write-back)
+- Default-deny-on-Away policy for destructive permission requests
 - Structural-verb dispatch to UI (already on queue; covers targeted-card rendering)
 - Lens health metrics (already on queue, PR #571)
 
@@ -834,6 +950,11 @@ Tracking item, not architecture. Snapshots the current state of in-progress work
 | — | **Categorize-into-Objectives as a chat action** | strategy chat MVP |
 | — | **Many-session chunking** (cluster N sessions into ~5 groups for first-run branch A) | none |
 | — | **Single-user-as-N=1 data shapes** (owner fields on KRs / Objectives / threads / notifications) | none — preparation for team mode without building it |
+| — | **Bad-day Page modal** (UI surface + operator-authorized recovery action set) | urgency dimension + notification router |
+| — | **Destructiveness classification** on `permission-request` events (bridge worker extension) | structural-verb dispatch to UI |
+| — | **Cross-session conflict lens** | lens scheduler (shipped) |
+| — | **`fire_record` corpus item kind** (post-mortem write-back from Page events) | corpus (shipped) |
+| — | **Default-deny-on-Away policy** for destructive permission requests | destructiveness classification + presence primitive |
 
 **Lens health metrics** (no §, no PR yet — scope sketch):
 
