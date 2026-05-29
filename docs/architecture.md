@@ -753,9 +753,37 @@ Each is a small data-shape change. Single-user becomes the N=1 case of multi-use
 
 ### The bad-day flow
 
-Trust in sipag is decided by what happens when an agent does something wrong. An operator will not run agents unattended unless they trust the recovery path. The bad-day flow is the most important UX surface in the product — more than the genesis, more than the chat, more than the OKR view. Get it wrong and nothing else matters.
+Trust in sipag is decided by what happens when an agent does something wrong. An operator will not run agents unattended unless they trust the recovery path. Get it wrong and nothing else matters.
 
-The bad day is not one thing. It's a spectrum, and each point on it has a different detection mechanism, a different urgency, and a different recovery affordance.
+**Sipag's bad-day flow is the *last* line of defense, not the first.** Prevention happens upstream at layers sipag does not own. Sipag's job in the bad day is what happens after those upstream layers were either insufficient or the operator explicitly chose to skip them (e.g., `claude --dangerously-skip-permissions` on a role).
+
+#### The defense hierarchy
+
+Per `[[feedback-fix-at-right-layer]]`: when a downstream tool already provides a guard, sipag should not reimplement it. Safety defenses for agent work live in seven layers, only three of which are sipag's:
+
+| Layer | Owner | What it does |
+|---|---|---|
+| 1. Claude's judgment | Anthropic (the model) | Decides what to do; internal caution about destructive operations |
+| 2. Claude Code's permission system | Anthropic (the agent) | Asks operator before bash, file writes, etc. — **the actual gate** |
+| 3. Per-role permission policy | Operator (via role TOML) | `claude` vs `claude --dangerously-skip-permissions`; operator's choice per role |
+| **4. Dispatch prompt template** | **Sipag** (`build_dispatch_prompt`) | Careful-behavior meta-instruction prepended at dispatch time |
+| **5. Strategy lens proposal bias** | **Sipag** (strategy lens prompt) | Anti-destructiveness norm in the coworker preamble; KR proposals surface destructive operations in their text |
+| **6. Bridge worker observation** | **Sipag** | Watches; classifies destructiveness; surfaces via urgency-routed cards |
+| 7. Page modal + recovery | Sipag | This section — what happens when the upstream layers were insufficient |
+
+The implication for what sipag should not build:
+
+- **Sipag does not reimplement Claude Code's permission system.** That gate exists upstream (layer 2). Sipag duplicating it would be a second permission UI fighting Claude's, a latency hit on every command, and layer confusion about who's the source of truth.
+- **Sipag does not auto-deny dangerous Claude actions in flight.** Layer 2 (Claude Code) is the gate. Sipag observes (layer 6) and recovers (layer 7); it does not intervene on the wire between Claude and the PTY.
+- **Sipag does not silently restrict what the operator can do.** If the operator chose `--dangerously-skip-permissions` for a role, that's the operator's choice. Sipag may warn at dispatch time but does not refuse.
+
+What sipag does provide at its three layers:
+
+- **Layer 4 (dispatch prompt)**: `build_dispatch_prompt` includes careful-behavior framing. Not "don't do dangerous things" (Claude has its own judgment) but "be conservative; prefer reversible changes; ask permission with explicit framing of what would be lost."
+- **Layer 5 (strategy lens bias)**: the shared coworker preamble includes anti-destructiveness norms. When the strategy lens proposes KRs, it prefers reversible-shaped ones. When a destructive operation is genuinely necessary, the KR text surfaces it explicitly — not buried in the falsifier, named in the proposal itself.
+- **Layer 6 (bridge worker classification)**: gemma in bridge-worker mode classifies the destructiveness of observed actions; the resulting `ask_human` / Page urgency is conditioned on that classification + operator presence.
+
+The bad-day section below covers layer 7. The rest of this section assumes layers 1–6 either failed, were skipped, or didn't catch the case.
 
 #### The failure modes
 
@@ -898,6 +926,9 @@ Pulled into the phase queue from this section:
 - Bad-day Page modal UI + the operator-authorized recovery action set
 - `fire_record` corpus item kind (for post-mortem write-back)
 - Default-deny-on-Away policy for destructive permission requests
+- Anti-destructiveness norm in the shared coworker preamble (layer 5 prevention)
+- Careful-behavior preamble in `build_dispatch_prompt` (layer 4 prevention)
+- KR proposals must surface destructive operations in the text (schema convention for `propose_kr`)
 - Structural-verb dispatch to UI (already on queue; covers targeted-card rendering)
 - Lens health metrics (already on queue, PR #571)
 
@@ -955,6 +986,9 @@ Tracking item, not architecture. Snapshots the current state of in-progress work
 | — | **Cross-session conflict lens** | lens scheduler (shipped) |
 | — | **`fire_record` corpus item kind** (post-mortem write-back from Page events) | corpus (shipped) |
 | — | **Default-deny-on-Away policy** for destructive permission requests | destructiveness classification + presence primitive |
+| — | **Anti-destructiveness norm in coworker preamble** (layer 5 — strategy lens biases away from destructive-shaped KRs) | shared coworker preamble |
+| — | **Careful-behavior preamble in `build_dispatch_prompt`** (layer 4 — meta-instruction prepended at dispatch time) | none |
+| — | **KR proposal schema: surface destructive operations in the text** (layer 5 — `propose_kr` mutation must name destructive scope in KR body, not hide in falsifier) | strategy chat MVP |
 
 **Lens health metrics** (no §, no PR yet — scope sketch):
 
