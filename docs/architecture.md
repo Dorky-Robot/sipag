@@ -15,6 +15,7 @@
 - [State model](#state-model) — what lives on disk
 - [Invariants](#invariants) — the rules that must hold
 - [Trust boundaries](#trust-boundaries) — auth model and authorization scope
+- [Product experience](#product-experience) — coworker model, two-channel UI, single-AI-many-hats, the chat companion, genesis
 - [Phase queue](#phase-queue) — what's shipped, what's open, what's blocked
 
 ---
@@ -533,6 +534,155 @@ These are the rules that must hold across all changes. Violating them is a bug, 
 
 ---
 
+## Product experience
+
+> Design direction, not all shipped yet. This section captures the experience model the technical surfaces above are being built toward. Where items below aren't yet built, the phase queue tracks the work.
+
+### The mental model: an AI coworker
+
+The AI in sipag is modeled as **a tireless but courteous coworker**. Not "an assistant" (too servile, too eager to please). Not "an agent" (too anthropomorphized, too autonomous). A coworker who happens to be available 24/7, can read every observation, never gets tired, and is courteous enough not to drown you in everything they noticed.
+
+This frame drives concrete design constraints across every surface:
+
+| Coworker would | Sipag's AI must |
+|---|---|
+| Walk over when something's on fire | Surface destructive-action signals via blocking modal / OS notification |
+| Slack DM for permission asks | Notification badge + card on the relevant KR |
+| Sticky-note on monitor for non-urgent | Pinned card in the KR sidebar |
+| Mention things in 1:1 / standup | Surface in chat on next open / morning catch-up summary |
+| Keep observations to themselves if they don't matter | Write to corpus only; no notification |
+| Not message you at 3am unless building's on fire | Respect presence; queue non-urgent until you're back |
+| Not repeat themselves | Dedup against per-channel history, not just corpus |
+| Not gush or agree reflexively | System-prompt-level anti-sycophancy norms |
+| Acknowledge what they don't know | Bounded to what's in the corpus + OKR state |
+| Say "noted" when corrected and move on | Corrections write counter-observations; no apology theater |
+
+The "tireless" part is the AI's superpower: it can read every observation across every session in real-time without getting tired. The "courteous" part is the discipline that keeps that superpower from becoming the thing it warns against. A real human coworker is courteous-but-overloaded — they miss things because they're human. The AI coworker is courteous-AND-tireless — it can be quiet because it actually noticed everything and decided most of it didn't matter. That combination is the value.
+
+### Two-channel split: targeted vs conversational
+
+The AI talks to the human through two channels with different jobs:
+
+| Channel | Job | Who initiates | Examples |
+|---|---|---|---|
+| **Targeted UI cards** | "Look at this specific thing right now" | AI → human (interruption-class) | `ask_human` permission requests, `suggest_stance` change, `propose_task`, blocking modals on destructive actions |
+| **Conversational chat** | "Let's think through this together" | Human → AI (mostly) | Strategy work, OKR refinement, ambient questions, exploratory thinking |
+
+The two channels don't compete because they answer different questions. The targeted channel is "the AI tells you something pointed." The conversational channel is "you and the AI think together."
+
+**The chat never speaks first** (except for explicit morning catch-up summaries when you open it). Proactive AI-to-human signals always go through targeted cards, not the chat. The chat is sacred conversational space; if the AI has something unsolicited to say, it goes on the agenda for next time the chat is opened, not as a notification.
+
+### Single AI, different hats
+
+There is one AI in sipag. The bridge worker, the lens scheduler, the categorize loop, the strategy chat — these are not separate AIs. They are the same AI wearing different hats for different focuses.
+
+The unified identity is enforced at three layers:
+
+1. **Shared coworker preamble.** Every gemma invocation across every subsystem starts with the same system-prompt preamble (the coworker contract). Tone, voice, and etiquette are constant.
+2. **Shared memory via corpus.** The bridge worker writes observations; the chat AI reads them via `corpus.search`. Both ground themselves in the same body of context.
+3. **First-person framing across hats.** When the chat AI references something a bridge-worker fire wrote earlier, it speaks in first person ("I noticed that ralph picked refresh tokens") — not "the bridge worker observed X." The technical fact that fires are separate gemma invocations is implementation detail that does not leak into the conversation.
+
+**Embrace the unified-self fiction.** The AI may be a thousand fires across the day, but to the human it is one continuous coworker. This is the more honest UX choice — the alternative (constant epistemic disclaimers about which fire produced which observation) would feel like a chatbot managing your trust, which is itself a trust-erosion pattern.
+
+The AI has no proper name; it just speaks. It does not introduce itself. It does not sign messages. It is sipag's voice — the way Copilot is GitHub's voice, not a separate character.
+
+### Urgency dimension on structural verbs
+
+Today's `StructuralAction` enum (`Observe`, `SuggestStance`, `AskHuman`, `ProposeTask`) needs a fifth field: **urgency**. Without it, every output goes to the same channel and the courteous-coworker policy can't be implemented.
+
+```
+Urgency::Page         → blocking modal + OS notification + email
+                       (destructive action, irreversible, building on fire)
+Urgency::Notify       → notification badge + pinned card
+                       (synchronous question, permission, time-sensitive)
+Urgency::CardPinned   → sticky note on the relevant KR; no notification
+                       (suggested stance change, propose_task)
+Urgency::NextOpen     → chat agenda item, surfaces when you open the chat
+                       (strategic question, pattern observation worth a 1:1)
+Urgency::CorpusOnly   → written to corpus, no surfacing
+                       (background context, ambient fact, no action needed)
+```
+
+The lens-worker prompt asks gemma to classify urgency as part of producing the verb. The notification router (a new component, `sipag/src/serve/notify.rs`) consumes verb-plus-urgency and decides the actual channel based on presence and dedup state.
+
+This is the single biggest structural change behind the entire coworker experience. Today everything logs at warn; tomorrow the right thing surfaces at the right time through the right channel.
+
+### Presence as a new primitive
+
+The notification router needs to know: is the human at their desk right now?
+
+```
+Presence::AtDesk      = sipag tab focused, activity within last 5 min
+Presence::Recent      = active within last 30 min but not currently focused
+Presence::Away        = no activity beyond 30 min
+Presence::Offline     = no presence signal for hours
+```
+
+Implemented as a small in-process signal: browser heartbeat to a `/presence` endpoint when the tab is focused; falls through to `Away` after idle. Routing decisions condition on this:
+
+- `Urgency::Notify` while `Presence::Away` → falls back to email / phone push (only if the operator opts in)
+- `Urgency::NextOpen` while `Presence::AtDesk` → still waits for explicit chat engagement; doesn't proactively chime in
+- `Urgency::Page` always interrupts regardless of presence (this is the building-on-fire case)
+
+Presence also conditions chat behavior: a courteous coworker who sees you've been heads-down for an hour doesn't lead with "btw I noticed 47 things" when you finally open the chat — they pick the most important and let you ask for the rest.
+
+### The conversational chat (clippy companion)
+
+A persistent right-side panel, always available, idle by default, speaks only when spoken to (or when explicitly opened, optionally with a brief "here's the agenda" if items wait).
+
+Structurally it is just another `LensWorker`-shaped invocation, but with three new properties:
+
+1. **One persistent thread.** `~/.sipag/strategy/thread.jsonl`. One thread per operator, continuous across days. The AI sees yesterday's conversation when you come back today.
+2. **Focus / selection anchor.** As the user clicks items in the OKR panel, the chat's context shifts: "now looking at: auth Objective." That focus is injected as context into the next message. The user thinks of it as "pointing at" something the AI now has vision into.
+3. **Inline mutation diff cards.** AI's replies can include `<mutation>...</mutation>` blocks (`refine_objective`, `propose_kr`, `propose_split`, etc.). UI renders each as an accept/edit/reject card inline. Accept applies the mutation through the same write paths as any operator-driven OKR edit.
+
+The chat also has full access to corpus tools (`corpus.search`, `corpus.expand`) so the AI can ground every reply in observed work, not vibes. When the user asks "what's been happening on auth?" the AI does a corpus.search filtered by that Objective and summarizes the result honestly.
+
+**The chat writes to the corpus by default.** Each human/AI exchange becomes a corpus item tagged `kind=strategy_chat, thread=...`. This is what makes the bridge worker's future fires able to ground in articulated human intent (e.g., the bridge worker sees "the human decided JWT yesterday" via corpus.search). A "private mode" toggle exists for sensitive runs that should stay out of the corpus.
+
+### Genesis: how the experience starts
+
+Most product onboarding fails because it asks the user to restructure existing work before getting value. Sipag's genesis is the opposite: **sipag joins what the user is already doing**.
+
+Day 0 — install + 2-line `hosts.toml` + start serve. Board is mostly empty BUT a `misc` project shows the user's existing live katulong sessions, each with auto-summary and an "open in katulong" link. **The user did nothing — the sessions just appeared.** This is the first AHA.
+
+Hour 1 — categorize gemma proposes: "this session looks like it's about auth. File under an 'auth' Objective?" User clicks [yes]. The Objective is born. The strategy chat opens on the right, says: "I created auth for you. Here are three candidate KRs based on what I've been seeing — or, if you want a different strategic frame entirely, tell me." User and AI converge on KRs via the chat. **Sipag asked a question the user should have asked themselves.** This is the second AHA.
+
+Hours later — the bridge worker has been firing against the new KRs. A pinned `ask_human` card appears on one KR: "the agents picked JWT — is that the intended direction?" User clicks the answer; the answer writes back to the corpus; next bridge fire is aware. **The system noticed something the user wouldn't have noticed unless they'd been watching the session.** This is the third AHA.
+
+After that — the loop is established. Targeted cards appear when something needs the user. The chat is there when the user wants to think. The corpus accumulates. KRs evolve through conversation. The user's time-per-day drops; the surface area covered doesn't.
+
+### Anti-sycophancy via coworker norms
+
+The biggest risk in the strategy-chat shape is that conversational LLMs default to agreement. Without intervention, the AI would tell the user whatever they seem to want to hear, which is the failure mode every operator-facing AI product eventually hits.
+
+The coworker frame solves this structurally. A coworker who agreed with everything you said would be useless to you — that's not "supportive collaboration," that's a yes-man, and you'd stop trusting them within a week.
+
+So the shared preamble says explicitly:
+
+> You're not here to make me feel good. You're here to help me think. If I'm wrong, say so. If I'm being lazy, say so. If a KR I just wrote sounds like ass-covering, name it. Be polite about it but be honest. Sycophancy is rude — it wastes my time by pretending to be helpful when it isn't.
+
+This is reinforced by structural mechanisms:
+
+- **Falsifier-as-gate on proposed mutations.** Every proposed KR mutation includes `falsified_by:`. The accept button is disabled until the user reads and either agrees to or edits the falsifier.
+- **Always-propose-alternatives.** Every batch of proposed KRs includes at least one that points at a different strategic frame, not just refinements of the current one.
+- **Lens health metrics** (already on queue): track action rate, no-action rate, and citation rate per lens/hat. If the strategy chat's recommendations are always accepted, that's a flag — either the AI is too cautious or the human is too compliant.
+- **Bounded knowledge.** The AI knows what's in the corpus and OKR state. It doesn't pretend to know more. "I don't have that in my context" is the correct answer to many questions, not a failure.
+
+### What this requires that doesn't exist yet
+
+Pulled into the phase queue from this section:
+
+- Shared coworker preamble (system-prompt-level convention; affects every gemma invocation)
+- Urgency dimension on `StructuralAction`
+- Notification router (`sipag/src/serve/notify.rs`)
+- Presence primitive (`/presence` endpoint + state)
+- Strategy chat MVP (persistent thread + selection anchor + mutation diff cards)
+- Structural-verb dispatch to UI (already on queue; covers targeted-card rendering)
+- Lens health metrics (already on queue, PR #571)
+
+---
+
 ## Phase queue
 
 Tracking item, not architecture. Snapshots the current state of in-progress work.
@@ -568,8 +718,13 @@ Tracking item, not architecture. Snapshots the current state of in-progress work
 | — | Migrate mesh-level events to sugo | sugo Phase 2 |
 | — | Delete `sipag-pubsub` after migration | mesh migration complete |
 | — | `katulong → sugo` mirror service | sugo Phase 2 |
-| — | Structural-verb dispatch to UI | none, but no consumer yet |
+| — | Structural-verb dispatch to UI (targeted-card rendering) | none, but no consumer yet |
 | — | **Lens health metrics** | none — cheapest experimentation-gap plug |
+| — | **Shared coworker preamble** | none — system-prompt-level convention |
+| — | **Urgency dimension on `StructuralAction`** | none |
+| — | **Notification router** (`sipag/src/serve/notify.rs`) | urgency dimension + presence primitive |
+| — | **Presence primitive** (`/presence` endpoint + state) | none |
+| — | **Strategy chat MVP** (persistent thread + selection anchor + mutation diff cards) | shared preamble + structural-verb UI |
 
 **Lens health metrics** (no §, no PR yet — scope sketch):
 
