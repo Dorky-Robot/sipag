@@ -1551,6 +1551,14 @@ pub fn inbox(snap: &BoardSnapshot) -> Markup {
 /// **Tiebreakers** are `(host, session)` for full determinism in the
 /// (extremely rare) case where two observations share the same `first_seen`
 /// timestamp.
+///
+/// **Producer-side invariant**: relies on observer-written timestamps
+/// being a fixed-width UTC format (`%Y-%m-%dT%H:%M:%SZ`) so lexicographic
+/// `String` compare equals chronological compare. Today this holds because
+/// `observers.rs` writes via `chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")`
+/// on every update. If a future writer ever introduces offset suffixes
+/// (`+02:00`) or fractional seconds, this sort goes wrong silently — parse
+/// into `DateTime<Utc>` first at that point.
 fn inbox_observations<'a>(snap: &'a BoardSnapshot) -> Vec<&'a sipag_core::board::Observation> {
     let mut out: Vec<&'a sipag_core::board::Observation> = snap
         .observations
@@ -2245,6 +2253,33 @@ mod tests {
         // gives a deterministic order — y comes after x at the same host.
         assert_eq!(first[0].1, "x");
         assert_eq!(first[1].1, "y");
+    }
+
+    #[test]
+    fn inbox_observations_tiebreaks_on_host_before_session() {
+        // At the same `first_seen`, the chain is host THEN session. This
+        // test pins that ordering specifically — without it, the
+        // `.then_with(|| a.host.cmp(...))` branch is technically untested
+        // (the other determinism test only exercises the session-tiebreak
+        // path because both observations share a host).
+        let snap = snap_with(vec![
+            obs(
+                "host-b",
+                "early-session",
+                "2026-05-29T10:00:00Z",
+                "2026-05-30T01:00:00Z",
+            ),
+            obs(
+                "host-a",
+                "late-session",
+                "2026-05-29T10:00:00Z",
+                "2026-05-30T02:00:00Z",
+            ),
+        ]);
+        let ordered = inbox_observations(&snap);
+        // host-a wins over host-b regardless of session string ordering.
+        assert_eq!(ordered[0].host, "host-a");
+        assert_eq!(ordered[1].host, "host-b");
     }
 
     #[test]
