@@ -1516,17 +1516,7 @@ pub fn quick_label_row(labels: &[String], labels_endpoint: &str) -> Markup {
 /// rendered inline under their KR; ended sessions live in
 /// `ended_section` at the bottom.
 pub fn inbox(snap: &BoardSnapshot) -> Markup {
-    // A session is "uncategorized" when neither the legacy project
-    // field nor the new kr_refs has any signal.
-    let active_misc: Vec<&sipag_core::board::Observation> = snap
-        .observations
-        .iter()
-        .filter(|o| {
-            o.status == "active"
-                && o.project == sipag_core::board::MISC_PROJECT
-                && o.kr_refs.is_empty()
-        })
-        .collect();
+    let active_misc = inbox_observations(snap);
     if active_misc.is_empty() {
         return html! {};
     }
@@ -1543,6 +1533,43 @@ pub fn inbox(snap: &BoardSnapshot) -> Markup {
             }
         }
     }
+}
+
+/// Active uncategorized observations in stable triage order.
+///
+/// **Triage semantics**: oldest at the top (sort by `first_seen` ascending),
+/// new items appear at the bottom, relative order never changes unless an
+/// item leaves the list. Matches inbox-style "clear from the top" mental
+/// model — not feed-style "newest first." Prevents the operator-visible
+/// shuffling that happened when render order was dir-iteration order on
+/// the underlying TOML files (observer poll updates `last_seen` on every
+/// cycle, shifting dir order between polls).
+///
+/// **Pure**: depends only on `snap` state, no IO. Easy to unit-test for
+/// ordering invariants — see the `tests` module below.
+///
+/// **Tiebreakers** are `(host, session)` for full determinism in the
+/// (extremely rare) case where two observations share the same `first_seen`
+/// timestamp.
+fn inbox_observations<'a>(snap: &'a BoardSnapshot) -> Vec<&'a sipag_core::board::Observation> {
+    let mut out: Vec<&'a sipag_core::board::Observation> = snap
+        .observations
+        .iter()
+        .filter(|o| {
+            // A session is "uncategorized" when neither the legacy
+            // project field nor the new kr_refs has any signal.
+            o.status == "active"
+                && o.project == sipag_core::board::MISC_PROJECT
+                && o.kr_refs.is_empty()
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.first_seen
+            .cmp(&b.first_seen)
+            .then_with(|| a.host.cmp(&b.host))
+            .then_with(|| a.session.cmp(&b.session))
+    });
+    out
 }
 
 /// Collapsed history of ended observations. Rendered at the bottom of
@@ -2105,3 +2132,162 @@ const INLINE_JS: &str = r#"
   });
 })();
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sipag_core::board::{Observation, MISC_PROJECT};
+
+    /// Convenience constructor: an active uncategorized observation with
+    /// the timestamps + identity fields callers care about and sensible
+    /// defaults for the rest. Use in inbox-ordering tests below.
+    fn obs(host: &str, session: &str, first_seen: &str, last_seen: &str) -> Observation {
+        Observation {
+            host: host.into(),
+            session: session.into(),
+            session_id: format!("{host}-{session}-id"),
+            first_seen: first_seen.into(),
+            last_seen: last_seen.into(),
+            status: "active".into(),
+            project: MISC_PROJECT.into(),
+            kr_id: 0,
+            labels: vec![],
+            summary: String::new(),
+            kr_refs: vec![],
+            claude_uuid: String::new(),
+            auto_title: String::new(),
+            summary_long: String::new(),
+            cwd: String::new(),
+        }
+    }
+
+    /// Minimum snapshot harness: takes a Vec<Observation>, fills the rest
+    /// with empty defaults. inbox_observations() only reads the
+    /// observations field; nothing else needs to be meaningful here.
+    fn snap_with(observations: Vec<Observation>) -> BoardSnapshot {
+        BoardSnapshot {
+            objectives: Vec::new(),
+            projects: Vec::new(),
+            hosts: Vec::new(),
+            sessions: BTreeMap::new(),
+            live: BTreeMap::new(),
+            observations,
+            proposals: HashMap::new(),
+            kr_choices: Vec::new(),
+            error: None,
+            boot_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn inbox_observations_orders_oldest_first() {
+        // Input deliberately not in chronological order so the test
+        // catches both "didn't sort at all" and "sorted by the wrong
+        // key" regressions.
+        let snap = snap_with(vec![
+            obs(
+                "host-a",
+                "session-c",
+                "2026-05-29T10:00:00Z",
+                "2026-05-30T01:00:00Z",
+            ),
+            obs(
+                "host-a",
+                "session-a",
+                "2026-05-28T10:00:00Z",
+                "2026-05-30T02:00:00Z",
+            ),
+            obs(
+                "host-a",
+                "session-b",
+                "2026-05-29T05:00:00Z",
+                "2026-05-30T03:00:00Z",
+            ),
+        ]);
+        let ordered = inbox_observations(&snap);
+        let sessions: Vec<&str> = ordered.iter().map(|o| o.session.as_str()).collect();
+        // session-a (oldest first_seen) → session-b → session-c (newest).
+        // Critically, NOT ordered by last_seen — that field changes on
+        // every observer poll and would cause the shuffling the original
+        // bug was about.
+        assert_eq!(sessions, vec!["session-a", "session-b", "session-c"]);
+    }
+
+    #[test]
+    fn inbox_observations_is_stable_across_renders() {
+        // Pin the determinism guarantee. Same input → byte-identical
+        // output across calls — this is what prevents htmx's 5s poll
+        // from shuffling items on screen.
+        let snap = snap_with(vec![
+            obs(
+                "host-x",
+                "y",
+                "2026-05-29T10:00:00Z",
+                "2026-05-30T01:00:00Z",
+            ),
+            obs(
+                "host-x",
+                "x",
+                "2026-05-29T10:00:00Z",
+                "2026-05-30T02:00:00Z",
+            ),
+        ]);
+        let first: Vec<(String, String)> = inbox_observations(&snap)
+            .iter()
+            .map(|o| (o.host.clone(), o.session.clone()))
+            .collect();
+        let second: Vec<(String, String)> = inbox_observations(&snap)
+            .iter()
+            .map(|o| (o.host.clone(), o.session.clone()))
+            .collect();
+        assert_eq!(first, second);
+        // Tiebreaker is (host, session) so identical first_seen still
+        // gives a deterministic order — y comes after x at the same host.
+        assert_eq!(first[0].1, "x");
+        assert_eq!(first[1].1, "y");
+    }
+
+    #[test]
+    fn inbox_observations_excludes_ended_categorized_and_kr_refed() {
+        use sipag_core::board::KrRef;
+        let mut categorized = obs(
+            "h",
+            "s-categorized",
+            "2026-05-01T00:00:00Z",
+            "2026-05-30T00:00:00Z",
+        );
+        categorized.project = "real-project".into();
+        let mut kr_refed = obs(
+            "h",
+            "s-kr-refed",
+            "2026-05-01T00:00:00Z",
+            "2026-05-30T00:00:00Z",
+        );
+        kr_refed.kr_refs.push(KrRef {
+            objective: "auth".into(),
+            kr: 1,
+        });
+        let mut ended = obs(
+            "h",
+            "s-ended",
+            "2026-05-01T00:00:00Z",
+            "2026-05-30T00:00:00Z",
+        );
+        ended.status = "ended".into();
+
+        let snap = snap_with(vec![
+            obs(
+                "h",
+                "s-inbox",
+                "2026-05-01T00:00:00Z",
+                "2026-05-30T00:00:00Z",
+            ),
+            categorized,
+            kr_refed,
+            ended,
+        ]);
+        let ordered = inbox_observations(&snap);
+        let sessions: Vec<&str> = ordered.iter().map(|o| o.session.as_str()).collect();
+        assert_eq!(sessions, vec!["s-inbox"]);
+    }
+}
