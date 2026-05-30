@@ -938,6 +938,55 @@ Pulled into the phase queue from this section:
 
 Tracking item, not architecture. Snapshots the current state of in-progress work.
 
+### Build philosophy: vision in the doc, MVP in the queue
+
+We hold two postures at once, deliberately:
+
+- **Jobs-style vision.** The product experience sections above describe what sipag is *for*, end-to-end. We keep this in the doc because the design thinking is load-bearing — every implementation choice flows from it. Cutting it would amputate the why.
+- **Musk-style build.** We build the smallest set that enables manual operation, then automate where manual proves we need it. "An 'in case' argument can be made for almost anything"; we don't ship 'in case.'
+
+The MVP section below names what we build first. The "Open" and other sections below are the vision-state queue — items we know we'll need eventually, kept here so design intent is one document. **Items move from vision-state to active build only when manual operation produces concrete signal that we need them.** Trim later if needed.
+
+### MVP — build this first
+
+The minimum set that lets a human steer agentic work via sipag manually. Everything else is automation of what manual proves works.
+
+| Item | Why it's MVP |
+|---|---|
+| Render `StructuralAction` cards on the KR sidebar | Without this, the bridge worker is invisible. Without visibility, sipag is a kanban tool. |
+| Simple "ask gemma" form on the page | Manual chat surface — no threading, no anchors, no mutation cards. Just a textbox + corpus access + reply. Smallest version of the strategy chat. |
+| Manual action buttons on observation cards | Lets the operator act on what the AI surfaces: promote-to-task, change-stance, mark-answered. |
+| Shared coworker preamble | Free; affects voice across every gemma call site (bridge worker, scheduler, dispatch gate, ask-gemma form). Text-only edit. |
+| Anti-destructiveness norm in the preamble | Free; layer 5 prevention. Text-only edit. |
+| Careful-behavior preamble in `build_dispatch_prompt` | Free; layer 4 prevention. Text-only edit. |
+| Owner field on KR / Objective / thread / notification types | Cheap insurance against team-mode refactor. Single-user-as-N=1. |
+
+That's the entire first set. Three real things to build (rendering, ask-gemma form, action buttons), three free text-only edits (preambles), one cheap data-shape commitment (owner fields). Probably 2-3 weeks of work end-to-end.
+
+### What we watch for during manual operation
+
+Items below get re-promoted to "build" only when the manual flow produces signal that we need them:
+
+| Item (currently in vision-state queue below) | Manual signal that would justify building it |
+|---|---|
+| Lens health metrics | Operator engagement with cards looks chaotic; no way to tell which lenses are sycophantic |
+| Urgency dimension on `StructuralAction` | Operator wants triage they can't do by eye; some cards genuinely need to interrupt vs not |
+| Notification router | Operator misses things while away; manual "check sipag every hour" doesn't scale |
+| Presence primitive | Notification router is built and needs to know if operator is at desk |
+| Strategy chat threading | Operator's Q&A pattern in the ask-gemma form keeps re-stating context; conversation memory would help |
+| Inline mutation diff cards | Operator's manual KR edits in response to ask-gemma replies are tedious; want one-click |
+| First-run detection routine | Multiple users hit the same setup confusion |
+| Categorize-into-Objectives chat action | Operator manually files misc observations more than twice for similar patterns |
+| Many-session chunking | Operator's actual deployment has >10 sessions and the cards get unwieldy |
+| Bad-day Page modal + recovery actions | Operator does manual `git worktree add` recovery more than twice for the same destructive pattern |
+| Destructiveness classification | Operator misses dangerous events that should have been escalated |
+| Cross-session conflict lens | Operator notices manually that two agents are contradicting each other; wants automated catch |
+| `fire_record` corpus kind | Lens health metrics or audit reconstruction needs the data |
+| Default-deny-on-Away policy | A real destructive-action-while-away incident happens and the operator wishes it had been pre-empted |
+| KR proposal schema convention (surface destructive ops in text) | Strategy chat threading is built; need the schema to make `propose_kr` mutations safe |
+
+The rule: don't build these until the signal is real. Each one's "in case" argument is plausible; that's not enough.
+
 ### Closed
 
 | # | Item | PR(s) |
